@@ -1,16 +1,6 @@
 # syntax=docker/dockerfile:1.7
 
-FROM node:20-bookworm-slim AS frontend-builder
-
-WORKDIR /app/frontend
-
-COPY frontend/package.json frontend/package-lock.json ./
-RUN npm ci
-
-COPY frontend/ ./
-RUN npm run build
-
-
+# Stage 1: Build Python runtime (placed first to leverage layer caching)
 FROM python:3.12-slim AS runtime
 
 ARG CAMOUFOX_VERSION=135.0.1
@@ -61,15 +51,9 @@ RUN pip install --upgrade pip \
     && [ "$installed" -eq 1 ] \
     && CAMOUFOX_VERSION="$CAMOUFOX_VERSION" CAMOUFOX_RELEASE="$CAMOUFOX_RELEASE" http_proxy="${HTTP_PROXY:-}" https_proxy="${HTTPS_PROXY:-}" no_proxy="${NO_PROXY:-}" python /tmp/install_camoufox.py
 
-COPY . .
-COPY --from=frontend-builder /app/static /app/static
-
-RUN chmod +x /app/docker/entrypoint.sh \
-    && mkdir -p /runtime /runtime/logs /runtime/smstome_used /app/_ext_targets
-
-# 安装系统依赖
-RUN apt-get update
-RUN apt-get install -y --no-install-recommends \
+# Install system dependencies
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
     curl git net-tools vim telnet \
     && rm -rf /var/lib/apt/lists/* \
     && curl -LO https://go.dev/dl/go1.24.0.linux-amd64.tar.gz \
@@ -77,6 +61,27 @@ RUN apt-get install -y --no-install-recommends \
     && rm go1.24.0.linux-amd64.tar.gz \
     && curl -LsSf https://astral.sh/uv/install.sh | sh
 
+COPY . .
+
+# Stage 2: Build frontend (placed after runtime to avoid rebuilding on code changes)
+FROM node:20-bookworm-slim AS frontend-builder
+
+WORKDIR /app/frontend
+
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci
+
+COPY frontend/ ./
+RUN npm run build
+
+
+# Stage 3: Final image
+FROM runtime
+
+COPY --from=frontend-builder /app/static /app/static
+
+RUN chmod +x /app/docker/entrypoint.sh \
+    && mkdir -p /runtime /runtime/logs /runtime/smstome_used /app/_ext_targets
 
 EXPOSE 8000 8889 8317 8011
 
