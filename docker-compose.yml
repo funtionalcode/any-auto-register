@@ -26,6 +26,7 @@ services:
       INSIDE_DOCKER: "1"
       EXTERNAL_APPS_HOST: ${EXTERNAL_APPS_HOST:-172.16.0.180}
       EXTERNAL_APPS_SCHEME: ${EXTERNAL_APPS_SCHEME:-http}
+      PLAYWRIGHT_BROWSERS_PATH: /ms-playwright
       XDG_CACHE_HOME: /runtime/cache
       UV_CACHE_DIR: /runtime/cache/uv
       PIP_CACHE_DIR: /runtime/cache/pip

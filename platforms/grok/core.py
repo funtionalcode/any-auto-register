@@ -9,6 +9,7 @@ Grok (x.ai) 自动注册
 5. 提取 sso / sso-rw cookie
 """
 import ctypes
+import os
 import random
 import string
 import time
@@ -48,6 +49,30 @@ class GrokRegister:
     def _has_auth_cookies(cookies: list) -> bool:
         return any(cookie.get("name") in {"sso", "sso-rw"} for cookie in cookies)
 
+    @staticmethod
+    def _is_missing_playwright_browser(exc: Exception) -> bool:
+        msg = str(exc)
+        return (
+            "Executable doesn't exist" in msg
+            or "Please run the following command to download new browsers" in msg
+        )
+
+    @staticmethod
+    def _build_missing_browser_error() -> RuntimeError:
+        install_cmd = "python -m playwright install chromium"
+        browser_path = os.getenv("PLAYWRIGHT_BROWSERS_PATH", "").strip()
+        extra_hint = ""
+        if os.getenv("INSIDE_DOCKER") == "1":
+            expected_path = browser_path or "/ms-playwright"
+            extra_hint = (
+                f" 当前为 Docker 环境，请确保 `PLAYWRIGHT_BROWSERS_PATH={expected_path}`，"
+                "然后重新构建容器。旧容器可先在容器内执行一次安装命令恢复。"
+            )
+        return RuntimeError(
+            f"Playwright Chromium 浏览器未安装，或浏览器缓存路径配置不正确。"
+            f" 请先执行: `{install_cmd}`。{extra_hint}"
+        )
+
     def _launch_browser(self):
         from patchright.sync_api import sync_playwright
 
@@ -60,9 +85,14 @@ class GrokRegister:
             launch_kwargs["proxy"] = {"server": self.proxy}
         try:
             browser = playwright.chromium.launch(**launch_kwargs)
-        except Exception:
+        except Exception as first_error:
             launch_kwargs.pop("channel", None)
-            browser = playwright.chromium.launch(**launch_kwargs)
+            try:
+                browser = playwright.chromium.launch(**launch_kwargs)
+            except Exception as second_error:
+                if self._is_missing_playwright_browser(first_error) or self._is_missing_playwright_browser(second_error):
+                    raise self._build_missing_browser_error() from second_error
+                raise
         return playwright, browser
 
     def _goto_email_signup(self, page) -> None:

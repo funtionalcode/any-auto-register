@@ -166,6 +166,7 @@ docker compose up -d --build
 首次构建会额外下载 Python 依赖、Playwright Chromium 和 Camoufox，耗时会明显更长。
 
 当前 Dockerfile 已改为通过固定直链安装 Camoufox，避免构建时访问 GitHub Releases API 触发匿名限流。
+当前 Compose 配置也会固定 `PLAYWRIGHT_BROWSERS_PATH=/ms-playwright`，避免运行时把浏览器路径指到挂载卷 `./data -> /runtime` 后出现 `Executable doesn't exist at /runtime/cache/ms-playwright/...`。
 
 ### 2. 访问
 
@@ -225,6 +226,27 @@ CAMOUFOX_VERSION=135.0.1 CAMOUFOX_RELEASE=beta.24 docker compose build app
 - 当前 Docker 镜像主要覆盖主应用和本地 Turnstile Solver。
 - `grok2api`、`CLIProxyAPI`、`Kiro Account Manager` 的自动安装/拉起逻辑仍偏向宿主机环境，尤其依赖 `conda`、Go、Windows 可执行文件时，不建议直接放进当前 Linux 容器里启动。
 - 如果你只需要 Web UI、账号管理、任务调度和本地 Solver，当前 Compose 配置可以直接使用。
+
+### 9. Playwright 浏览器恢复
+
+如果你已经在旧版本容器里遇到过下面这类错误：
+
+```text
+Executable doesn't exist at /runtime/cache/ms-playwright/...
+```
+
+先执行下面任一方案：
+
+```bash
+docker compose down
+docker compose up -d --build
+```
+
+或者先临时恢复当前容器：
+
+```bash
+docker exec -it any-auto-register python -m playwright install chromium
+```
 
 ***
 
