@@ -1180,8 +1180,8 @@ function IntegrationsPanel() {
           <Space direction="vertical" style={{ width: '100%' }}>
             <div>
               状态：
-              <Tag color={item.running ? 'green' : 'default'} style={{ marginLeft: 8 }}>
-                {item.running ? '运行中' : '未运行'}
+              <Tag color={item.running ? 'green' : item.starting || item.process_alive ? 'gold' : 'default'} style={{ marginLeft: 8 }}>
+                {item.running ? '运行中' : item.starting || item.process_alive ? '启动中' : '未运行'}
               </Tag>
               <Tag color={item.repo_exists ? 'blue' : 'orange'} style={{ marginLeft: 8 }}>
                 {item.repo_exists ? '已安装' : '未安装'}
@@ -1214,10 +1214,10 @@ function IntegrationsPanel() {
               ) : null}
               <Button
                 loading={busy === `start-${item.name}`}
-                disabled={!item.repo_exists}
+                disabled={!item.repo_exists || item.running || item.starting || item.process_alive}
                 onClick={() => doAction(`start-${item.name}`, apiFetch(`/integrations/services/${item.name}/start`, { method: 'POST' }))}
               >
-                启动
+                {item.running ? '已运行' : item.starting || item.process_alive ? '启动中' : '启动'}
               </Button>
               <Button
                 loading={busy === `stop-${item.name}`}

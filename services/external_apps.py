@@ -9,11 +9,13 @@ import subprocess
 import sys
 import threading
 import time
+import tempfile
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
 import requests
+import yaml
 
 _ROOT = Path(__file__).resolve().parents[2]
 _EXT_ROOT = _ROOT / "_ext_targets"
@@ -65,6 +67,7 @@ _SERVICE_META = {
 _PROCS: dict[str, subprocess.Popen] = {}
 _LOG_FILES: dict[str, Any] = {}
 _LAST_ERROR: dict[str, str] = {}
+_STARTING: set[str] = set()
 _LOCK = threading.Lock()
 _ANSI_ESCAPE_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 _ORPHAN_ANSI_CODE_RE = re.compile(r"\[(?:\d{1,3}(?:;\d{1,3})*)m")
@@ -169,6 +172,21 @@ def _open_log(name: str):
     return f
 
 
+def _atomic_write_text(path: Path, content: str, encoding: str = "utf-8") -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding=encoding) as f:
+            f.write(content)
+        os.replace(tmp_name, path)
+    except Exception:
+        try:
+            os.unlink(tmp_name)
+        except Exception:
+            pass
+        raise
+
+
 def _clone_repo_if_missing(name: str):
     repo = _repo_path(name)
     if repo.exists():
@@ -230,6 +248,26 @@ def _find_pid_by_port(port: int) -> int | None:
 def _proc_running(name: str) -> bool:
     proc = _PROCS.get(name)
     return bool(proc and proc.poll() is None)
+
+
+class _LastValueSafeLoader(yaml.SafeLoader):
+    pass
+
+
+def _construct_last_value_mapping(loader: yaml.SafeLoader, node: yaml.nodes.MappingNode, deep: bool = False):
+    loader.flatten_mapping(node)
+    mapping: dict[Any, Any] = {}
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        value = loader.construct_object(value_node, deep=deep)
+        mapping[key] = value
+    return mapping
+
+
+_LastValueSafeLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
+    _construct_last_value_mapping,
+)
 
 
 def _kiro_known_exe_paths() -> list[str]:
@@ -311,6 +349,8 @@ def _status_one(name: str) -> dict[str, Any]:
     proc = _PROCS.get(name)
     desktop_pid = _find_desktop_pid(name) if meta["kind"] == "desktop" else None
     running = _health_ok(name) if meta["kind"] == "web" else bool(desktop_pid or _proc_running(name))
+    process_alive = _proc_running(name) if meta["kind"] == "web" else bool(desktop_pid or _proc_running(name))
+    starting = name in _STARTING or (meta["kind"] == "web" and process_alive and not running)
     pid = proc.pid if proc and proc.poll() is None else desktop_pid
     if meta["kind"] == "web" and running:
         pid = _find_pid_by_port(int(meta.get("port") or 0)) or pid
@@ -329,6 +369,8 @@ def _status_one(name: str) -> dict[str, Any]:
             else ""
         ),
         "running": running,
+        "starting": starting,
+        "process_alive": process_alive,
         "pid": pid,
         "log_path": str(_log_path(name)),
         "last_error": _LAST_ERROR.get(name, ""),
@@ -561,102 +603,36 @@ def _ensure_grok2api_uv_env(repo: Path) -> str:
 
 def _ensure_cliproxyapi_runtime_config(repo: Path):
     config_path = repo / "config.local.yaml"
+    example_path = repo / "config.example.yaml"
     if not config_path.exists():
-        shutil.copyfile(repo / "config.example.yaml", config_path)
+        shutil.copyfile(example_path, config_path)
     secret = _get_setting("cliproxyapi_management_key", "cliproxyapi")
-    lines = config_path.read_text(encoding="utf-8").splitlines()
-    updated_lines: list[str] = []
-    replaced_secret = False
-    replaced_remote = False
-    index = 0
+    raw = config_path.read_text(encoding="utf-8")
+    try:
+        data = yaml.load(raw, Loader=_LastValueSafeLoader)
+    except yaml.YAMLError:
+        fallback_raw = example_path.read_text(encoding="utf-8") if example_path.exists() else ""
+        data = yaml.load(fallback_raw, Loader=_LastValueSafeLoader) if fallback_raw.strip() else {}
+    if not isinstance(data, dict):
+        data = {}
 
-    while index < len(lines):
-        line = lines[index]
-        stripped = line.lstrip()
-        indent = line[: len(line) - len(stripped)]
+    remote_management = data.get("remote-management")
+    if not isinstance(remote_management, dict):
+        remote_management = {}
+    remote_management["allow-remote"] = True
+    remote_management["secret-key"] = secret
+    data["remote-management"] = remote_management
 
-        # 兼容旧版本顶层 secret-key 配置
-        if not indent and stripped.startswith("secret-key:"):
-            updated_lines.append(f'secret-key: "{secret}"')
-            replaced_secret = True
-            index += 1
-            continue
+    # 兼容旧版本读取顶层 secret-key 的情况。
+    data["secret-key"] = secret
 
-        # 处理 remote-management section，只保留第一个顶层 section
-        if not indent and stripped.startswith("remote-management:"):
-            if replaced_remote:
-                index += 1
-                while index < len(lines):
-                    next_line = lines[index]
-                    next_stripped = next_line.lstrip()
-                    next_indent = next_line[: len(next_line) - len(next_stripped)]
-                    if next_stripped and not next_indent:
-                        break
-                    index += 1
-                continue
-
-            replaced_remote = True
-            updated_lines.append(line)
-            index += 1
-
-            allow_remote_written = False
-            secret_key_written = False
-            child_indent = "  "
-
-            while index < len(lines):
-                next_line = lines[index]
-                next_stripped = next_line.lstrip()
-                next_indent = next_line[: len(next_line) - len(next_stripped)]
-
-                if next_stripped and not next_indent:
-                    break
-
-                if next_stripped.startswith("allow-remote:"):
-                    child_indent = next_indent or child_indent
-                    if not allow_remote_written:
-                        updated_lines.append(f"{child_indent}allow-remote: true")
-                        allow_remote_written = True
-                    index += 1
-                    continue
-
-                if next_stripped.startswith("secret-key:"):
-                    child_indent = next_indent or child_indent
-                    if not secret_key_written:
-                        updated_lines.append(f'{child_indent}secret-key: "{secret}"')
-                        secret_key_written = True
-                        replaced_secret = True
-                    index += 1
-                    continue
-
-                if next_indent:
-                    child_indent = next_indent
-                updated_lines.append(next_line)
-                index += 1
-
-            if not allow_remote_written:
-                updated_lines.append(f"{child_indent}allow-remote: true")
-            if not secret_key_written:
-                updated_lines.append(f'{child_indent}secret-key: "{secret}"')
-                replaced_secret = True
-            continue
-
-        updated_lines.append(line)
-        index += 1
-
-    # 如果没有找到 remote-management section，添加它
-    if not replaced_remote:
-        if updated_lines and updated_lines[-1].strip():
-            updated_lines.append("")
-        updated_lines.append("remote-management:")
-        updated_lines.append("  allow-remote: true")
-        updated_lines.append(f'  secret-key: "{secret}"')
-        replaced_secret = True
-
-    # 兼容旧版本没有 remote-management 的配置
-    if not replaced_secret:
-        updated_lines.append(f'secret-key: "{secret}"')
-
-    config_path.write_text("\n".join(updated_lines) + "\n", encoding="utf-8")
+    rendered = yaml.safe_dump(
+        data,
+        allow_unicode=True,
+        sort_keys=False,
+        default_flow_style=False,
+    )
+    _atomic_write_text(config_path, rendered if rendered.endswith("\n") else rendered + "\n")
 
 
 def _ensure_grok2api_runtime_config(repo: Path):
@@ -705,7 +681,7 @@ def _ensure_grok2api_runtime_config(repo: Path):
     elif in_app and not app_key_written:
         updated_lines.append(f'app_key = "{app_key}"')
 
-    config_file.write_text("\n".join(updated_lines) + "\n", encoding="utf-8")
+    _atomic_write_text(config_file, "\n".join(updated_lines) + "\n")
 
 
 def _build_command(name: str) -> tuple[list[str], Path]:
@@ -779,8 +755,9 @@ def start(name: str) -> dict[str, Any]:
         repo = _repo_path(name)
         if not repo.exists():
             raise RuntimeError(f"{meta['label']} 未安装，请先在插件页点击“安装”")
-        if _status_one(name)["running"]:
+        if _status_one(name)["running"] or name in _STARTING or _proc_running(name):
             return _status_one(name)
+        _STARTING.add(name)
 
         log_file = _open_log(name)
         try:
@@ -797,26 +774,32 @@ def start(name: str) -> dict[str, Any]:
         except Exception as e:
             _LAST_ERROR[name] = str(e)
             _close_log(name)
+            _STARTING.discard(name)
             raise
 
-    if meta["kind"] == "web":
-        for _ in range(90):
-            time.sleep(1)
-            if _health_ok(name):
-                return _status_one(name)
-            proc = _PROCS.get(name)
-            if proc and proc.poll() is not None:
-                _LAST_ERROR[name] = f"启动失败，退出码={proc.returncode}"
-                return _status_one(name)
-        _LAST_ERROR[name] = "启动超时"
-    else:
-        time.sleep(2)
-    return _status_one(name)
+    try:
+        if meta["kind"] == "web":
+            for _ in range(90):
+                time.sleep(1)
+                if _health_ok(name):
+                    return _status_one(name)
+                proc = _PROCS.get(name)
+                if proc and proc.poll() is not None:
+                    _LAST_ERROR[name] = f"启动失败，退出码={proc.returncode}"
+                    return _status_one(name)
+            _LAST_ERROR[name] = "启动超时"
+        else:
+            time.sleep(2)
+        return _status_one(name)
+    finally:
+        with _LOCK:
+            _STARTING.discard(name)
 
 
 def stop(name: str) -> dict[str, Any]:
     with _LOCK:
         meta = _service_meta(name)
+        _STARTING.discard(name)
         proc = _PROCS.get(name)
         port_pid = None
         desktop_pid = None
