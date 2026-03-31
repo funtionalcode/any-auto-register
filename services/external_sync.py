@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from services.chatgpt_modules import is_chatgpt_module_enabled
 from services.chatgpt_sync import (
     _get_account_extra,
     persist_cpa_sync_result,
@@ -14,6 +15,7 @@ from services.chatgpt_sync import (
 def sync_account(account) -> list[dict[str, Any]]:
     """根据平台将账号同步到外部系统。"""
     from core.config_store import config_store
+    from services.cpa_target import resolve_cpa_api_url
 
     platform = getattr(account, "platform", "")
     results: list[dict[str, Any]] = []
@@ -35,14 +37,14 @@ def sync_account(account) -> list[dict[str, Any]]:
     if platform == "chatgpt":
         upload_account = _build_chatgpt_upload_account()
 
-        cpa_url = str(config_store.get("cpa_api_url", "") or "").strip()
-        if cpa_url:
+        cpa_url = resolve_cpa_api_url()
+        if cpa_url and is_chatgpt_module_enabled("cpa"):
             ok, msg = upload_chatgpt_account_to_cpa(account)
             persist_cpa_sync_result(account, ok, msg)
             results.append({"name": "CPA", "ok": ok, "msg": msg})
 
         codex_proxy_url = str(config_store.get("codex_proxy_url", "") or "").strip()
-        if codex_proxy_url:
+        if codex_proxy_url and is_chatgpt_module_enabled("codex_proxy"):
             upload_type = str(config_store.get("codex_proxy_upload_type", "at") or "at").strip().lower()
             extra = _get_account_extra(account)
 
@@ -65,7 +67,7 @@ def sync_account(account) -> list[dict[str, Any]]:
         # 关键逻辑：ChatGPT 现在支持同时回填 CPA 和 Sub2API，互不覆盖、分别上报结果。
         sub2api_url = str(config_store.get("sub2api_api_url", "") or "").strip()
         sub2api_key = str(config_store.get("sub2api_api_key", "") or "").strip()
-        if sub2api_url and sub2api_key:
+        if sub2api_url and sub2api_key and is_chatgpt_module_enabled("sub2api"):
             from platforms.chatgpt.sub2api_upload import upload_to_sub2api
 
             ok, msg = upload_to_sub2api(

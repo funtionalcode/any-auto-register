@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Card, Form, Input, Select, Button, message, Tabs, Space, Tag, Typography, Modal } from 'antd'
+import { Card, Form, Input, Select, Button, message, Tabs, Space, Tag, Typography, Modal, Segmented } from 'antd'
 import type { FormInstance } from 'antd'
 import {
   SaveOutlined,
@@ -53,6 +53,16 @@ const SELECT_FIELDS: Record<string, { label: string; value: string }[]> = {
   ],
 }
 
+const CHATGPT_MODULE_OPTIONS = [
+  { label: 'CPA / CLIProxyAPI', value: 'cpa' },
+  { label: 'Sub2API', value: 'sub2api' },
+  { label: 'CPA 自动维护', value: 'cpa_cleanup' },
+  { label: 'Team Manager', value: 'team_manager' },
+  { label: 'CodexProxy', value: 'codex_proxy' },
+  { label: 'SMSToMe 手机验证', value: 'smstome' },
+]
+const CHATGPT_MODULE_KEYS = CHATGPT_MODULE_OPTIONS.map((option) => option.value)
+
 const TAB_ITEMS = [
   {
     key: 'register',
@@ -93,14 +103,16 @@ const TAB_ITEMS = [
     icon: <ApiOutlined />,
     sections: [
       {
-        title: 'CPA 面板',
-        desc: '注册完成后自动上传到 CPA 管理平台',
+        key: 'cpa',
+        title: 'CPA / CLIProxyAPI 面板',
+        desc: '注册完成后自动上传到兼容 CPA Management API 的平台；API Key 留空时会自动复用 CLIProxyAPI 管理口令',
         fields: [
-          { key: 'cpa_api_url', label: 'API URL', placeholder: 'https://your-cpa.example.com' },
-          { key: 'cpa_api_key', label: 'API Key', secret: true },
+          { key: 'cpa_api_url', label: 'API URL', placeholder: 'https://your-cpa.example.com 或 http://127.0.0.1:8317' },
+          { key: 'cpa_api_key', label: 'API Key', secret: true, placeholder: '留空则自动复用 CLIProxyAPI 管理口令' },
         ],
       },
       {
+        key: 'sub2api',
         title: 'Sub2API 面板',
         desc: '注册完成后自动上传到 Sub2API 管理后台',
         fields: [
@@ -109,6 +121,7 @@ const TAB_ITEMS = [
         ],
       },
       {
+        key: 'cpa_cleanup',
         title: 'CPA 自动维护',
         desc: '定时删除 status=error 的凭证，剩余数量低于阈值时自动按现有配置补注册 ChatGPT',
         fields: [
@@ -120,6 +133,7 @@ const TAB_ITEMS = [
         ],
       },
       {
+        key: 'team_manager',
         title: 'Team Manager',
         desc: '上传到自建 Team Manager 系统',
         fields: [
@@ -128,6 +142,7 @@ const TAB_ITEMS = [
         ],
       },
       {
+        key: 'codex_proxy',
         title: 'CodexProxy',
         desc: '注册完成后自动上传到 CodexProxy 管理平台',
         fields: [
@@ -137,6 +152,7 @@ const TAB_ITEMS = [
         ],
       },
       {
+        key: 'smstome',
         title: 'SMSToMe 手机验证',
         desc: 'ChatGPT add_phone 阶段自动取号并轮询短信验证码',
         fields: [
@@ -221,6 +237,7 @@ interface FieldConfig {
 }
 
 interface SectionConfig {
+  key?: string
   title: string
   desc?: string
   fields: FieldConfig[]
@@ -282,6 +299,42 @@ function parseStoredDomainList(value: unknown): string[] {
       .split('\n')
       .flatMap((line) => line.split(','))
       .map((item) => item.trim()),
+  )
+}
+
+function normalizeSelectionList(input: unknown, allowedValues: string[]): string[] {
+  const items = Array.isArray(input) ? input : []
+  const allowed = new Set(allowedValues)
+  const seen = new Set<string>()
+  const values: string[] = []
+
+  for (const item of items) {
+    const value = String(item || '').trim()
+    if (!value || !allowed.has(value) || seen.has(value)) continue
+    seen.add(value)
+    values.push(value)
+  }
+
+  return values
+}
+
+function parseStoredSelectionList(value: unknown, allowedValues: string[]): string[] {
+  if (Array.isArray(value)) return normalizeSelectionList(value, allowedValues)
+  if (typeof value !== 'string') return []
+
+  const text = value.trim()
+  if (!text) return []
+
+  try {
+    const parsed = JSON.parse(text)
+    if (Array.isArray(parsed)) {
+      return normalizeSelectionList(parsed, allowedValues)
+    }
+  } catch {}
+
+  return normalizeSelectionList(
+    text.split(',').map((item) => item.trim()),
+    allowedValues,
   )
 }
 
@@ -431,38 +484,73 @@ const MAILBOX_SERVICES: MailboxServiceConfig[] = [
     ],
   },
 ]
+const MAILBOX_SERVICE_KEYS = MAILBOX_SERVICES.map((service) => service.key)
 
 function MailboxSettingsPanel({ form }: { form: FormInstance }) {
   const selectedServiceKey = Form.useWatch('mail_provider', form) || 'moemail'
-  const selectedService =
-    MAILBOX_SERVICES.find((service) => service.key === selectedServiceKey)
-    ?? MAILBOX_SERVICES.find((service) => service.key === 'moemail')
-
-  if (!selectedService) return null
+  const enabledServiceKeys = normalizeSelectionList(
+    Form.useWatch('mailbox_services_enabled', form) || [],
+    MAILBOX_SERVICES.map((service) => service.key),
+  )
+  const effectiveServiceKeys = enabledServiceKeys.length > 0 ? enabledServiceKeys : [selectedServiceKey]
+  const selectedServices = MAILBOX_SERVICES.filter((service) => effectiveServiceKeys.includes(service.key))
 
   return (
     <>
       <Card
-        title="默认邮箱服务"
-        extra={<span style={{ fontSize: 12, color: '#7a8ba3' }}>选择一个服务后，仅展示该服务配置；未展示的其他服务配置会保留</span>}
+        title="邮箱服务"
+        extra={<span style={{ fontSize: 12, color: '#7a8ba3' }}>默认邮箱服务仍为单选；下方多选决定哪些服务会在设置页和注册页中显示</span>}
         style={{ marginBottom: 16 }}
       >
         <ConfigField field={{ key: 'mail_provider', label: '邮箱服务', type: 'select' }} />
+        <Form.Item label="启用服务" name="mailbox_services_enabled" preserve extra="支持多选；注册页邮箱服务下拉只显示这些已启用项">
+          <Select mode="multiple" options={MAILBOX_SERVICES.map((service) => ({ label: service.label, value: service.key }))} />
+        </Form.Item>
       </Card>
 
+      {selectedServices.map((service) => (
+        <Card
+          key={service.key}
+          title={service.title}
+          extra={<span style={{ fontSize: 12, color: '#7a8ba3' }}>{service.desc}</span>}
+          style={{ marginBottom: 16 }}
+        >
+          {service.fields.length > 0 ? (
+            service.fields.map((field) => <ConfigField key={field.key} field={field} />)
+          ) : (
+            <Typography.Text type="secondary">当前服务无需额外配置。</Typography.Text>
+          )}
+        </Card>
+      ))}
+
+      {effectiveServiceKeys.includes('cfworker') ? <CFWorkerDomainPoolSection form={form} /> : null}
+    </>
+  )
+}
+
+function ChatGptSettingsPanel({ sections, form }: { sections: SectionConfig[]; form: FormInstance }) {
+  const enabledModuleKeys = normalizeSelectionList(
+    Form.useWatch('chatgpt_modules_enabled', form) || [],
+    CHATGPT_MODULE_OPTIONS.map((option) => option.value),
+  )
+  const effectiveModuleKeys = enabledModuleKeys.length > 0 ? enabledModuleKeys : CHATGPT_MODULE_OPTIONS.map((option) => option.value)
+  const visibleSections = sections.filter((section) => !section.key || effectiveModuleKeys.includes(section.key))
+
+  return (
+    <>
       <Card
-        title={selectedService.title}
-        extra={<span style={{ fontSize: 12, color: '#7a8ba3' }}>{selectedService.desc}</span>}
+        title="ChatGPT 模块"
+        extra={<span style={{ fontSize: 12, color: '#7a8ba3' }}>支持多选；仅已启用模块会在这里展示，涉及自动同步的模块也只会执行这些已启用项</span>}
         style={{ marginBottom: 16 }}
       >
-        {selectedService.fields.length > 0 ? (
-          selectedService.fields.map((field) => <ConfigField key={field.key} field={field} />)
-        ) : (
-          <Typography.Text type="secondary">当前服务无需额外配置。</Typography.Text>
-        )}
+        <Form.Item label="启用模块" name="chatgpt_modules_enabled" preserve>
+          <Select mode="multiple" options={CHATGPT_MODULE_OPTIONS} />
+        </Form.Item>
       </Card>
 
-      {selectedService.key === 'cfworker' ? <CFWorkerDomainPoolSection form={form} /> : null}
+      {visibleSections.map((section) => (
+        <ConfigSection key={section.key || section.title} section={section} />
+      ))}
     </>
   )
 }
@@ -650,9 +738,11 @@ function SolverStatus() {
 }
 
 function IntegrationsPanel() {
+  type LogViewMode = 'live' | 'static'
   const [items, setItems] = useState<any[]>([])
   const [loading, setLoading] = useState(false)
   const [busy, setBusy] = useState('')
+  const [logViewMode, setLogViewMode] = useState<LogViewMode>('live')
   const [resultModal, setResultModal] = useState({
     open: false,
     title: '',
@@ -680,7 +770,17 @@ function IntegrationsPanel() {
     })
   }
 
-  const loadLog = async (serviceName: string) => {
+  const loadLog = async (serviceName: string, options?: { silent?: boolean }) => {
+    const silent = Boolean(options?.silent)
+    if (!silent) {
+      setLogModal((current) => {
+        if (!current.open || current.name !== serviceName) return current
+        return {
+          ...current,
+          loading: true,
+        }
+      })
+    }
     try {
       const data = await apiFetch(`/integrations/services/${serviceName}/logs?lines=400`)
       setLogModal((current) => {
@@ -727,19 +827,23 @@ function IntegrationsPanel() {
   useEffect(() => {
     if (!logModal.open || !logModal.name) return
     loadLog(logModal.name)
-    const timer = window.setInterval(() => {
-      loadLog(logModal.name)
-    }, 1000)
-    return () => window.clearInterval(timer)
   }, [logModal.open, logModal.name])
 
   useEffect(() => {
-    if (!logModal.open) return
+    if (!logModal.open || !logModal.name || logViewMode !== 'live') return
+    const timer = window.setInterval(() => {
+      loadLog(logModal.name, { silent: true })
+    }, 1000)
+    return () => window.clearInterval(timer)
+  }, [logModal.open, logModal.name, logViewMode])
+
+  useEffect(() => {
+    if (!logModal.open || logViewMode !== 'live') return
     const node = logContainerRef.current
     if (node) {
       node.scrollTop = node.scrollHeight
     }
-  }, [logModal.content, logModal.open])
+  }, [logModal.content, logModal.open, logViewMode])
 
   const doAction = async (key: string, request: Promise<any>) => {
     setBusy(key)
@@ -836,9 +940,20 @@ function IntegrationsPanel() {
         cancelButtonProps={{ style: { display: 'none' } }}
       >
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8, gap: 12, flexWrap: 'wrap' }}>
-          <div style={{ fontSize: 12, color: '#7a8ba3' }}>
-            {logModal.path || '暂无日志文件路径'}
-            {logModal.truncated ? ' · 已截取最近日志' : ''}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+            <div style={{ fontSize: 12, color: '#7a8ba3' }}>
+              {logModal.path || '暂无日志文件路径'}
+              {logModal.truncated ? ' · 已截取最近日志' : ''}
+            </div>
+            <Segmented<LogViewMode>
+              size="small"
+              value={logViewMode}
+              onChange={(value) => setLogViewMode(value)}
+              options={[
+                { label: '实时日志', value: 'live' },
+                { label: '静态日志', value: 'static' },
+              ]}
+            />
           </div>
           <Space>
             <Button size="small" onClick={() => loadLog(logModal.name)} loading={logModal.loading} disabled={!logModal.name}>
@@ -868,6 +983,9 @@ function IntegrationsPanel() {
             ? '日志加载中...'
             : logModal.content || (logModal.exists ? '日志文件暂无内容。' : '日志文件尚未生成。')}
         </pre>
+        <div style={{ marginTop: 8, fontSize: 12, color: '#7a8ba3' }}>
+          {logViewMode === 'live' ? '实时日志模式：每秒自动刷新一次。' : '静态日志模式：仅在点击“刷新日志”时更新。'}
+        </div>
       </Modal>
 
       <Card title="批量操作">
@@ -976,6 +1094,14 @@ export default function Settings() {
       if (!data.mail_provider) {
         data.mail_provider = 'moemail'
       }
+      data.mailbox_services_enabled = parseStoredSelectionList(data.mailbox_services_enabled, MAILBOX_SERVICE_KEYS)
+      if ((data.mailbox_services_enabled as string[]).length === 0) {
+        data.mailbox_services_enabled = [String(data.mail_provider || 'moemail')]
+      }
+      data.chatgpt_modules_enabled = parseStoredSelectionList(data.chatgpt_modules_enabled, CHATGPT_MODULE_KEYS)
+      if ((data.chatgpt_modules_enabled as string[]).length === 0) {
+        data.chatgpt_modules_enabled = [...CHATGPT_MODULE_KEYS]
+      }
       data.cfworker_domains = parseStoredDomainList(data.cfworker_domains)
       data.cfworker_enabled_domains = parseStoredDomainList(data.cfworker_enabled_domains)
       setLoadedConfig(data)
@@ -988,8 +1114,26 @@ export default function Settings() {
     try {
       const formValues = form.getFieldsValue(true)
       const nextConfig = { ...loadedConfig, ...formValues }
+      const mailboxServicesEnabled = normalizeSelectionList(nextConfig.mailbox_services_enabled, MAILBOX_SERVICE_KEYS)
+      const chatgptModulesEnabled = normalizeSelectionList(nextConfig.chatgpt_modules_enabled, CHATGPT_MODULE_KEYS)
       const domains = normalizeDomainList(nextConfig.cfworker_domains)
       const enabledDomains = normalizeDomainList(nextConfig.cfworker_enabled_domains).filter((domain) => domains.includes(domain))
+
+      if (mailboxServicesEnabled.length === 0) {
+        setActiveTab('mailbox')
+        message.error('邮箱服务至少需要启用一个')
+        return
+      }
+
+      if (chatgptModulesEnabled.length === 0) {
+        setActiveTab('chatgpt')
+        message.error('ChatGPT 模块至少需要启用一个')
+        return
+      }
+
+      const nextMailProvider = mailboxServicesEnabled.includes(String(nextConfig.mail_provider || ''))
+        ? String(nextConfig.mail_provider || '')
+        : mailboxServicesEnabled[0]
 
       if (domains.length > 0 && enabledDomains.length === 0) {
         setActiveTab('mailbox')
@@ -999,6 +1143,9 @@ export default function Settings() {
 
       const normalizedConfig = {
         ...nextConfig,
+        mail_provider: nextMailProvider,
+        mailbox_services_enabled: mailboxServicesEnabled,
+        chatgpt_modules_enabled: chatgptModulesEnabled,
         cfworker_domains: domains,
         cfworker_enabled_domains: enabledDomains,
       }
@@ -1012,6 +1159,8 @@ export default function Settings() {
         body: JSON.stringify({
           data: {
             ...normalizedConfig,
+            mailbox_services_enabled: JSON.stringify(mailboxServicesEnabled),
+            chatgpt_modules_enabled: JSON.stringify(chatgptModulesEnabled),
             cfworker_domains: JSON.stringify(domains),
             cfworker_enabled_domains: JSON.stringify(enabledDomains),
           },
@@ -1021,6 +1170,9 @@ export default function Settings() {
       setLoadedConfig(normalizedConfig)
       form.setFieldsValue({
         ...normalizedConfig,
+        mail_provider: nextMailProvider,
+        mailbox_services_enabled: mailboxServicesEnabled,
+        chatgpt_modules_enabled: chatgptModulesEnabled,
         cfworker_domains: domains,
         cfworker_enabled_domains: enabledDomains,
         cfworker_domain: domains.length > 0 ? '' : normalizedConfig.cfworker_domain,
@@ -1063,16 +1215,26 @@ export default function Settings() {
         <div style={{ flex: 1 }}>
           {activeTab === 'integrations' ? (
             <IntegrationsPanel />
+          ) : activeTab === 'mailbox' ? (
+            <Form form={form} layout="vertical">
+              <MailboxSettingsPanel form={form} />
+              <Button type="primary" icon={<SaveOutlined />} onClick={save} loading={saving} block>
+                {saved ? '已保存 ✓' : '保存配置'}
+              </Button>
+            </Form>
+          ) : activeTab === 'chatgpt' ? (
+            <Form form={form} layout="vertical">
+              <ChatGptSettingsPanel sections={currentTab.sections} form={form} />
+              <Button type="primary" icon={<SaveOutlined />} onClick={save} loading={saving} block>
+                {saved ? '已保存 ✓' : '保存配置'}
+              </Button>
+            </Form>
           ) : (
             <Form form={form} layout="vertical">
               {activeTab === 'captcha' ? <SolverStatus /> : null}
-              {activeTab === 'mailbox' ? (
-                <MailboxSettingsPanel form={form} />
-              ) : (
-                currentTab.sections.map((section) => (
-                  <ConfigSection key={section.title} section={section} />
-                ))
-              )}
+              {currentTab.sections.map((section) => (
+                <ConfigSection key={section.key || section.title} section={section} />
+              ))}
               <Button type="primary" icon={<SaveOutlined />} onClick={save} loading={saving} block>
                 {saved ? '已保存 ✓' : '保存配置'}
               </Button>

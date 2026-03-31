@@ -200,10 +200,10 @@ def upload_to_cpa(
 ) -> Tuple[bool, str]:
     """上传单个账号到 CPA 管理平台（不走代理）。
     api_url / api_key 为空时自动从 ConfigStore 读取。"""
-    if not api_url:
-        api_url = _get_config_value("cpa_api_url")
-    if not api_key:
-        api_key = _get_config_value("cpa_api_key")
+    from services.cpa_target import resolve_cpa_api_key, resolve_cpa_api_url
+
+    api_url = resolve_cpa_api_url(api_url)
+    api_key = resolve_cpa_api_key(api_key, api_url=api_url)
     if not api_url:
         return False, "CPA API URL 未配置"
 

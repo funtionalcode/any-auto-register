@@ -22,10 +22,47 @@ import { getExecutorOptions, normalizeExecutorForPlatform } from '@/lib/register
 
 const { Text } = Typography
 
+function normalizeSelectionList(input: unknown, allowedValues: string[]): string[] {
+  const items = Array.isArray(input) ? input : []
+  const allowed = new Set(allowedValues)
+  const seen = new Set<string>()
+  const values: string[] = []
+
+  for (const item of items) {
+    const value = String(item || '').trim()
+    if (!value || !allowed.has(value) || seen.has(value)) continue
+    seen.add(value)
+    values.push(value)
+  }
+
+  return values
+}
+
+function parseStoredSelectionList(value: unknown, allowedValues: string[]): string[] {
+  if (Array.isArray(value)) return normalizeSelectionList(value, allowedValues)
+  if (typeof value !== 'string') return []
+
+  const text = value.trim()
+  if (!text) return []
+
+  try {
+    const parsed = JSON.parse(text)
+    if (Array.isArray(parsed)) {
+      return normalizeSelectionList(parsed, allowedValues)
+    }
+  } catch {}
+
+  return normalizeSelectionList(
+    text.split(',').map((item) => item.trim()),
+    allowedValues,
+  )
+}
+
 export default function Register() {
   const [form] = Form.useForm()
   const [task, setTask] = useState<any>(null)
   const [polling, setPolling] = useState(false)
+  const [enabledMailboxServiceKeys, setEnabledMailboxServiceKeys] = useState<string[]>([])
 
   // 邮箱服务配置列表
   const mailboxServices = [
@@ -40,14 +77,29 @@ export default function Register() {
     { key: 'luckmail', label: 'LuckMail' },
     { key: 'api_mail', label: 'API Mail (Mail.tm)' },
   ]
+  const mailboxServiceKeys = mailboxServices.map((service) => service.key)
+  const availableMailboxServices =
+    enabledMailboxServiceKeys.length > 0
+      ? mailboxServices.filter((service) => enabledMailboxServiceKeys.includes(service.key))
+      : mailboxServices
 
   useEffect(() => {
     apiFetch('/config').then((cfg) => {
+      const enabledKeys = parseStoredSelectionList(cfg.mailbox_services_enabled, mailboxServiceKeys)
+      const effectiveMailboxServices =
+        enabledKeys.length > 0
+          ? mailboxServices.filter((service) => enabledKeys.includes(service.key))
+          : mailboxServices
+      const nextMailProvider = effectiveMailboxServices.some((service) => service.key === cfg.mail_provider)
+        ? cfg.mail_provider
+        : (effectiveMailboxServices[0]?.key || 'moemail')
+
+      setEnabledMailboxServiceKeys(enabledKeys)
       const currentPlatform = form.getFieldValue('platform') || 'trae'
       form.setFieldsValue({
         executor_type: normalizeExecutorForPlatform(currentPlatform, cfg.default_executor),
         captcha_solver: cfg.default_captcha_solver || 'yescaptcha',
-        mail_provider: cfg.mail_provider || 'moemail',
+        mail_provider: nextMailProvider || 'moemail',
         yescaptcha_key: cfg.yescaptcha_key || '',
         moemail_api_url: cfg.moemail_api_url || '',
         skymail_api_base: cfg.skymail_api_base || 'https://api.skymail.ink',
@@ -234,7 +286,7 @@ export default function Register() {
 
         <Card title="邮箱配置" style={{ marginBottom: 16 }}>
           <Form.Item name="mail_provider" label="邮箱服务" rules={[{ required: true }]}>
-            <Select options={mailboxServices.map(service => ({ value: service.key, label: service.label }))} />
+            <Select options={availableMailboxServices.map((service) => ({ value: service.key, label: service.label }))} />
           </Form.Item>
           {mailProvider === 'skymail' && (
             <>

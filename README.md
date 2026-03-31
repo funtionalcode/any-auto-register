@@ -209,6 +209,8 @@ DATABASE_URL=sqlite:////app/data/account_manager.db
 | `APP_ENABLE_SOLVER` | `1` | 是否自动启动本地 Solver，设为 `0` 可禁用 |
 | `SOLVER_PORT` | `8889` | Solver 监听端口 |
 | `LOCAL_SOLVER_URL` | `http://127.0.0.1:8889` | 后端访问 Solver 的地址 |
+| `EXTERNAL_APPS_HOST` | `127.0.0.1` | 插件页展示的 `CLIProxyAPI` / `grok2api` 外部访问地址 |
+| `EXTERNAL_APPS_SCHEME` | `http` | 插件页展示地址使用的协议 |
 
 ### 7. Camoufox 构建参数
 
@@ -278,6 +280,8 @@ docker compose up --build -d
 - Turnstile Solver：`http://localhost:8889`
 
 容器内仍然沿用“后端自动拉起本地 Solver”的方式，但 `docker-compose.yml` 默认把 Solver 浏览器切到 `chromium`，避免额外依赖本机 conda/camoufox 环境。
+
+`CLIProxyAPI` 与 `grok2api` 的仓库代码仍然落在 `./_ext_targets`，但容器内的 Go/uv/pip 缓存已经改到 `/runtime` 下持久化；只要保留 `./data` 和 `./_ext_targets`，容器重建后不需要重新下载大部分依赖。若你需要让插件页展示局域网地址，直接在 `docker-compose.yml` 里把 `EXTERNAL_APPS_HOST` 改成宿主机 IP 即可，不需要再手改 Python 常量。
 
 运行时数据会持久化到 compose volume 中，包括：
 

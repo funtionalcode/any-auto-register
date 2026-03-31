@@ -7,6 +7,9 @@ from typing import Any
 
 import requests
 
+from services.chatgpt_modules import is_chatgpt_module_enabled
+from services.cpa_target import resolve_cpa_api_key, resolve_cpa_api_url
+
 
 DEFAULT_INTERVAL_MINUTES = 60
 DEFAULT_THRESHOLD = 5
@@ -81,25 +84,22 @@ def get_cpa_maintenance_config() -> CpaMaintenanceConfig:
 
 
 def get_cpa_maintenance_interval_seconds() -> int:
-    config_store = _get_config_store()
-    api_url = str(config_store.get("cpa_api_url", "") or "").strip()
+    api_url = resolve_cpa_api_url()
     config = get_cpa_maintenance_config()
-    if not config.enabled or not api_url:
+    if not config.enabled or not api_url or not is_chatgpt_module_enabled("cpa_cleanup"):
         return 0
     return config.interval_minutes * 60
 
 
 def _api_base(api_url: str | None = None) -> str:
-    config_store = _get_config_store()
-    base_url = str(api_url or config_store.get("cpa_api_url", "") or "").strip()
+    base_url = resolve_cpa_api_url(api_url)
     if not base_url:
         raise RuntimeError("CPA API URL 未配置")
     return base_url.rstrip("/")
 
 
 def _headers(api_key: str | None = None) -> dict[str, str]:
-    config_store = _get_config_store()
-    token = str(api_key or config_store.get("cpa_api_key", "") or "").strip()
+    token = resolve_cpa_api_key(api_key)
     headers = {"Accept": "application/json"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
@@ -209,6 +209,9 @@ def _trigger_register(missing_count: int, *, config: CpaMaintenanceConfig, remai
 
 
 def maintain_cpa_credentials() -> dict[str, Any]:
+    if not is_chatgpt_module_enabled("cpa_cleanup"):
+        return {"ok": False, "reason": "module_disabled"}
+
     config = get_cpa_maintenance_config()
     if not config.enabled:
         return {"ok": False, "reason": "disabled"}

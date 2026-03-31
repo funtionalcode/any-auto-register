@@ -28,7 +28,9 @@ def _solver_bind_host() -> str:
 
 
 def _solver_browser_type() -> str:
-    return os.getenv("SOLVER_BROWSER_TYPE", "camoufox")
+    # Docker 容器中默认使用 chromium（支持 headless），camoufox 需要 X server
+    default = "chromium" if os.getenv("INSIDE_DOCKER") == "1" else "camoufox"
+    return os.getenv("SOLVER_BROWSER_TYPE", default)
 
 
 def is_running() -> bool:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -10,6 +11,7 @@ import threading
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import requests
 
@@ -36,18 +38,18 @@ _SERVICE_META = {
     "cliproxyapi": {
         "label": "CLIProxyAPI",
         "repo_name": "CLIProxyAPI",
-        "url": "http://127.0.0.1:8317",
-        "health": "http://127.0.0.1:8317/",
-        "management_url": "http://127.0.0.1:8317/management.html",
+        "path": "",
+        "health_path": "/",
+        "management_path": "/management.html",
         "port": 8317,
         "kind": "web",
     },
     "grok2api": {
         "label": "grok2api",
         "repo_name": "grok2api",
-        "url": "http://127.0.0.1:8011",
-        "health": "http://127.0.0.1:8011/health",
-        "management_url": "http://127.0.0.1:8011/admin",
+        "path": "",
+        "health_path": "/health",
+        "management_path": "/admin",
         "port": 8011,
         "kind": "web",
     },
@@ -64,6 +66,9 @@ _PROCS: dict[str, subprocess.Popen] = {}
 _LOG_FILES: dict[str, Any] = {}
 _LAST_ERROR: dict[str, str] = {}
 _LOCK = threading.Lock()
+_ANSI_ESCAPE_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+_ORPHAN_ANSI_CODE_RE = re.compile(r"\[(?:\d{1,3}(?:;\d{1,3})*)m")
+_CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
 
 
 def _get_setting(key: str, default: str = "") -> str:
@@ -80,12 +85,72 @@ def _creationflags() -> int:
     return getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
+def _normalize_url_host(value: str, default: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return default
+    candidate = text if "://" in text else f"http://{text}"
+    parsed = urlsplit(candidate)
+    host = parsed.hostname or parsed.netloc or parsed.path
+    host = str(host or "").strip().strip("/")
+    return host or default
+
+
+def _normalize_url_scheme(value: str, default: str = "http") -> str:
+    text = str(value or "").strip().lower()
+    if text in {"http", "https"}:
+        return text
+    return default
+
+
+def _external_apps_host() -> str:
+    return _normalize_url_host(
+        _get_setting("external_apps_host", "") or _get_setting("local_uri", ""),
+        "127.0.0.1",
+    )
+
+
+def _external_apps_scheme() -> str:
+    return _normalize_url_scheme(_get_setting("external_apps_scheme", "http"), "http")
+
+
+def _service_meta(name: str) -> dict[str, Any]:
+    meta = dict(_SERVICE_META[name])
+    if meta.get("kind") != "web":
+        return meta
+
+    port = int(meta.get("port") or 0)
+    external_host = _external_apps_host()
+    external_scheme = _external_apps_scheme()
+    internal_host = "127.0.0.1"
+    path = str(meta.get("path", "") or "")
+    health_path = str(meta.get("health_path", "") or "")
+    management_path = str(meta.get("management_path", "") or "")
+
+    meta["url"] = f"{external_scheme}://{external_host}:{port}{path}"
+    meta["health"] = f"http://{internal_host}:{port}{health_path}"
+    meta["management_url"] = (
+        f"{external_scheme}://{external_host}:{port}{management_path}" if management_path else ""
+    )
+    return meta
+
+
 def _repo_path(name: str) -> Path:
     return _EXT_ROOT / _SERVICE_META[name]["repo_name"]
 
 
 def _log_path(name: str) -> Path:
     return _LOG_ROOT / f"{name}.log"
+
+
+def _clean_log_text(text: str) -> str:
+    if not text:
+        return ""
+    cleaned = str(text).replace("\r\n", "\n").replace("\r", "\n")
+    cleaned = _ANSI_ESCAPE_RE.sub("", cleaned)
+    cleaned = _ORPHAN_ANSI_CODE_RE.sub("", cleaned)
+    cleaned = _CONTROL_CHAR_RE.sub("", cleaned)
+    return cleaned
 
 
 def _close_log(name: str):
@@ -127,7 +192,7 @@ def install(name: str) -> dict[str, Any]:
 
 
 def _health_ok(name: str) -> bool:
-    url = _SERVICE_META[name].get("health")
+    url = _service_meta(name).get("health")
     if not url:
         return False
     try:
@@ -241,7 +306,7 @@ def _find_desktop_pid(name: str) -> int | None:
 
 
 def _status_one(name: str) -> dict[str, Any]:
-    meta = _SERVICE_META[name]
+    meta = _service_meta(name)
     repo = _repo_path(name)
     proc = _PROCS.get(name)
     desktop_pid = _find_desktop_pid(name) if meta["kind"] == "desktop" else None
@@ -299,7 +364,7 @@ def read_log(name: str, max_lines: int = 400, max_bytes: int = 128 * 1024) -> di
             raw = f.read()
 
         truncated = start > 0
-        text = raw.decode("utf-8", errors="ignore")
+        text = _clean_log_text(raw.decode("utf-8", errors="ignore"))
         if truncated:
             newline_index = text.find("\n")
             if newline_index >= 0:
@@ -710,9 +775,10 @@ def start(name: str) -> dict[str, Any]:
     with _LOCK:
         if name not in _SERVICE_META:
             raise KeyError(name)
+        meta = _service_meta(name)
         repo = _repo_path(name)
         if not repo.exists():
-            raise RuntimeError(f"{_SERVICE_META[name]['label']} 未安装，请先在插件页点击“安装”")
+            raise RuntimeError(f"{meta['label']} 未安装，请先在插件页点击“安装”")
         if _status_one(name)["running"]:
             return _status_one(name)
 
@@ -733,7 +799,7 @@ def start(name: str) -> dict[str, Any]:
             _close_log(name)
             raise
 
-    if _SERVICE_META[name]["kind"] == "web":
+    if meta["kind"] == "web":
         for _ in range(90):
             time.sleep(1)
             if _health_ok(name):
@@ -750,11 +816,12 @@ def start(name: str) -> dict[str, Any]:
 
 def stop(name: str) -> dict[str, Any]:
     with _LOCK:
+        meta = _service_meta(name)
         proc = _PROCS.get(name)
         port_pid = None
         desktop_pid = None
-        if _SERVICE_META[name]["kind"] == "web":
-            port_pid = _find_pid_by_port(int(_SERVICE_META[name].get("port") or 0))
+        if meta["kind"] == "web":
+            port_pid = _find_pid_by_port(int(meta.get("port") or 0))
         else:
             desktop_pid = _find_desktop_pid(name)
         if proc and proc.poll() is None:
@@ -787,7 +854,7 @@ def stop(name: str) -> dict[str, Any]:
             )
         _PROCS.pop(name, None)
         _close_log(name)
-    if _SERVICE_META[name]["kind"] == "web":
+    if meta["kind"] == "web":
         for _ in range(10):
             if not _health_ok(name):
                 break

@@ -23,6 +23,15 @@ services:
       SOLVER_PORT: "8889"
       SOLVER_BIND_HOST: 0.0.0.0
       LOCAL_SOLVER_URL: http://127.0.0.1:8889
+      INSIDE_DOCKER: "1"
+      EXTERNAL_APPS_HOST: ${EXTERNAL_APPS_HOST:-172.16.0.180}
+      EXTERNAL_APPS_SCHEME: ${EXTERNAL_APPS_SCHEME:-http}
+      XDG_CACHE_HOME: /runtime/cache
+      UV_CACHE_DIR: /runtime/cache/uv
+      PIP_CACHE_DIR: /runtime/cache/pip
+      GOPATH: /runtime/go
+      GOMODCACHE: /runtime/go/pkg/mod
+      GOCACHE: /runtime/cache/go-build
       SOLVER_BROWSER_TYPE: ${SOLVER_BROWSER_TYPE:-camoufox}
       HTTP_PROXY: ${HTTP_PROXY:-}
       HTTPS_PROXY: ${HTTPS_PROXY:-}

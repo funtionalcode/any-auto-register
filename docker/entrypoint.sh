@@ -3,8 +3,21 @@ set -eu
 
 APP_DIR="/app"
 RUNTIME_DIR="${APP_RUNTIME_DIR:-/runtime}"
+CACHE_DIR="${XDG_CACHE_HOME:-${RUNTIME_DIR}/cache}"
+UV_CACHE_DIR="${UV_CACHE_DIR:-${CACHE_DIR}/uv}"
+PIP_CACHE_DIR="${PIP_CACHE_DIR:-${CACHE_DIR}/pip}"
+GO_BUILD_CACHE_DIR="${GOCACHE:-${CACHE_DIR}/go-build}"
+GO_MODULE_CACHE_DIR="${GOMODCACHE:-${RUNTIME_DIR}/go/pkg/mod}"
 
-mkdir -p "${RUNTIME_DIR}" "${RUNTIME_DIR}/logs" "${RUNTIME_DIR}/smstome_used"
+mkdir -p \
+  "${RUNTIME_DIR}" \
+  "${RUNTIME_DIR}/logs" \
+  "${RUNTIME_DIR}/smstome_used" \
+  "${CACHE_DIR}" \
+  "${UV_CACHE_DIR}" \
+  "${PIP_CACHE_DIR}" \
+  "${GO_BUILD_CACHE_DIR}" \
+  "${GO_MODULE_CACHE_DIR}"
 touch \
   "${RUNTIME_DIR}/account_manager.db" \
   "${RUNTIME_DIR}/smstome_all_numbers.txt" \

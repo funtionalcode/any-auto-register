@@ -72,6 +72,7 @@ CONFIG_KEYS = [
     "api_mail_tm_password",
     # 邮箱服务启用/禁用状态
     "mailbox_services_enabled",
+    "chatgpt_modules_enabled",
 ]
 
 
