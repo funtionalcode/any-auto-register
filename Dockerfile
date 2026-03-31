@@ -12,6 +12,8 @@ ARG NO_PROXY
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
+    TZ=Asia/Shanghai \
+    APP_TIMEZONE=Asia/Shanghai \
     HOST=0.0.0.0 \
     PORT=8000 \
     APP_CONDA_ENV=docker \

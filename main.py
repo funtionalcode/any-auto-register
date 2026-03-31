@@ -15,8 +15,10 @@ from api.proxies import router as proxies_router
 from api.config import router as config_router
 from api.actions import router as actions_router
 from api.integrations import router as integrations_router
+from core.runtime_timezone import configure_timezone
 
 EXPECTED_CONDA_ENV = os.getenv("APP_CONDA_ENV", "any-auto-register")
+configure_timezone()
 
 
 def _detect_conda_env() -> str:
