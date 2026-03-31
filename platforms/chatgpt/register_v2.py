@@ -88,10 +88,18 @@ class OAuthPkceRegisterStrategy:
 
         # ── 步骤 2：创建邮箱 ────────────────────────────────────────────
         log("步骤 2/12: 创建邮箱接码订单...")
-        email_data = email_service.create_email()
+        try:
+            email_data = email_service.create_email()
+        except Exception as e:
+            import traceback
+            error_detail = traceback.format_exc()
+            log(f"创建邮箱异常：{e}")
+            log(f"堆栈信息:\n{error_detail}")
+            result.error_message = f"创建邮箱失败：{e}"
+            return result
         email_addr = email or (email_data.get("email") if email_data else None)
         if not email_addr:
-            result.error_message = "创建邮箱失败"
+            result.error_message = f"创建邮箱失败：返回数据为空 ({email_data})"
             return result
         result.email = email_addr
         result.password = password

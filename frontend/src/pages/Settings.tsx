@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Card, Form, Input, Select, Button, message, Tabs, Space, Tag, Typography, Modal } from 'antd'
+import { Card, Form, Input, Select, Button, message, Tabs, Space, Tag, Typography, Modal, Switch } from 'antd'
 import {
   SaveOutlined,
   EyeOutlined,
@@ -25,6 +25,7 @@ const SELECT_FIELDS: Record<string, { label: string; value: string }[]> = {
     { label: 'Freemail（自建 CF Worker）', value: 'freemail' },
     { label: 'CF Worker（自建域名）', value: 'cfworker' },
     { label: 'LuckMail（订单接码 / 已购邮箱）', value: 'luckmail' },
+    { label: 'ChatGPT Mail（Mail.tm 临时邮箱）', value: 'chatgpt_mail' },
   ],
   maliapi_auto_domain_strategy: [
     { label: 'balanced', value: 'balanced' },
@@ -69,6 +70,12 @@ const TAB_ITEMS = [
     label: '邮箱服务',
     icon: <MailOutlined />,
     sections: [
+      {
+        title: '邮箱服务管理',
+        desc: '启用/禁用邮箱服务，只有启用的服务会在注册页面展示',
+        fields: [],
+        is_service_manager: true,
+      },
       {
         title: '默认邮箱服务',
         desc: '选择注册时使用的邮箱类型',
@@ -149,6 +156,13 @@ const TAB_ITEMS = [
           { key: 'luckmail_api_key', label: 'API Key', secret: true },
           { key: 'luckmail_email_type', label: '邮箱类型（可选）', placeholder: 'ms_graph / ms_imap / self_built' },
           { key: 'luckmail_domain', label: '邮箱域名（可选）', placeholder: 'outlook.com / gmail.com' },
+        ],
+      },
+      {
+        title: 'ChatGPT Mail (Mail.tm)',
+        desc: '基于 Mail.tm 的临时邮箱服务，自动生成邮箱并接收验证码',
+        fields: [
+          { key: 'chatgpt_mail_tm_password', label: '邮箱密码', secret: true, placeholder: '默认 MailTm123!' },
         ],
       },
     ],
@@ -305,6 +319,7 @@ interface SectionConfig {
   title: string
   desc?: string
   fields: FieldConfig[]
+  is_service_manager?: boolean
 }
 
 interface TabConfig {
@@ -386,12 +401,143 @@ function ConfigField({ field }: { field: FieldConfig }) {
   )
 }
 
-function ConfigSection({ section }: { section: SectionConfig }) {
+function ConfigSection({ section, form }: { section: SectionConfig; form?: any }) {
+  // 邮箱服务管理面板
+  if (section.is_service_manager) {
+    return <MailboxServiceManager form={form} />
+  }
+
   return (
     <Card title={section.title} extra={section.desc && <span style={{ fontSize: 12, color: '#7a8ba3' }}>{section.desc}</span>} style={{ marginBottom: 16 }}>
       {section.fields.map((field) => (
         <ConfigField key={field.key} field={field} />
       ))}
+    </Card>
+  )
+}
+
+// 邮箱服务配置列表（用于启用/禁用管理）
+const MAILBOX_SERVICES = [
+  { key: 'laoudo', label: 'Laoudo（固定邮箱）', configKeys: ['laoudo_auth', 'laoudo_email', 'laoudo_account_id'] },
+  { key: 'tempmail_lol', label: 'TempMail.lol（自动生成）', configKeys: [] },
+  { key: 'skymail', label: 'SkyMail（CloudMail 接口）', configKeys: ['skymail_api_base', 'skymail_token', 'skymail_domain'] },
+  { key: 'duckmail', label: 'DuckMail（自动生成）', configKeys: ['duckmail_api_url', 'duckmail_provider_url', 'duckmail_bearer'] },
+  { key: 'moemail', label: 'MoeMail (sall.cc)', configKeys: ['moemail_api_url'] },
+  { key: 'maliapi', label: 'YYDS Mail / MaliAPI', configKeys: ['maliapi_base_url', 'maliapi_api_key'] },
+  { key: 'freemail', label: 'Freemail（自建 CF Worker）', configKeys: ['freemail_api_url', 'freemail_admin_token'] },
+  { key: 'cfworker', label: 'CF Worker（自建域名）', configKeys: ['cfworker_api_url', 'cfworker_admin_token'] },
+  { key: 'luckmail', label: 'LuckMail（订单接码 / 已购邮箱）', configKeys: ['luckmail_base_url', 'luckmail_api_key'] },
+  { key: 'chatgpt_mail', label: 'ChatGPT Mail（Mail.tm 临时邮箱）', configKeys: ['chatgpt_mail_tm_password'] },
+]
+
+function MailboxServiceManager({ form }: { form: any }) {
+  const [enabledServices, setEnabledServices] = useState<string[]>([])
+  const [configValues, setConfigValues] = useState<Record<string, any>>({})
+
+  // 监听配置变化
+  useEffect(() => {
+    const subscription = form.onValuesChange((changedValues, allValues) => {
+      // 监听邮箱服务启用状态
+      if (changedValues.mailbox_services_enabled !== undefined) {
+        const enabled = (changedValues.mailbox_services_enabled || '').split(',').filter(Boolean)
+        setEnabledServices(enabled)
+      }
+      // 监听各邮箱配置
+      for (const service of MAILBOX_SERVICES) {
+        for (const key of service.configKeys) {
+          if (changedValues[key] !== undefined) {
+            setConfigValues(prev => ({ ...prev, [key]: changedValues[key] }))
+          }
+        }
+      }
+    })
+    return () => subscription()
+  }, [form])
+
+  // 初始化时读取配置
+  useEffect(() => {
+    const initEnabled = () => {
+      const enabledStr = form.getFieldValue('mailbox_services_enabled') || ''
+      const enabled = enabledStr.split(',').filter(Boolean)
+      setEnabledServices(enabled)
+    }
+    initEnabled()
+  }, [form])
+
+  const toggleService = (serviceKey: string, checked: boolean) => {
+    let newEnabled = checked
+      ? [...enabledServices, serviceKey]
+      : enabledServices.filter(s => s !== serviceKey)
+
+    // 去重
+    newEnabled = Array.from(new Set(newEnabled))
+    setEnabledServices(newEnabled)
+    form.setFieldValue('mailbox_services_enabled', newEnabled.join(','))
+  }
+
+  const hasConfig = (service: typeof MAILBOX_SERVICES[0]) => {
+    if (service.configKeys.length === 0) return false
+    return service.configKeys.some(key => {
+      const val = form.getFieldValue(key)
+      return val && String(val).trim() !== ''
+    })
+  }
+
+  return (
+    <Card
+      title="邮箱服务启用管理"
+      extra={<span style={{ fontSize: 12, color: '#7a8ba3' }}>只有启用的服务会在注册页面的下拉列表中展示</span>}
+      style={{ marginBottom: 16 }}
+    >
+      <Space direction="vertical" style={{ width: '100%' }} size={12}>
+        {MAILBOX_SERVICES.map(service => {
+          const isEnabled = enabledServices.includes(service.key)
+          const isConfigured = hasConfig(service) || service.configKeys.length === 0
+
+          return (
+            <div
+              key={service.key}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                padding: '12px 16px',
+                borderRadius: 8,
+                background: isEnabled ? 'rgba(22, 163, 74, 0.04)' : 'rgba(0, 0, 0, 0.02)',
+                border: `1px solid ${isEnabled ? 'rgba(22, 163, 74, 0.3)' : 'rgba(0, 0, 0, 0.06)'}`,
+              }}
+            >
+              <div style={{ flex: 1 }}>
+                <div style={{ fontWeight: 500, marginBottom: 4 }}>
+                  {service.label}
+                  {isEnabled && (
+                    <Tag color="green" style={{ marginLeft: 8 }}>已启用</Tag>
+                  )}
+                  {!isEnabled && (
+                    <Tag style={{ marginLeft: 8 }}>已禁用</Tag>
+                  )}
+                </div>
+                <div style={{ fontSize: 12, color: '#7a8ba3' }}>
+                  {service.configKeys.length === 0
+                    ? '无需配置，启用后即可使用'
+                    : isConfigured
+                      ? '配置已保存'
+                      : '配置未完成'}
+                </div>
+              </div>
+              <Switch
+                checked={isEnabled}
+                onChange={(checked) => toggleService(service.key, checked)}
+                checkedChildren="启用"
+                unCheckedChildren="禁用"
+              />
+            </div>
+          )
+        })}
+      </Space>
+      <Form.Item name="mailbox_services_enabled" hidden>
+        <Input />
+      </Form.Item>
     </Card>
   )
 }
@@ -849,7 +995,7 @@ export default function Settings() {
             <Form form={form} layout="vertical">
               {activeTab === 'captcha' ? <SolverStatus /> : null}
               {currentTab.sections.map((section) => (
-                <ConfigSection key={section.title} section={section} />
+                <ConfigSection key={section.title} section={section} form={form} />
               ))}
               {activeTab === 'mailbox' ? <CFWorkerDomainPoolSection form={form} /> : null}
               <Button type="primary" icon={<SaveOutlined />} onClick={save} loading={saving} block>

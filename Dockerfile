@@ -15,6 +15,9 @@ FROM python:3.12-slim AS runtime
 
 ARG CAMOUFOX_VERSION=135.0.1
 ARG CAMOUFOX_RELEASE=beta.24
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG NO_PROXY
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -28,7 +31,14 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     SOLVER_PORT=8889 \
     SOLVER_BIND_HOST=0.0.0.0 \
     LOCAL_SOLVER_URL=http://127.0.0.1:8889 \
-    SOLVER_BROWSER_TYPE=camoufox
+    SOLVER_BROWSER_TYPE=camoufox \
+    HTTP_PROXY=${HTTP_PROXY:-} \
+    HTTPS_PROXY=${HTTPS_PROXY:-} \
+    NO_PROXY=${NO_PROXY:-} \
+    http_proxy=${HTTP_PROXY:-} \
+    https_proxy=${HTTPS_PROXY:-} \
+    no_proxy=${NO_PROXY:-} \
+    PATH=/usr/local/go/bin:$PATH:/root/.local/bin
 
 WORKDIR /app
 
@@ -37,9 +47,10 @@ COPY scripts/install_camoufox.py /tmp/install_camoufox.py
 
 RUN pip install --upgrade pip \
     && pip install -r requirements.txt \
+    && python -m playwright install-deps firefox chromium \
     && installed=0 \
     && for attempt in 1 2 3; do \
-         if python -m playwright install --with-deps chromium; then \
+         if http_proxy="${HTTP_PROXY:-}" https_proxy="${HTTPS_PROXY:-}" no_proxy="${NO_PROXY:-}" python -m playwright install --with-deps chromium; then \
            installed=1; \
            break; \
          fi; \
@@ -48,7 +59,7 @@ RUN pip install --upgrade pip \
          sleep 5; \
        done \
     && [ "$installed" -eq 1 ] \
-    && CAMOUFOX_VERSION="$CAMOUFOX_VERSION" CAMOUFOX_RELEASE="$CAMOUFOX_RELEASE" python /tmp/install_camoufox.py
+    && CAMOUFOX_VERSION="$CAMOUFOX_VERSION" CAMOUFOX_RELEASE="$CAMOUFOX_RELEASE" http_proxy="${HTTP_PROXY:-}" https_proxy="${HTTPS_PROXY:-}" no_proxy="${NO_PROXY:-}" python /tmp/install_camoufox.py
 
 COPY . .
 COPY --from=frontend-builder /app/static /app/static
@@ -56,7 +67,18 @@ COPY --from=frontend-builder /app/static /app/static
 RUN chmod +x /app/docker/entrypoint.sh \
     && mkdir -p /runtime /runtime/logs /runtime/smstome_used /app/_ext_targets
 
-EXPOSE 8000 8889
+# 安装系统依赖
+RUN apt-get update
+RUN apt-get install -y --no-install-recommends \
+    curl git net-tools vim telnet \
+    && rm -rf /var/lib/apt/lists/* \
+    && curl -LO https://go.dev/dl/go1.24.0.linux-amd64.tar.gz \
+    && tar -C /usr/local -xzf go1.24.0.linux-amd64.tar.gz \
+    && rm go1.24.0.linux-amd64.tar.gz \
+    && curl -LsSf https://astral.sh/uv/install.sh | sh
+
+
+EXPOSE 8000 8889 8317 8011
 
 VOLUME ["/runtime", "/app/_ext_targets"]
 

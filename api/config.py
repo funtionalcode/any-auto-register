@@ -66,6 +66,10 @@ CONFIG_KEYS = [
     "grok2api_quota",
     "kiro_manager_path",
     "kiro_manager_exe",
+    # ChatGPT 邮箱注册配置
+    "chatgpt_mail_tm_password",
+    # 邮箱服务启用/禁用状态
+    "mailbox_services_enabled",
 ]
 
 

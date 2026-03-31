@@ -26,10 +26,30 @@ export default function Register() {
   const [form] = Form.useForm()
   const [task, setTask] = useState<any>(null)
   const [polling, setPolling] = useState(false)
+  const [enabledMailboxServices, setEnabledMailboxServices] = useState<string[]>([])
+
+  // 邮箱服务配置列表
+  const mailboxServices = [
+    { key: 'laoudo', label: 'Laoudo（固定邮箱）' },
+    { key: 'tempmail_lol', label: 'TempMail.lol（自动生成）' },
+    { key: 'skymail', label: 'SkyMail（CloudMail）' },
+    { key: 'maliapi', label: 'YYDS Mail / MaliAPI' },
+    { key: 'duckmail', label: 'DuckMail' },
+    { key: 'freemail', label: 'Freemail' },
+    { key: 'moemail', label: 'MoeMail (sall.cc)' },
+    { key: 'cfworker', label: 'CF Worker' },
+    { key: 'luckmail', label: 'LuckMail' },
+    { key: 'chatgpt_mail', label: 'ChatGPT Mail (Mail.tm)' },
+  ]
 
   useEffect(() => {
     apiFetch('/config').then((cfg) => {
       const currentPlatform = form.getFieldValue('platform') || 'trae'
+      // 解析已启用的邮箱服务
+      const enabledStr = cfg.mailbox_services_enabled || ''
+      const enabled = enabledStr.split(',').filter(Boolean)
+      setEnabledMailboxServices(enabled)
+
       form.setFieldsValue({
         executor_type: normalizeExecutorForPlatform(currentPlatform, cfg.default_executor),
         captcha_solver: cfg.default_captcha_solver || 'yescaptcha',
@@ -68,6 +88,7 @@ export default function Register() {
         luckmail_api_key: cfg.luckmail_api_key || '',
         luckmail_email_type: cfg.luckmail_email_type || '',
         luckmail_domain: cfg.luckmail_domain || '',
+        chatgpt_mail_tm_password: cfg.chatgpt_mail_tm_password || '',
       })
     })
   }, [form])
@@ -120,6 +141,7 @@ export default function Register() {
           luckmail_api_key: values.luckmail_api_key,
           luckmail_email_type: values.luckmail_email_type,
           luckmail_domain: values.luckmail_domain,
+          chatgpt_mail_tm_password: values.chatgpt_mail_tm_password,
           yescaptcha_key: values.yescaptcha_key,
           solver_url: values.solver_url,
         },
@@ -219,17 +241,10 @@ export default function Register() {
         <Card title="邮箱配置" style={{ marginBottom: 16 }}>
           <Form.Item name="mail_provider" label="邮箱服务" rules={[{ required: true }]}>
             <Select
-              options={[
-                { value: 'moemail', label: 'MoeMail (sall.cc)' },
-                { value: 'tempmail_lol', label: 'TempMail.lol' },
-                { value: 'skymail', label: 'SkyMail (CloudMail)' },
-                { value: 'maliapi', label: 'YYDS Mail / MaliAPI' },
-                { value: 'duckmail', label: 'DuckMail' },
-                { value: 'freemail', label: 'Freemail' },
-                { value: 'laoudo', label: 'Laoudo' },
-                { value: 'cfworker', label: 'CF Worker' },
-                { value: 'luckmail', label: 'LuckMail' },
-              ]}
+              options={mailboxServices
+                .filter(service => enabledMailboxServices.length === 0 || enabledMailboxServices.includes(service.key))
+                .map(service => ({ value: service.key, label: service.label }))
+              }
             />
           </Form.Item>
           {mailProvider === 'skymail' && (
@@ -316,6 +331,13 @@ export default function Register() {
               </Form.Item>
               <Form.Item name="luckmail_domain" label="邮箱域名（可选）">
                 <Input placeholder="outlook.com" />
+              </Form.Item>
+            </>
+          )}
+          {mailProvider === 'chatgpt_mail' && (
+            <>
+              <Form.Item name="chatgpt_mail_tm_password" label="邮箱密码">
+                <Input.Password placeholder="默认 MailTm123!" />
               </Form.Item>
             </>
           )}

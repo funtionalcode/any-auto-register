@@ -181,15 +181,18 @@ class RegistrationEngine:
             self.email_info = self.email_service.create_email()
 
             if not self.email_info or "email" not in self.email_info:
-                self._log("创建邮箱失败: 返回信息不完整", "error")
+                self._log(f"创建邮箱失败：返回信息不完整 ({self.email_info})", "error")
                 return False
 
             self.email = self.email_info["email"]
-            self._log(f"成功创建邮箱: {self.email}")
+            self._log(f"成功创建邮箱：{self.email}")
             return True
 
         except Exception as e:
-            self._log(f"创建邮箱失败: {e}", "error")
+            import traceback
+            error_detail = traceback.format_exc()
+            self._log(f"创建邮箱失败：{e}", "error")
+            self._log(f"堆栈信息:\n{error_detail}", "error")
             return False
 
     def _start_oauth(self) -> bool:

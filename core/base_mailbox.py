@@ -148,6 +148,19 @@ def create_mailbox(provider: str, extra: dict = None, proxy: str = None) -> 'Bas
             email_type=extra.get("luckmail_email_type", ""),
             domain=extra.get("luckmail_domain", ""),
         )
+    elif provider == "luckmail":
+        return LuckMailMailbox(
+            base_url=extra.get("luckmail_base_url") or "https://mails.luckyous.com/",
+            api_key=extra.get("luckmail_api_key", ""),
+            project_code=extra.get("luckmail_project_code", ""),
+            email_type=extra.get("luckmail_email_type", ""),
+            domain=extra.get("luckmail_domain", ""),
+        )
+    elif provider == "chatgpt_mail":
+        return ChatGptMailbox(
+            mail_tm_password=extra.get("chatgpt_mail_tm_password", ""),
+            proxy=proxy,
+        )
     else:  # laoudo
         return LaoudoMailbox(
             auth_token=extra.get("laoudo_auth", ""),
@@ -1023,32 +1036,75 @@ class MoeMailMailbox(BaseMailbox):
         return ""
 
     def get_email(self) -> MailboxAccount:
+        """
+        生成 MoeMail 邮箱地址
+
+        根据接口文档：
+        - 格式：name || nanoid(8) + @ + domain
+        - 域名从 SITE_CONFIG.EMAIL_DOMAINS 配置获取
+        - 冲突检测：大小写不敏感，409 冲突时需重试
+        """
+        import random
+        import string
+
         # 每次调用都重新注册新账号，保证邮箱唯一
         self._session_token = None
         self._register_and_login()
-        import random, string
-        name = "".join(random.choices(string.ascii_letters + string.digits, k=8))
+
         # 获取可用域名列表，随机选一个
         domain = "sall.cc"
         try:
             cfg_r = self._session.get(f"{self.api}/api/config", timeout=10)
-            domains = [d.strip() for d in cfg_r.json().get("emailDomains", "sall.cc").split(",") if d.strip()]
+            # 接口文档：emailDomains 是逗号分隔的字符串
+            domain_str = cfg_r.json().get("emailDomains", "sall.cc")
+            domains = [d.strip() for d in str(domain_str).split(",") if d.strip()]
             if domains:
                 domain = random.choice(domains)
         except Exception:
             pass
-        r = self._session.post(f"{self.api}/api/emails/generate",
-            json={"name": name, "domain": domain, "expiryTime": 86400000},
-            timeout=15)
-        data = r.json()
-        self._email = data.get("email", data.get("address", ""))
-        email_id = data.get("id", "")
-        print(f"[MoeMail] 生成邮箱: {self._email} id={email_id} domain={domain} status={r.status_code}")
-        if not email_id:
-            print(f"[MoeMail] 生成失败: {data}")
-        if email_id:
+
+        # 生成邮箱，处理 409 冲突重试
+        max_retries = 3
+        for attempt in range(max_retries):
+            # 使用 nanoid(8) 格式生成随机名：A-Za-z0-9_-
+            chars = string.ascii_letters + string.digits + "_-"
+            name = "".join(random.choices(chars, k=8))
+
+            # 调用生成接口
+            r = self._session.post(
+                f"{self.api}/api/emails/generate",
+                json={"name": name, "domain": domain, "expiryTime": 86400000},
+                timeout=15
+            )
+
+            # 处理冲突：409 表示邮箱已存在，重试生成
+            if r.status_code == 409:
+                error_msg = r.json().get("error", "该邮箱地址已被使用")
+                print(f"[MoeMail] 冲突重试 ({attempt + 1}/{max_retries}): {error_msg}")
+                if attempt < max_retries - 1:
+                    continue
+                # 最后一次重试仍冲突，抛出异常
+                raise RuntimeError(f"MoeMail 邮箱冲突：{error_msg}")
+
+            if r.status_code != 200:
+                print(f"[MoeMail] 生成失败：status={r.status_code}, body={r.text[:200]}")
+                raise RuntimeError(f"MoeMail 生成失败：{r.status_code}")
+
+            data = r.json()
+            # 接口文档：返回 { id, address }
+            self._email = data.get("address", "")
+            email_id = data.get("id", "")
+
+            if not email_id or not self._email:
+                print(f"[MoeMail] 返回数据异常：{data}")
+                raise RuntimeError(f"MoeMail 返回数据异常：{data}")
+
+            print(f"[MoeMail] 生成成功：{self._email} id={email_id} domain={domain}")
             self._email_count = getattr(self, '_email_count', 0) + 1
-        return MailboxAccount(email=self._email, account_id=str(email_id))
+            return MailboxAccount(email=self._email, account_id=str(email_id))
+
+        raise RuntimeError("MoeMail 邮箱生成失败：超过最大重试次数")
+
 
     def get_current_ids(self, account: MailboxAccount) -> set:
         try:
@@ -1373,4 +1429,147 @@ class FreemailMailbox(BaseMailbox):
             except Exception:
                 pass
             time.sleep(3)
+        raise TimeoutError(f"等待验证码超时 ({timeout}s)")
+
+
+class ChatGptMailbox(BaseMailbox):
+    """
+    ChatGPT 邮箱服务 - 基于 Mail.tm 的临时邮箱
+    集成自 chatgpt.py 中的邮箱注册逻辑
+    """
+
+    def __init__(self, mail_tm_password: str = "", proxy: str = None):
+        self.api = "https://api.mail.tm"
+        self.proxy = {"http": proxy, "https": proxy} if proxy else None
+        self._token = None
+        self._email = None
+        self._password = mail_tm_password or "MailTm123!"  # 默认密码
+
+    def _request(self, method: str, path: str, json_data: dict = None, token: str = None) -> dict:
+        """发送请求到 Mail.tm API"""
+        import requests
+        headers = {
+            "content-type": "application/json",
+            "accept": "application/json",
+            "user-agent": "Mozilla/5.0",
+            "pragma": "no-cache",
+        }
+        if token:
+            headers["authorization"] = f"Bearer {token}"
+        try:
+            resp = requests.request(
+                method, f"{self.api}{path}", json=json_data,
+                headers=headers, timeout=20, proxies=self.proxy
+            )
+            return {"status_code": resp.status_code, "data": resp.json() if resp.text else {}}
+        except Exception as e:
+            return {"status_code": 0, "data": {}, "error": str(e)}
+
+    def get_email(self) -> MailboxAccount:
+        """获取一个可用邮箱"""
+        import random
+        import string
+
+        # 获取可用域名列表
+        resp = self._request("GET", "/domains")
+        if resp.get("status_code") != 200:
+            raise RuntimeError("无法获取 Mail.tm 可用邮箱域名列表")
+
+        data = resp.get("data", {})
+        domains = data.get("hydra:member", data.get("hydra:collection", []))
+        if not domains:
+            raise RuntimeError("Mail.tm 域名列表为空")
+
+        domain = domains[0].get("domain")
+        self._log(f"[ChatGptMail] 获取到可用域名：{domain}")
+
+        # 生成随机邮箱
+        prefix = "".join(random.choices(string.ascii_lowercase + string.digits, k=10))
+        email = f"{prefix}@{domain}"
+
+        # 注册邮箱
+        reg_resp = self._request("POST", "/accounts", {
+            "address": email,
+            "password": self._password
+        })
+        if reg_resp.get("status_code") not in [200, 201]:
+            raise RuntimeError(f"Mail.tm 邮箱注册被拒：{reg_resp}")
+        self._log(f"[ChatGptMail] 邮箱注册成功：{email}")
+
+        # 获取访问 Token
+        token_resp = self._request("POST", "/token", {
+            "address": email,
+            "password": self._password
+        })
+        if token_resp.get("status_code") != 200:
+            raise RuntimeError("获取邮箱 Token 失败")
+
+        self._token = token_resp.get("data", {}).get("token")
+        if not self._token:
+            raise RuntimeError("Token 解析失败")
+
+        self._email = email
+        self._log(f"[ChatGptMail] 获取邮箱 Token 成功")
+        return MailboxAccount(email=email, account_id=self._token)
+
+    def get_current_ids(self, account: MailboxAccount) -> set:
+        """获取当前邮件 ID 集合"""
+        try:
+            resp = self._request("GET", "/messages", token=account.account_id)
+            if resp.get("status_code") != 200:
+                return set()
+            data = resp.get("data", {})
+            messages = data.get("hydra:member", []) if isinstance(data, dict) else data
+            if not isinstance(messages, list):
+                return set()
+            return {str(msg.get("id", "")) for msg in messages if msg.get("id")}
+        except Exception:
+            return set()
+
+    def wait_for_code(self, account: MailboxAccount, keyword: str = "",
+                      timeout: int = 120, before_ids: set = None, code_pattern: str = None, **kwargs) -> str:
+        """等待并获取验证码"""
+        import time
+        seen = set(before_ids or [])
+        start = time.time()
+
+        while time.time() - start < timeout:
+            try:
+                resp = self._request("GET", "/messages", token=account.account_id)
+                if resp.get("status_code") == 200:
+                    data = resp.get("data", {})
+                    messages = data.get("hydra:member", []) if isinstance(data, dict) else data
+                    if not isinstance(messages, list):
+                        messages = []
+
+                    for msg in messages:
+                        if not isinstance(msg, dict):
+                            continue
+                        mid = str(msg.get("id", ""))
+                        if mid in seen:
+                            continue
+
+                        subject = msg.get("subject", "")
+                        intro = msg.get("intro", "")
+
+                        # 检查是否包含关键词（如 OpenAI、ChatGPT）
+                        if keyword and keyword.lower() not in str(subject).lower() and keyword.lower() not in str(intro).lower():
+                            seen.add(mid)
+                            continue
+
+                        # 获取邮件详情
+                        detail_resp = self._request("GET", f"/messages/{mid}", token=account.account_id)
+                        if detail_resp.get("status_code") == 200:
+                            detail_data = detail_resp.get("data", {})
+                            text = detail_data.get("text", "") + " " + detail_data.get("html", "") + " " + subject
+                            code = self._safe_extract(text, code_pattern)
+                            if code:
+                                self._log(f"[ChatGptMail] 命中验证码：{code}")
+                                return code
+
+                        seen.add(mid)
+            except Exception:
+                pass
+            time.sleep(8)
+
         raise TimeoutError(f"等待验证码超时 ({timeout}s)")

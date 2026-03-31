@@ -446,16 +446,49 @@ def _ensure_cliproxyapi_runtime_config(repo: Path):
     secret = _get_setting("cliproxyapi_management_key", "cliproxyapi")
     lines = config_path.read_text(encoding="utf-8").splitlines()
     updated_lines = []
-    replaced = False
+    replaced_secret = False
+    replaced_remote = False
+    in_remote_section = False
+
     for line in lines:
-        if line.lstrip().startswith("secret-key:"):
+        stripped = line.lstrip()
+        # 处理 secret-key
+        if stripped.startswith("secret-key:"):
             indent = line[: len(line) - len(line.lstrip())]
             updated_lines.append(f'{indent}secret-key: "{secret}"')
-            replaced = True
-        else:
+            replaced_secret = True
+            continue
+
+        # 处理 remote-management section
+        if stripped.startswith("remote-management:"):
+            in_remote_section = True
             updated_lines.append(line)
-    if not replaced:
-        updated_lines.append(f'  secret-key: "{secret}"')
+            continue
+
+        # 在 remote-management section 内处理 allow-remote
+        if in_remote_section and stripped.startswith("allow-remote:"):
+            indent = line[: len(line) - len(line.lstrip())]
+            updated_lines.append(f'{indent}allow-remote: true')
+            replaced_remote = True
+            in_remote_section = False
+            continue
+
+        # 退出 section
+        if in_remote_section and stripped and not stripped.startswith(" ") and not stripped.startswith("\t"):
+            in_remote_section = False
+
+        updated_lines.append(line)
+
+    # 如果没有找到 secret-key，添加到 remote-management section 或作为独立配置
+    if not replaced_secret:
+        updated_lines.append(f'secret-key: "{secret}"')
+
+    # 如果没有找到 remote-management section，添加它
+    if not replaced_remote:
+        updated_lines.append("")
+        updated_lines.append("remote-management:")
+        updated_lines.append("  allow-remote: true")
+
     config_path.write_text("\n".join(updated_lines) + "\n", encoding="utf-8")
 
 
@@ -535,7 +568,7 @@ def _build_command(name: str) -> tuple[list[str], Path]:
                 "--interface",
                 "asgi",
                 "--host",
-                "127.0.0.1",
+                "0.0.0.0",
                 "--port",
                 "8011",
                 "--workers",
@@ -551,7 +584,7 @@ def _build_command(name: str) -> tuple[list[str], Path]:
             "--interface",
             "asgi",
             "--host",
-            "127.0.0.1",
+            "0.0.0.0",
             "--port",
             "8011",
             "--workers",
