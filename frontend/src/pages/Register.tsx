@@ -39,7 +39,7 @@ export default function Register() {
     { key: 'moemail', label: 'MoeMail (sall.cc)' },
     { key: 'cfworker', label: 'CF Worker' },
     { key: 'luckmail', label: 'LuckMail' },
-    { key: 'chatgpt_mail', label: 'ChatGPT Mail (Mail.tm)' },
+    { key: 'api_mail', label: 'API Mail (Mail.tm)' },
   ]
 
   useEffect(() => {
@@ -88,7 +88,7 @@ export default function Register() {
         luckmail_api_key: cfg.luckmail_api_key || '',
         luckmail_email_type: cfg.luckmail_email_type || '',
         luckmail_domain: cfg.luckmail_domain || '',
-        chatgpt_mail_tm_password: cfg.chatgpt_mail_tm_password || '',
+        api_mail_tm_password: cfg.api_mail_tm_password || '',
       })
     })
   }, [form])
@@ -141,7 +141,7 @@ export default function Register() {
           luckmail_api_key: values.luckmail_api_key,
           luckmail_email_type: values.luckmail_email_type,
           luckmail_domain: values.luckmail_domain,
-          chatgpt_mail_tm_password: values.chatgpt_mail_tm_password,
+          api_mail_tm_password: values.api_mail_tm_password,
           yescaptcha_key: values.yescaptcha_key,
           solver_url: values.solver_url,
         },
@@ -334,9 +334,9 @@ export default function Register() {
               </Form.Item>
             </>
           )}
-          {mailProvider === 'chatgpt_mail' && (
+          {mailProvider === 'api_mail' && (
             <>
-              <Form.Item name="chatgpt_mail_tm_password" label="邮箱密码">
+              <Form.Item name="api_mail_tm_password" label="邮箱密码">
                 <Input.Password placeholder="默认 MailTm123!" />
               </Form.Item>
             </>

@@ -175,9 +175,9 @@ def create_mailbox(
             email_type=extra.get("luckmail_email_type", ""),
             domain=extra.get("luckmail_domain", ""),
         )
-    elif provider == "chatgpt_mail":
-        return ChatGptMailbox(
-            mail_tm_password=extra.get("chatgpt_mail_tm_password", ""),
+    elif provider == "api_mail":
+        return ApiMailMailbox(
+            mail_tm_password=extra.get("api_mail_tm_password", ""),
             proxy=proxy,
         )
     else:  # laoudo
@@ -1725,10 +1725,9 @@ class FreemailMailbox(BaseMailbox):
         raise TimeoutError(f"等待验证码超时 ({timeout}s)")
 
 
-class ChatGptMailbox(BaseMailbox):
+class ApiMailMailbox(BaseMailbox):
     """
-    ChatGPT 邮箱服务 - 基于 Mail.tm 的临时邮箱
-    集成自 chatgpt.py 中的邮箱注册逻辑
+    API Mail 邮箱服务 - 基于 Mail.tm 的临时邮箱
     """
 
     def __init__(self, mail_tm_password: str = "", proxy: str = None):

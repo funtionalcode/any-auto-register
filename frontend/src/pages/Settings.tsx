@@ -25,7 +25,7 @@ const SELECT_FIELDS: Record<string, { label: string; value: string }[]> = {
     { label: 'Freemail（自建 CF Worker）', value: 'freemail' },
     { label: 'CF Worker（自建域名）', value: 'cfworker' },
     { label: 'LuckMail（订单接码 / 已购邮箱）', value: 'luckmail' },
-    { label: 'ChatGPT Mail（Mail.tm 临时邮箱）', value: 'chatgpt_mail' },
+    { label: 'API Mail（Mail.tm 临时邮箱）', value: 'api_mail' },
   ],
   maliapi_auto_domain_strategy: [
     { label: 'balanced', value: 'balanced' },
@@ -161,10 +161,10 @@ const TAB_ITEMS = [
         ],
       },
       {
-        title: 'ChatGPT Mail (Mail.tm)',
+        title: 'API Mail (Mail.tm)',
         desc: '基于 Mail.tm 的临时邮箱服务，自动生成邮箱并接收验证码',
         fields: [
-          { key: 'chatgpt_mail_tm_password', label: '邮箱密码', secret: true, placeholder: '默认 MailTm123!' },
+          { key: 'api_mail_tm_password', label: '邮箱密码', secret: true, placeholder: '默认 MailTm123!' },
         ],
       },
     ],
@@ -429,7 +429,7 @@ const MAILBOX_SERVICES = [
   { key: 'freemail', label: 'Freemail（自建 CF Worker）', configKeys: ['freemail_api_url', 'freemail_admin_token'] },
   { key: 'cfworker', label: 'CF Worker（自建域名）', configKeys: ['cfworker_api_url', 'cfworker_admin_token'] },
   { key: 'luckmail', label: 'LuckMail（订单接码 / 已购邮箱）', configKeys: ['luckmail_base_url', 'luckmail_api_key'] },
-  { key: 'chatgpt_mail', label: 'ChatGPT Mail（Mail.tm 临时邮箱）', configKeys: ['chatgpt_mail_tm_password'] },
+  { key: 'api_mail', label: 'API Mail（Mail.tm 临时邮箱）', configKeys: ['api_mail_tm_password'] },
 ]
 
 function MailboxServiceManager({ form }: { form: any }) {
