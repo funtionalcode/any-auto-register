@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Card, Form, Input, Select, Button, message, Tabs, Space, Tag, Typography, Modal, Switch } from 'antd'
+import type { FormInstance } from 'antd'
 import {
   SaveOutlined,
   EyeOutlined,
@@ -375,6 +376,23 @@ function parseStoredDomainList(value: unknown): string[] {
   )
 }
 
+function parseEnabledServiceList(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return Array.from(new Set(value.map((item) => String(item || '').trim()).filter(Boolean)))
+  }
+
+  if (typeof value !== 'string') return []
+
+  return Array.from(
+    new Set(
+      value
+        .split(',')
+        .map((item) => item.trim())
+        .filter(Boolean),
+    ),
+  )
+}
+
 function ConfigField({ field }: { field: FieldConfig }) {
   const [showSecret, setShowSecret] = useState(false)
   const options = SELECT_FIELDS[field.key]
@@ -403,10 +421,10 @@ function ConfigField({ field }: { field: FieldConfig }) {
   )
 }
 
-function ConfigSection({ section, form }: { section: SectionConfig; form?: any }) {
+function ConfigSection({ section, form }: { section: SectionConfig; form?: FormInstance }) {
   // 邮箱服务管理面板
   if (section.is_service_manager) {
-    return <MailboxServiceManager form={form} />
+    return form ? <MailboxServiceManager form={form} /> : null
   }
 
   return (
@@ -432,49 +450,15 @@ const MAILBOX_SERVICES = [
   { key: 'api_mail', label: 'API Mail（Mail.tm 临时邮箱）', configKeys: ['api_mail_tm_password'] },
 ]
 
-function MailboxServiceManager({ form }: { form: any }) {
-  const [enabledServices, setEnabledServices] = useState<string[]>([])
-  const [, setConfigValues] = useState<Record<string, unknown>>({})
-
-  // 监听配置变化
-  useEffect(() => {
-    const subscription = form.onValuesChange((changedValues: Record<string, unknown>) => {
-      // 监听邮箱服务启用状态
-      if (changedValues.mailbox_services_enabled !== undefined) {
-        const enabledValue = changedValues.mailbox_services_enabled
-        const enabled = typeof enabledValue === 'string' ? enabledValue.split(',').filter(Boolean) : []
-        setEnabledServices(enabled)
-      }
-      // 监听各邮箱配置
-      for (const service of MAILBOX_SERVICES) {
-        for (const key of service.configKeys) {
-          if (changedValues[key] !== undefined) {
-            setConfigValues(prev => ({ ...prev, [key]: changedValues[key] }))
-          }
-        }
-      }
-    })
-    return () => subscription()
-  }, [form])
-
-  // 初始化时读取配置
-  useEffect(() => {
-    const initEnabled = () => {
-      const enabledStr = form.getFieldValue('mailbox_services_enabled') || ''
-      const enabled = enabledStr.split(',').filter(Boolean)
-      setEnabledServices(enabled)
-    }
-    initEnabled()
-  }, [form])
-
+function MailboxServiceManager({ form }: { form: FormInstance }) {
   const toggleService = (serviceKey: string, checked: boolean) => {
+    const enabledServices = parseEnabledServiceList(form.getFieldValue('mailbox_services_enabled'))
     let newEnabled = checked
       ? [...enabledServices, serviceKey]
-      : enabledServices.filter(s => s !== serviceKey)
+      : enabledServices.filter((service) => service !== serviceKey)
 
     // 去重
     newEnabled = Array.from(new Set(newEnabled))
-    setEnabledServices(newEnabled)
     form.setFieldValue('mailbox_services_enabled', newEnabled.join(','))
   }
 
@@ -487,65 +471,72 @@ function MailboxServiceManager({ form }: { form: any }) {
   }
 
   return (
-    <Card
-      title="邮箱服务启用管理"
-      extra={<span style={{ fontSize: 12, color: '#7a8ba3' }}>只有启用的服务会在注册页面的下拉列表中展示</span>}
-      style={{ marginBottom: 16 }}
-    >
-      <Space direction="vertical" style={{ width: '100%' }} size={12}>
-        {MAILBOX_SERVICES.map(service => {
-          const isEnabled = enabledServices.includes(service.key)
-          const isConfigured = hasConfig(service) || service.configKeys.length === 0
+    <Form.Item noStyle shouldUpdate>
+      {() => {
+        const enabledServices = parseEnabledServiceList(form.getFieldValue('mailbox_services_enabled'))
 
-          return (
-            <div
-              key={service.key}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'space-between',
-                padding: '12px 16px',
-                borderRadius: 8,
-                background: isEnabled ? 'rgba(22, 163, 74, 0.04)' : 'rgba(0, 0, 0, 0.02)',
-                border: `1px solid ${isEnabled ? 'rgba(22, 163, 74, 0.3)' : 'rgba(0, 0, 0, 0.06)'}`,
-              }}
-            >
-              <div style={{ flex: 1 }}>
-                <div style={{ fontWeight: 500, marginBottom: 4 }}>
-                  {service.label}
-                  {isEnabled && (
-                    <Tag color="green" style={{ marginLeft: 8 }}>已启用</Tag>
-                  )}
-                  {!isEnabled && (
-                    <Tag style={{ marginLeft: 8 }}>已禁用</Tag>
-                  )}
-                </div>
-                <div style={{ fontSize: 12, color: '#7a8ba3' }}>
-                  {service.configKeys.length === 0
-                    ? '无需配置，启用后即可使用'
-                    : isConfigured
-                      ? '配置已保存'
-                      : '配置未完成'}
-                </div>
-              </div>
-              <Switch
-                checked={isEnabled}
-                onChange={(checked) => toggleService(service.key, checked)}
-                checkedChildren="启用"
-                unCheckedChildren="禁用"
-              />
-            </div>
-          )
-        })}
-      </Space>
-      <Form.Item name="mailbox_services_enabled" hidden>
-        <Input />
-      </Form.Item>
-    </Card>
+        return (
+          <Card
+            title="邮箱服务启用管理"
+            extra={<span style={{ fontSize: 12, color: '#7a8ba3' }}>只有启用的服务会在注册页面的下拉列表中展示</span>}
+            style={{ marginBottom: 16 }}
+          >
+            <Space direction="vertical" style={{ width: '100%' }} size={12}>
+              {MAILBOX_SERVICES.map((service) => {
+                const isEnabled = enabledServices.includes(service.key)
+                const isConfigured = hasConfig(service) || service.configKeys.length === 0
+
+                return (
+                  <div
+                    key={service.key}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      padding: '12px 16px',
+                      borderRadius: 8,
+                      background: isEnabled ? 'rgba(22, 163, 74, 0.04)' : 'rgba(0, 0, 0, 0.02)',
+                      border: `1px solid ${isEnabled ? 'rgba(22, 163, 74, 0.3)' : 'rgba(0, 0, 0, 0.06)'}`,
+                    }}
+                  >
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontWeight: 500, marginBottom: 4 }}>
+                        {service.label}
+                        {isEnabled ? (
+                          <Tag color="green" style={{ marginLeft: 8 }}>已启用</Tag>
+                        ) : (
+                          <Tag style={{ marginLeft: 8 }}>已禁用</Tag>
+                        )}
+                      </div>
+                      <div style={{ fontSize: 12, color: '#7a8ba3' }}>
+                        {service.configKeys.length === 0
+                          ? '无需配置，启用后即可使用'
+                          : isConfigured
+                            ? '配置已保存'
+                            : '配置未完成'}
+                      </div>
+                    </div>
+                    <Switch
+                      checked={isEnabled}
+                      onChange={(checked) => toggleService(service.key, checked)}
+                      checkedChildren="启用"
+                      unCheckedChildren="禁用"
+                    />
+                  </div>
+                )
+              })}
+            </Space>
+            <Form.Item name="mailbox_services_enabled" hidden>
+              <Input />
+            </Form.Item>
+          </Card>
+        )
+      }}
+    </Form.Item>
   )
 }
 
-function CFWorkerDomainPoolSection({ form }: { form: any }) {
+function CFWorkerDomainPoolSection({ form }: { form: FormInstance }) {
   const watchedDomains = Form.useWatch('cfworker_domains', form) || []
   const watchedEnabledDomains = Form.useWatch('cfworker_enabled_domains', form) || []
   const normalizedDomains = normalizeDomainList(watchedDomains)
