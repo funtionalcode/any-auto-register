@@ -275,6 +275,61 @@ def list_status() -> list[dict[str, Any]]:
     return [_status_one(name) for name in _SERVICE_META]
 
 
+def read_log(name: str, max_lines: int = 400, max_bytes: int = 128 * 1024) -> dict[str, Any]:
+    if name not in _SERVICE_META:
+        raise KeyError(name)
+
+    path = _log_path(name)
+    if not path.exists():
+        return {
+            "name": name,
+            "log_path": str(path),
+            "exists": False,
+            "content": "",
+            "truncated": False,
+            "updated_at": 0.0,
+        }
+
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            start = max(0, size - max(1, int(max_bytes or 1)))
+            f.seek(start)
+            raw = f.read()
+
+        truncated = start > 0
+        text = raw.decode("utf-8", errors="ignore")
+        if truncated:
+            newline_index = text.find("\n")
+            if newline_index >= 0:
+                text = text[newline_index + 1 :]
+
+        lines = text.splitlines()
+        if len(lines) > max_lines:
+            lines = lines[-max_lines:]
+            truncated = True
+
+        return {
+            "name": name,
+            "log_path": str(path),
+            "exists": True,
+            "content": "\n".join(lines),
+            "truncated": truncated,
+            "updated_at": path.stat().st_mtime,
+        }
+    except Exception as e:
+        return {
+            "name": name,
+            "log_path": str(path),
+            "exists": True,
+            "content": "",
+            "truncated": False,
+            "updated_at": 0.0,
+            "error": str(e),
+        }
+
+
 def _find_go() -> str | None:
     candidates = [
         shutil.which("go"),

@@ -1757,6 +1757,26 @@ class ApiMailMailbox(BaseMailbox):
         except Exception as e:
             return {"status_code": 0, "data": {}, "error": str(e)}
 
+    def _mail_tm_items(self, data: Any) -> list[dict]:
+        if isinstance(data, dict):
+            items = data.get("hydra:member")
+            if not isinstance(items, list):
+                items = data.get("hydra:collection", [])
+        elif isinstance(data, list):
+            items = data
+        else:
+            items = []
+        return [item for item in items if isinstance(item, dict)]
+
+    def _mail_tm_object(self, data: Any) -> dict:
+        if isinstance(data, dict):
+            return data
+        if isinstance(data, list):
+            for item in data:
+                if isinstance(item, dict):
+                    return item
+        return {}
+
     def get_email(self) -> MailboxAccount:
         """获取一个可用邮箱"""
         import random
@@ -1767,12 +1787,13 @@ class ApiMailMailbox(BaseMailbox):
         if resp.get("status_code") != 200:
             raise RuntimeError("无法获取 Mail.tm 可用邮箱域名列表")
 
-        data = resp.get("data", {})
-        domains = data.get("hydra:member", data.get("hydra:collection", []))
+        domains = self._mail_tm_items(resp.get("data", {}))
         if not domains:
             raise RuntimeError("Mail.tm 域名列表为空")
 
-        domain = domains[0].get("domain")
+        domain = str((domains[0] or {}).get("domain") or "").strip()
+        if not domain:
+            raise RuntimeError(f"Mail.tm 域名解析失败：{resp.get('data')!r}")
         self._log(f"[ChatGptMail] 获取到可用域名：{domain}")
 
         # 生成随机邮箱
@@ -1796,7 +1817,8 @@ class ApiMailMailbox(BaseMailbox):
         if token_resp.get("status_code") != 200:
             raise RuntimeError("获取邮箱 Token 失败")
 
-        self._token = token_resp.get("data", {}).get("token")
+        token_data = self._mail_tm_object(token_resp.get("data", {}))
+        self._token = str(token_data.get("token") or "").strip()
         if not self._token:
             raise RuntimeError("Token 解析失败")
 
@@ -1810,10 +1832,7 @@ class ApiMailMailbox(BaseMailbox):
             resp = self._request("GET", "/messages", token=account.account_id)
             if resp.get("status_code") != 200:
                 return set()
-            data = resp.get("data", {})
-            messages = data.get("hydra:member", []) if isinstance(data, dict) else data
-            if not isinstance(messages, list):
-                return set()
+            messages = self._mail_tm_items(resp.get("data", {}))
             return {str(msg.get("id", "")) for msg in messages if msg.get("id")}
         except Exception:
             return set()
@@ -1829,14 +1848,9 @@ class ApiMailMailbox(BaseMailbox):
             try:
                 resp = self._request("GET", "/messages", token=account.account_id)
                 if resp.get("status_code") == 200:
-                    data = resp.get("data", {})
-                    messages = data.get("hydra:member", []) if isinstance(data, dict) else data
-                    if not isinstance(messages, list):
-                        messages = []
+                    messages = self._mail_tm_items(resp.get("data", {}))
 
                     for msg in messages:
-                        if not isinstance(msg, dict):
-                            continue
                         mid = str(msg.get("id", ""))
                         if mid in seen:
                             continue
@@ -1852,7 +1866,7 @@ class ApiMailMailbox(BaseMailbox):
                         # 获取邮件详情
                         detail_resp = self._request("GET", f"/messages/{mid}", token=account.account_id)
                         if detail_resp.get("status_code") == 200:
-                            detail_data = detail_resp.get("data", {})
+                            detail_data = self._mail_tm_object(detail_resp.get("data", {}))
                             text = detail_data.get("text", "") + " " + detail_data.get("html", "") + " " + subject
                             code = self._safe_extract(text, code_pattern)
                             if code:

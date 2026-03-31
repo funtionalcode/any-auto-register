@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react'
-import { Card, Form, Input, Select, Button, message, Tabs, Space, Tag, Typography, Modal, Switch } from 'antd'
+import { useEffect, useRef, useState } from 'react'
+import { Card, Form, Input, Select, Button, message, Tabs, Space, Tag, Typography, Modal } from 'antd'
 import type { FormInstance } from 'antd'
 import {
   SaveOutlined,
@@ -70,105 +70,7 @@ const TAB_ITEMS = [
     key: 'mailbox',
     label: '邮箱服务',
     icon: <MailOutlined />,
-    sections: [
-      {
-        title: '邮箱服务管理',
-        desc: '启用/禁用邮箱服务，只有启用的服务会在注册页面展示',
-        fields: [],
-        is_service_manager: true,
-      },
-      {
-        title: '默认邮箱服务',
-        desc: '选择注册时使用的邮箱类型',
-        fields: [{ key: 'mail_provider', label: '邮箱服务', type: 'select' }],
-      },
-      {
-        title: 'Laoudo',
-        desc: '固定邮箱，手动配置',
-        fields: [
-          { key: 'laoudo_email', label: '邮箱地址', placeholder: 'xxx@laoudo.com' },
-          { key: 'laoudo_account_id', label: 'Account ID', placeholder: '563' },
-          { key: 'laoudo_auth', label: 'JWT Token', placeholder: 'eyJ...', secret: true },
-        ],
-      },
-      {
-        title: 'Freemail',
-        desc: '基于 Cloudflare Worker 的自建邮箱，支持管理员令牌或账号密码认证',
-        fields: [
-          { key: 'freemail_api_url', label: 'API URL', placeholder: 'https://mail.example.com' },
-          { key: 'freemail_admin_token', label: '管理员令牌', secret: true },
-          { key: 'freemail_username', label: '用户名（可选）' },
-          { key: 'freemail_password', label: '密码（可选）', secret: true },
-        ],
-      },
-      {
-        title: 'MoeMail',
-        desc: '自动注册账号并生成临时邮箱',
-        fields: [{ key: 'moemail_api_url', label: 'API URL', placeholder: 'https://sall.cc' }],
-      },
-      {
-        title: 'SkyMail',
-        desc: 'CloudMail 兼容接口（addUser / emailList）',
-        fields: [
-          { key: 'skymail_api_base', label: 'API Base', placeholder: 'https://api.skymail.ink' },
-          { key: 'skymail_token', label: 'Authorization Token', secret: true },
-          { key: 'skymail_domain', label: '邮箱域名', placeholder: 'mail.example.com' },
-        ],
-      },
-      {
-        title: 'YYDS Mail / MaliAPI',
-        desc: '基于 API Key 创建临时邮箱并轮询收件箱消息',
-        fields: [
-          { key: 'maliapi_base_url', label: 'API URL', placeholder: 'https://maliapi.215.im/v1' },
-          { key: 'maliapi_api_key', label: 'API Key', secret: true },
-          { key: 'maliapi_domain', label: '邮箱域名（可选）', placeholder: 'example.com' },
-          { key: 'maliapi_auto_domain_strategy', label: '自动域名策略', type: 'select' },
-        ],
-      },
-      {
-        title: 'TempMail.lol',
-        desc: '自动生成邮箱，无需配置，需要代理访问（CN IP 被封）',
-        fields: [],
-      },
-      {
-        title: 'DuckMail',
-        desc: '自动生成邮箱，随机创建账号',
-        fields: [
-          { key: 'duckmail_api_url', label: 'Web URL', placeholder: 'https://www.duckmail.sbs' },
-          { key: 'duckmail_provider_url', label: 'Provider URL', placeholder: 'https://api.duckmail.sbs' },
-          { key: 'duckmail_bearer', label: 'Bearer Token', placeholder: 'kevin273945', secret: true },
-          { key: 'duckmail_domain', label: '自定义域名', placeholder: '留空则从 Provider URL 推导' },
-          { key: 'duckmail_api_key', label: 'API Key（私有域名）', placeholder: 'dk_xxx（domain.duckmail.sbs 获取）', secret: true },
-        ],
-      },
-      {
-        title: 'CF Worker 自建邮箱',
-        desc: '基于 Cloudflare Worker 的自建临时邮箱服务',
-        fields: [
-          { key: 'cfworker_api_url', label: 'API URL', placeholder: 'https://apimail.example.com' },
-          { key: 'cfworker_admin_token', label: '管理员 Token', secret: true },
-          { key: 'cfworker_custom_auth', label: '站点密码', secret: true },
-          { key: 'cfworker_fingerprint', label: 'Fingerprint', placeholder: '6703363b...' },
-        ],
-      },
-      {
-        title: 'LuckMail',
-        desc: 'ChatGPT 走购买邮箱，其他平台继续走订单接码老逻辑',
-        fields: [
-          { key: 'luckmail_base_url', label: '平台地址', placeholder: 'https://mails.luckyous.com' },
-          { key: 'luckmail_api_key', label: 'API Key', secret: true },
-          { key: 'luckmail_email_type', label: '邮箱类型（可选）', placeholder: 'ms_graph / ms_imap / self_built' },
-          { key: 'luckmail_domain', label: '邮箱域名（可选）', placeholder: 'outlook.com / gmail.com' },
-        ],
-      },
-      {
-        title: 'API Mail (Mail.tm)',
-        desc: '基于 Mail.tm 的临时邮箱服务，自动生成邮箱并接收验证码',
-        fields: [
-          { key: 'api_mail_tm_password', label: '邮箱密码', secret: true, placeholder: '默认 MailTm123!' },
-        ],
-      },
-    ],
+    sections: [],
   },
   {
     key: 'captcha',
@@ -322,7 +224,14 @@ interface SectionConfig {
   title: string
   desc?: string
   fields: FieldConfig[]
-  is_service_manager?: boolean
+}
+
+interface MailboxServiceConfig {
+  key: string
+  label: string
+  title: string
+  desc: string
+  fields: FieldConfig[]
 }
 
 interface TabConfig {
@@ -376,23 +285,6 @@ function parseStoredDomainList(value: unknown): string[] {
   )
 }
 
-function parseEnabledServiceList(value: unknown): string[] {
-  if (Array.isArray(value)) {
-    return Array.from(new Set(value.map((item) => String(item || '').trim()).filter(Boolean)))
-  }
-
-  if (typeof value !== 'string') return []
-
-  return Array.from(
-    new Set(
-      value
-        .split(',')
-        .map((item) => item.trim())
-        .filter(Boolean),
-    ),
-  )
-}
-
 function ConfigField({ field }: { field: FieldConfig }) {
   const [showSecret, setShowSecret] = useState(false)
   const options = SELECT_FIELDS[field.key]
@@ -402,7 +294,7 @@ function ConfigField({ field }: { field: FieldConfig }) {
       : undefined
 
   return (
-    <Form.Item label={field.label} name={field.key} extra={helpText}>
+    <Form.Item label={field.label} name={field.key} extra={helpText} preserve>
       {options ? (
         <Select options={options} style={{ width: '100%' }} />
       ) : field.secret ? (
@@ -421,12 +313,7 @@ function ConfigField({ field }: { field: FieldConfig }) {
   )
 }
 
-function ConfigSection({ section, form }: { section: SectionConfig; form?: FormInstance }) {
-  // 邮箱服务管理面板
-  if (section.is_service_manager) {
-    return form ? <MailboxServiceManager form={form} /> : null
-  }
-
+function ConfigSection({ section }: { section: SectionConfig }) {
   return (
     <Card title={section.title} extra={section.desc && <span style={{ fontSize: 12, color: '#7a8ba3' }}>{section.desc}</span>} style={{ marginBottom: 16 }}>
       {section.fields.map((field) => (
@@ -436,103 +323,147 @@ function ConfigSection({ section, form }: { section: SectionConfig; form?: FormI
   )
 }
 
-// 邮箱服务配置列表（用于启用/禁用管理）
-const MAILBOX_SERVICES = [
-  { key: 'laoudo', label: 'Laoudo（固定邮箱）', configKeys: ['laoudo_auth', 'laoudo_email', 'laoudo_account_id'] },
-  { key: 'tempmail_lol', label: 'TempMail.lol（自动生成）', configKeys: [] },
-  { key: 'skymail', label: 'SkyMail（CloudMail 接口）', configKeys: ['skymail_api_base', 'skymail_token', 'skymail_domain'] },
-  { key: 'duckmail', label: 'DuckMail（自动生成）', configKeys: ['duckmail_api_url', 'duckmail_provider_url', 'duckmail_bearer'] },
-  { key: 'moemail', label: 'MoeMail (sall.cc)', configKeys: ['moemail_api_url'] },
-  { key: 'maliapi', label: 'YYDS Mail / MaliAPI', configKeys: ['maliapi_base_url', 'maliapi_api_key'] },
-  { key: 'freemail', label: 'Freemail（自建 CF Worker）', configKeys: ['freemail_api_url', 'freemail_admin_token'] },
-  { key: 'cfworker', label: 'CF Worker（自建域名）', configKeys: ['cfworker_api_url', 'cfworker_admin_token'] },
-  { key: 'luckmail', label: 'LuckMail（订单接码 / 已购邮箱）', configKeys: ['luckmail_base_url', 'luckmail_api_key'] },
-  { key: 'api_mail', label: 'API Mail（Mail.tm 临时邮箱）', configKeys: ['api_mail_tm_password'] },
+const MAILBOX_SERVICES: MailboxServiceConfig[] = [
+  {
+    key: 'laoudo',
+    label: 'Laoudo（固定邮箱）',
+    title: 'Laoudo',
+    desc: '固定邮箱，手动配置',
+    fields: [
+      { key: 'laoudo_email', label: '邮箱地址', placeholder: 'xxx@laoudo.com' },
+      { key: 'laoudo_account_id', label: 'Account ID', placeholder: '563' },
+      { key: 'laoudo_auth', label: 'JWT Token', placeholder: 'eyJ...', secret: true },
+    ],
+  },
+  {
+    key: 'tempmail_lol',
+    label: 'TempMail.lol（自动生成）',
+    title: 'TempMail.lol',
+    desc: '自动生成邮箱，无需配置，需要代理访问（CN IP 被封）',
+    fields: [],
+  },
+  {
+    key: 'skymail',
+    label: 'SkyMail（CloudMail 接口）',
+    title: 'SkyMail',
+    desc: 'CloudMail 兼容接口（addUser / emailList）',
+    fields: [
+      { key: 'skymail_api_base', label: 'API Base', placeholder: 'https://api.skymail.ink' },
+      { key: 'skymail_token', label: 'Authorization Token', secret: true },
+      { key: 'skymail_domain', label: '邮箱域名', placeholder: 'mail.example.com' },
+    ],
+  },
+  {
+    key: 'duckmail',
+    label: 'DuckMail（自动生成）',
+    title: 'DuckMail',
+    desc: '自动生成邮箱，随机创建账号',
+    fields: [
+      { key: 'duckmail_api_url', label: 'Web URL', placeholder: 'https://www.duckmail.sbs' },
+      { key: 'duckmail_provider_url', label: 'Provider URL', placeholder: 'https://api.duckmail.sbs' },
+      { key: 'duckmail_bearer', label: 'Bearer Token', placeholder: 'kevin273945', secret: true },
+      { key: 'duckmail_domain', label: '自定义域名', placeholder: '留空则从 Provider URL 推导' },
+      { key: 'duckmail_api_key', label: 'API Key（私有域名）', placeholder: 'dk_xxx（domain.duckmail.sbs 获取）', secret: true },
+    ],
+  },
+  {
+    key: 'moemail',
+    label: 'MoeMail (sall.cc)',
+    title: 'MoeMail',
+    desc: '自动注册账号并生成临时邮箱',
+    fields: [{ key: 'moemail_api_url', label: 'API URL', placeholder: 'https://sall.cc' }],
+  },
+  {
+    key: 'maliapi',
+    label: 'YYDS Mail / MaliAPI',
+    title: 'YYDS Mail / MaliAPI',
+    desc: '基于 API Key 创建临时邮箱并轮询收件箱消息',
+    fields: [
+      { key: 'maliapi_base_url', label: 'API URL', placeholder: 'https://maliapi.215.im/v1' },
+      { key: 'maliapi_api_key', label: 'API Key', secret: true },
+      { key: 'maliapi_domain', label: '邮箱域名（可选）', placeholder: 'example.com' },
+      { key: 'maliapi_auto_domain_strategy', label: '自动域名策略', type: 'select' },
+    ],
+  },
+  {
+    key: 'freemail',
+    label: 'Freemail（自建 CF Worker）',
+    title: 'Freemail',
+    desc: '基于 Cloudflare Worker 的自建邮箱，支持管理员令牌或账号密码认证',
+    fields: [
+      { key: 'freemail_api_url', label: 'API URL', placeholder: 'https://mail.example.com' },
+      { key: 'freemail_admin_token', label: '管理员令牌', secret: true },
+      { key: 'freemail_username', label: '用户名（可选）' },
+      { key: 'freemail_password', label: '密码（可选）', secret: true },
+    ],
+  },
+  {
+    key: 'cfworker',
+    label: 'CF Worker（自建域名）',
+    title: 'CF Worker 自建邮箱',
+    desc: '基于 Cloudflare Worker 的自建临时邮箱服务',
+    fields: [
+      { key: 'cfworker_api_url', label: 'API URL', placeholder: 'https://apimail.example.com' },
+      { key: 'cfworker_admin_token', label: '管理员 Token', secret: true },
+      { key: 'cfworker_custom_auth', label: '站点密码', secret: true },
+      { key: 'cfworker_fingerprint', label: 'Fingerprint', placeholder: '6703363b...' },
+    ],
+  },
+  {
+    key: 'luckmail',
+    label: 'LuckMail（订单接码 / 已购邮箱）',
+    title: 'LuckMail',
+    desc: 'ChatGPT 走购买邮箱，其他平台继续走订单接码老逻辑',
+    fields: [
+      { key: 'luckmail_base_url', label: '平台地址', placeholder: 'https://mails.luckyous.com' },
+      { key: 'luckmail_api_key', label: 'API Key', secret: true },
+      { key: 'luckmail_email_type', label: '邮箱类型（可选）', placeholder: 'ms_graph / ms_imap / self_built' },
+      { key: 'luckmail_domain', label: '邮箱域名（可选）', placeholder: 'outlook.com / gmail.com' },
+    ],
+  },
+  {
+    key: 'api_mail',
+    label: 'API Mail（Mail.tm 临时邮箱）',
+    title: 'API Mail (Mail.tm)',
+    desc: '基于 Mail.tm 的临时邮箱服务，自动生成邮箱并接收验证码',
+    fields: [
+      { key: 'api_mail_tm_password', label: '邮箱密码', secret: true, placeholder: '默认 MailTm123!' },
+    ],
+  },
 ]
 
-function MailboxServiceManager({ form }: { form: FormInstance }) {
-  const toggleService = (serviceKey: string, checked: boolean) => {
-    const enabledServices = parseEnabledServiceList(form.getFieldValue('mailbox_services_enabled'))
-    let newEnabled = checked
-      ? [...enabledServices, serviceKey]
-      : enabledServices.filter((service) => service !== serviceKey)
+function MailboxSettingsPanel({ form }: { form: FormInstance }) {
+  const selectedServiceKey = Form.useWatch('mail_provider', form) || 'moemail'
+  const selectedService =
+    MAILBOX_SERVICES.find((service) => service.key === selectedServiceKey)
+    ?? MAILBOX_SERVICES.find((service) => service.key === 'moemail')
 
-    // 去重
-    newEnabled = Array.from(new Set(newEnabled))
-    form.setFieldValue('mailbox_services_enabled', newEnabled.join(','))
-  }
-
-  const hasConfig = (service: typeof MAILBOX_SERVICES[0]) => {
-    if (service.configKeys.length === 0) return false
-    return service.configKeys.some(key => {
-      const val = form.getFieldValue(key)
-      return val && String(val).trim() !== ''
-    })
-  }
+  if (!selectedService) return null
 
   return (
-    <Form.Item noStyle shouldUpdate>
-      {() => {
-        const enabledServices = parseEnabledServiceList(form.getFieldValue('mailbox_services_enabled'))
+    <>
+      <Card
+        title="默认邮箱服务"
+        extra={<span style={{ fontSize: 12, color: '#7a8ba3' }}>选择一个服务后，仅展示该服务配置；未展示的其他服务配置会保留</span>}
+        style={{ marginBottom: 16 }}
+      >
+        <ConfigField field={{ key: 'mail_provider', label: '邮箱服务', type: 'select' }} />
+      </Card>
 
-        return (
-          <Card
-            title="邮箱服务启用管理"
-            extra={<span style={{ fontSize: 12, color: '#7a8ba3' }}>只有启用的服务会在注册页面的下拉列表中展示</span>}
-            style={{ marginBottom: 16 }}
-          >
-            <Space direction="vertical" style={{ width: '100%' }} size={12}>
-              {MAILBOX_SERVICES.map((service) => {
-                const isEnabled = enabledServices.includes(service.key)
-                const isConfigured = hasConfig(service) || service.configKeys.length === 0
+      <Card
+        title={selectedService.title}
+        extra={<span style={{ fontSize: 12, color: '#7a8ba3' }}>{selectedService.desc}</span>}
+        style={{ marginBottom: 16 }}
+      >
+        {selectedService.fields.length > 0 ? (
+          selectedService.fields.map((field) => <ConfigField key={field.key} field={field} />)
+        ) : (
+          <Typography.Text type="secondary">当前服务无需额外配置。</Typography.Text>
+        )}
+      </Card>
 
-                return (
-                  <div
-                    key={service.key}
-                    style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'space-between',
-                      padding: '12px 16px',
-                      borderRadius: 8,
-                      background: isEnabled ? 'rgba(22, 163, 74, 0.04)' : 'rgba(0, 0, 0, 0.02)',
-                      border: `1px solid ${isEnabled ? 'rgba(22, 163, 74, 0.3)' : 'rgba(0, 0, 0, 0.06)'}`,
-                    }}
-                  >
-                    <div style={{ flex: 1 }}>
-                      <div style={{ fontWeight: 500, marginBottom: 4 }}>
-                        {service.label}
-                        {isEnabled ? (
-                          <Tag color="green" style={{ marginLeft: 8 }}>已启用</Tag>
-                        ) : (
-                          <Tag style={{ marginLeft: 8 }}>已禁用</Tag>
-                        )}
-                      </div>
-                      <div style={{ fontSize: 12, color: '#7a8ba3' }}>
-                        {service.configKeys.length === 0
-                          ? '无需配置，启用后即可使用'
-                          : isConfigured
-                            ? '配置已保存'
-                            : '配置未完成'}
-                      </div>
-                    </div>
-                    <Switch
-                      checked={isEnabled}
-                      onChange={(checked) => toggleService(service.key, checked)}
-                      checkedChildren="启用"
-                      unCheckedChildren="禁用"
-                    />
-                  </div>
-                )
-              })}
-            </Space>
-            <Form.Item name="mailbox_services_enabled" hidden>
-              <Input />
-            </Form.Item>
-          </Card>
-        )
-      }}
-    </Form.Item>
+      {selectedService.key === 'cfworker' ? <CFWorkerDomainPoolSection form={form} /> : null}
+    </>
   )
 }
 
@@ -728,6 +659,17 @@ function IntegrationsPanel() {
     ok: true,
     content: '',
   })
+  const [logModal, setLogModal] = useState({
+    open: false,
+    name: '',
+    title: '',
+    path: '',
+    content: '',
+    loading: false,
+    truncated: false,
+    exists: false,
+  })
+  const logContainerRef = useRef<HTMLPreElement>(null)
 
   const showResultModal = (title: string, data: unknown, ok = true) => {
     setResultModal({
@@ -736,6 +678,34 @@ function IntegrationsPanel() {
       ok,
       content: formatResultText(data),
     })
+  }
+
+  const loadLog = async (serviceName: string) => {
+    try {
+      const data = await apiFetch(`/integrations/services/${serviceName}/logs?lines=400`)
+      setLogModal((current) => {
+        if (!current.open || current.name !== serviceName) return current
+        return {
+          ...current,
+          path: data.log_path || current.path,
+          content: data.content || '',
+          loading: false,
+          truncated: Boolean(data.truncated),
+          exists: data.exists !== false,
+        }
+      })
+    } catch (e: any) {
+      setLogModal((current) => {
+        if (!current.open || current.name !== serviceName) return current
+        return {
+          ...current,
+          loading: false,
+          content: e?.message || '读取日志失败',
+          truncated: false,
+          exists: false,
+        }
+      })
+    }
   }
 
   const load = async () => {
@@ -753,6 +723,23 @@ function IntegrationsPanel() {
     const timer = window.setInterval(load, 5000)
     return () => window.clearInterval(timer)
   }, [])
+
+  useEffect(() => {
+    if (!logModal.open || !logModal.name) return
+    loadLog(logModal.name)
+    const timer = window.setInterval(() => {
+      loadLog(logModal.name)
+    }, 1000)
+    return () => window.clearInterval(timer)
+  }, [logModal.open, logModal.name])
+
+  useEffect(() => {
+    if (!logModal.open) return
+    const node = logContainerRef.current
+    if (node) {
+      node.scrollTop = node.scrollHeight
+    }
+  }, [logModal.content, logModal.open])
 
   const doAction = async (key: string, request: Promise<any>) => {
     setBusy(key)
@@ -787,6 +774,28 @@ function IntegrationsPanel() {
     }
   }
 
+  const openLogModal = (item: any) => {
+    setLogModal({
+      open: true,
+      name: item.name,
+      title: `${item.label} 日志`,
+      path: item.log_path || '',
+      content: '',
+      loading: true,
+      truncated: false,
+      exists: true,
+    })
+  }
+
+  const copyLogContent = async () => {
+    try {
+      await navigator.clipboard.writeText(logModal.content)
+      message.success('日志已复制')
+    } catch {
+      message.error('复制失败')
+    }
+  }
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
       <Modal
@@ -814,6 +823,50 @@ function IntegrationsPanel() {
           }}
         >
           {resultModal.content}
+        </pre>
+      </Modal>
+
+      <Modal
+        open={logModal.open}
+        title={logModal.title}
+        onCancel={() => setLogModal((current) => ({ ...current, open: false }))}
+        onOk={() => setLogModal((current) => ({ ...current, open: false }))}
+        width={900}
+        okText="关闭"
+        cancelButtonProps={{ style: { display: 'none' } }}
+      >
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8, gap: 12, flexWrap: 'wrap' }}>
+          <div style={{ fontSize: 12, color: '#7a8ba3' }}>
+            {logModal.path || '暂无日志文件路径'}
+            {logModal.truncated ? ' · 已截取最近日志' : ''}
+          </div>
+          <Space>
+            <Button size="small" onClick={() => loadLog(logModal.name)} loading={logModal.loading} disabled={!logModal.name}>
+              刷新日志
+            </Button>
+            <Button size="small" onClick={copyLogContent} disabled={!logModal.content}>
+              复制日志
+            </Button>
+          </Space>
+        </div>
+        <pre
+          ref={logContainerRef}
+          style={{
+            margin: 0,
+            maxHeight: 520,
+            overflow: 'auto',
+            padding: 12,
+            borderRadius: 8,
+            background: 'rgba(127,127,127,0.08)',
+            fontSize: 12,
+            lineHeight: 1.5,
+            whiteSpace: 'pre-wrap',
+            wordBreak: 'break-word',
+          }}
+        >
+          {logModal.loading && !logModal.content
+            ? '日志加载中...'
+            : logModal.content || (logModal.exists ? '日志文件暂无内容。' : '日志文件尚未生成。')}
         </pre>
       </Modal>
 
@@ -856,6 +909,9 @@ function IntegrationsPanel() {
                   打开管理页
                 </Button>
               ) : null}
+              <Button onClick={() => openLogModal(item)}>
+                查看日志
+              </Button>
               {!item.repo_exists ? (
                 <Button
                   type="primary"
@@ -907,6 +963,7 @@ export default function Settings() {
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
   const [activeTab, setActiveTab] = useState('register')
+  const [loadedConfig, setLoadedConfig] = useState<Record<string, unknown>>({})
 
   useEffect(() => {
     apiFetch('/config').then((data) => {
@@ -916,8 +973,12 @@ export default function Settings() {
       if (!data.luckmail_base_url) {
         data.luckmail_base_url = 'https://mails.luckyous.com/'
       }
+      if (!data.mail_provider) {
+        data.mail_provider = 'moemail'
+      }
       data.cfworker_domains = parseStoredDomainList(data.cfworker_domains)
       data.cfworker_enabled_domains = parseStoredDomainList(data.cfworker_enabled_domains)
+      setLoadedConfig(data)
       form.setFieldsValue(data)
     })
   }, [form])
@@ -925,9 +986,10 @@ export default function Settings() {
   const save = async () => {
     setSaving(true)
     try {
-      const values = form.getFieldsValue(true)
-      const domains = normalizeDomainList(values.cfworker_domains)
-      const enabledDomains = normalizeDomainList(values.cfworker_enabled_domains).filter((domain) => domains.includes(domain))
+      const formValues = form.getFieldsValue(true)
+      const nextConfig = { ...loadedConfig, ...formValues }
+      const domains = normalizeDomainList(nextConfig.cfworker_domains)
+      const enabledDomains = normalizeDomainList(nextConfig.cfworker_enabled_domains).filter((domain) => domains.includes(domain))
 
       if (domains.length > 0 && enabledDomains.length === 0) {
         setActiveTab('mailbox')
@@ -935,17 +997,33 @@ export default function Settings() {
         return
       }
 
-      values.cfworker_domains = JSON.stringify(domains)
-      values.cfworker_enabled_domains = JSON.stringify(enabledDomains)
-      if (domains.length > 0) {
-        values.cfworker_domain = ''
-      }
-
-      await apiFetch('/config', { method: 'PUT', body: JSON.stringify({ data: values }) })
-      form.setFieldsValue({
+      const normalizedConfig = {
+        ...nextConfig,
         cfworker_domains: domains,
         cfworker_enabled_domains: enabledDomains,
-        cfworker_domain: domains.length > 0 ? '' : values.cfworker_domain,
+      }
+
+      if (domains.length > 0) {
+        normalizedConfig.cfworker_domain = ''
+      }
+
+      await apiFetch('/config', {
+        method: 'PUT',
+        body: JSON.stringify({
+          data: {
+            ...normalizedConfig,
+            cfworker_domains: JSON.stringify(domains),
+            cfworker_enabled_domains: JSON.stringify(enabledDomains),
+          },
+        }),
+      })
+
+      setLoadedConfig(normalizedConfig)
+      form.setFieldsValue({
+        ...normalizedConfig,
+        cfworker_domains: domains,
+        cfworker_enabled_domains: enabledDomains,
+        cfworker_domain: domains.length > 0 ? '' : normalizedConfig.cfworker_domain,
       })
       message.success('保存成功')
       setSaved(true)
@@ -988,10 +1066,13 @@ export default function Settings() {
           ) : (
             <Form form={form} layout="vertical">
               {activeTab === 'captcha' ? <SolverStatus /> : null}
-              {currentTab.sections.map((section) => (
-                <ConfigSection key={section.title} section={section} form={form} />
-              ))}
-              {activeTab === 'mailbox' ? <CFWorkerDomainPoolSection form={form} /> : null}
+              {activeTab === 'mailbox' ? (
+                <MailboxSettingsPanel form={form} />
+              ) : (
+                currentTab.sections.map((section) => (
+                  <ConfigSection key={section.title} section={section} />
+                ))
+              )}
               <Button type="primary" icon={<SaveOutlined />} onClick={save} loading={saving} block>
                 {saved ? '已保存 ✓' : '保存配置'}
               </Button>

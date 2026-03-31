@@ -2,13 +2,13 @@ from __future__ import annotations
 
 from typing import Optional
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 from sqlmodel import Session, select
 
 from core.base_platform import Account, AccountStatus
 from core.db import AccountModel, engine
-from services.external_apps import install, list_status, start, start_all, stop, stop_all
+from services.external_apps import install, list_status, read_log, start, start_all, stop, stop_all
 from services.chatgpt_sync import has_cpa_upload_success, upload_account_model_to_cpa
 
 router = APIRouter(prefix="/integrations", tags=["integrations"])
@@ -63,6 +63,14 @@ def install_service(name: str):
 @router.post("/services/{name}/stop")
 def stop_service(name: str):
     return stop(name)
+
+
+@router.get("/services/{name}/logs")
+def get_service_logs(name: str, lines: int = 400):
+    try:
+        return read_log(name, max_lines=max(50, min(int(lines or 400), 2000)))
+    except KeyError:
+        raise HTTPException(status_code=404, detail="service not found")
 
 
 @router.post("/backfill")

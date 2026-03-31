@@ -26,7 +26,6 @@ export default function Register() {
   const [form] = Form.useForm()
   const [task, setTask] = useState<any>(null)
   const [polling, setPolling] = useState(false)
-  const [enabledMailboxServices, setEnabledMailboxServices] = useState<string[]>([])
 
   // 邮箱服务配置列表
   const mailboxServices = [
@@ -45,11 +44,6 @@ export default function Register() {
   useEffect(() => {
     apiFetch('/config').then((cfg) => {
       const currentPlatform = form.getFieldValue('platform') || 'trae'
-      // 解析已启用的邮箱服务
-      const enabledStr = cfg.mailbox_services_enabled || ''
-      const enabled = enabledStr.split(',').filter(Boolean)
-      setEnabledMailboxServices(enabled)
-
       form.setFieldsValue({
         executor_type: normalizeExecutorForPlatform(currentPlatform, cfg.default_executor),
         captcha_solver: cfg.default_captcha_solver || 'yescaptcha',
@@ -240,12 +234,7 @@ export default function Register() {
 
         <Card title="邮箱配置" style={{ marginBottom: 16 }}>
           <Form.Item name="mail_provider" label="邮箱服务" rules={[{ required: true }]}>
-            <Select
-              options={mailboxServices
-                .filter(service => enabledMailboxServices.length === 0 || enabledMailboxServices.includes(service.key))
-                .map(service => ({ value: service.key, label: service.label }))
-              }
-            />
+            <Select options={mailboxServices.map(service => ({ value: service.key, label: service.label }))} />
           </Form.Item>
           {mailProvider === 'skymail' && (
             <>

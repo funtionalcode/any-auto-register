@@ -5,6 +5,7 @@
 
 import time
 import logging
+import traceback
 from datetime import datetime
 from typing import Optional, Callable
 
@@ -60,6 +61,25 @@ class RegistrationEngineV2:
         self.password = None
         self.logs = []
 
+    def _extract_email_address(self, email_data) -> Optional[str]:
+        if not email_data:
+            return None
+        if isinstance(email_data, dict):
+            value = email_data.get("email") or email_data.get("address")
+            return str(value).strip() if value else None
+        if isinstance(email_data, (list, tuple)):
+            for item in email_data:
+                candidate = self._extract_email_address(item)
+                if candidate:
+                    return candidate
+            return None
+        email_attr = getattr(email_data, "email", None)
+        if email_attr:
+            return str(email_attr).strip()
+        if isinstance(email_data, str):
+            return email_data.strip() or None
+        return None
+
     def _log(self, message: str, level: str = "info"):
         timestamp = datetime.now().strftime("%H:%M:%S")
         log_message = f"[{timestamp}] {message}"
@@ -111,7 +131,7 @@ class RegistrationEngineV2:
 
                     # 1. 创建邮箱
                     email_data = self.email_service.create_email()
-                    email_addr = self.email or (email_data.get('email') if email_data else None)
+                    email_addr = self.email or self._extract_email_address(email_data)
                     if not email_addr:
                         result.error_message = "创建邮箱失败"
                         return result
@@ -201,7 +221,7 @@ class RegistrationEngineV2:
 
         except Exception as e:
             self._log(f"V2 注册全流程执行异常: {e}", "error")
-            import traceback
-            traceback.print_exc()
+            for line in traceback.format_exc().rstrip().splitlines():
+                self._log(line, "error")
             result.error_message = str(e)
             return result
