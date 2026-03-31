@@ -35,6 +35,14 @@ WORKDIR /app
 COPY requirements.txt ./
 COPY scripts/install_camoufox.py /tmp/install_camoufox.py
 
+# Install system dependencies
+RUN apt-get update
+
+RUN curl -LO https://go.dev/dl/go1.24.0.linux-amd64.tar.gz \
+    && tar -C /usr/local -xzf go1.24.0.linux-amd64.tar.gz \
+    && rm go1.24.0.linux-amd64.tar.gz \
+    && curl -LsSf https://astral.sh/uv/install.sh | sh
+
 RUN pip install --upgrade pip \
     && pip install -r requirements.txt \
     && python -m playwright install-deps firefox chromium \
@@ -50,14 +58,6 @@ RUN pip install --upgrade pip \
        done \
     && [ "$installed" -eq 1 ] \
     && CAMOUFOX_VERSION="$CAMOUFOX_VERSION" CAMOUFOX_RELEASE="$CAMOUFOX_RELEASE" http_proxy="${HTTP_PROXY:-}" https_proxy="${HTTPS_PROXY:-}" no_proxy="${NO_PROXY:-}" python /tmp/install_camoufox.py
-
-# Install system dependencies
-RUN apt-get update
-
-RUN curl -LO https://go.dev/dl/go1.24.0.linux-amd64.tar.gz \
-    && tar -C /usr/local -xzf go1.24.0.linux-amd64.tar.gz \
-    && rm go1.24.0.linux-amd64.tar.gz \
-    && curl -LsSf https://astral.sh/uv/install.sh | sh
 
 RUN apt-get install -y --no-install-recommends \
     curl git net-tools vim telnet \
