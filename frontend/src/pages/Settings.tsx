@@ -8,9 +8,6 @@ import {
   MailOutlined,
   SafetyOutlined,
   ApiOutlined,
-  CheckCircleOutlined,
-  CloseCircleOutlined,
-  SyncOutlined,
   PlusOutlined,
 } from '@ant-design/icons'
 import { apiFetch } from '@/lib/utils'
@@ -684,57 +681,232 @@ function CFWorkerDomainPoolSection({ form }: { form: FormInstance }) {
 }
 
 function SolverStatus() {
-  const [running, setRunning] = useState<boolean | null>(null)
+  type LogViewMode = 'live' | 'static'
+  const [solver, setSolver] = useState<any | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [restarting, setRestarting] = useState(false)
+  const [logViewMode, setLogViewMode] = useState<LogViewMode>('live')
+  const [logModal, setLogModal] = useState({
+    open: false,
+    path: '',
+    content: '',
+    loading: false,
+    truncated: false,
+    exists: false,
+  })
+  const logContainerRef = useRef<HTMLPreElement>(null)
 
-  const checkSolver = async () => {
+  const loadSolver = async (options?: { silent?: boolean }) => {
+    const silent = Boolean(options?.silent)
+    if (!silent) {
+      setLoading(true)
+    }
     try {
-      const d = await apiFetch('/solver/status')
-      setRunning(d.running)
+      const data = await apiFetch('/solver/status')
+      setSolver(data)
     } catch {
-      setRunning(false)
+      setSolver({
+        enabled: true,
+        running: false,
+        process_alive: false,
+        pid: null,
+        url: '',
+        bind_host: '',
+        browser_type: '',
+        log_path: '',
+        last_error: '读取 Solver 状态失败',
+      })
+    } finally {
+      if (!silent) {
+        setLoading(false)
+      }
+    }
+  }
+
+  const loadLog = async (options?: { silent?: boolean }) => {
+    const silent = Boolean(options?.silent)
+    if (!silent) {
+      setLogModal((current) => ({ ...current, loading: true }))
+    }
+    try {
+      const data = await apiFetch('/solver/logs?lines=400')
+      setLogModal((current) => ({
+        ...current,
+        path: data.log_path || current.path,
+        content: data.content || '',
+        loading: false,
+        truncated: Boolean(data.truncated),
+        exists: data.exists !== false,
+      }))
+    } catch (e: any) {
+      setLogModal((current) => ({
+        ...current,
+        loading: false,
+        content: e?.message || '读取日志失败',
+        truncated: false,
+        exists: false,
+      }))
     }
   }
 
   const restartSolver = async () => {
-    await apiFetch('/solver/restart', { method: 'POST' })
-    setRunning(null)
-    setTimeout(checkSolver, 2000)
+    setRestarting(true)
+    try {
+      const data = await apiFetch('/solver/restart', { method: 'POST' })
+      setSolver(data)
+      message.success('Solver 重启指令已发送')
+      window.setTimeout(() => {
+        void loadSolver({ silent: true })
+      }, 2000)
+    } catch (e: any) {
+      message.error(e?.message || '重启 Solver 失败')
+    } finally {
+      setRestarting(false)
+    }
+  }
+
+  const openLogModal = async () => {
+    setLogModal({
+      open: true,
+      path: solver?.log_path || '',
+      content: '',
+      loading: true,
+      truncated: false,
+      exists: true,
+    })
+    await loadLog()
+  }
+
+  const copyLogContent = async () => {
+    try {
+      await navigator.clipboard.writeText(logModal.content)
+      message.success('日志已复制')
+    } catch {
+      message.error('复制失败')
+    }
   }
 
   useEffect(() => {
-    checkSolver()
-    const timer = window.setInterval(checkSolver, 5000)
+    void loadSolver()
+    const timer = window.setInterval(() => {
+      void loadSolver({ silent: true })
+    }, 5000)
     return () => window.clearInterval(timer)
   }, [])
 
+  useEffect(() => {
+    if (!logModal.open || logViewMode !== 'live') return
+    const timer = window.setInterval(() => {
+      void loadLog({ silent: true })
+    }, 1000)
+    return () => window.clearInterval(timer)
+  }, [logModal.open, logViewMode])
+
+  useEffect(() => {
+    if (!logModal.open || logViewMode !== 'live') return
+    const node = logContainerRef.current
+    if (node) {
+      node.scrollTop = node.scrollHeight
+    }
+  }, [logModal.content, logModal.open, logViewMode])
+
+  const statusColor = solver?.running ? 'green' : solver?.process_alive ? 'gold' : 'default'
+  const statusText = solver?.running ? '运行中' : solver?.process_alive ? '启动中' : loading ? '检测中' : '未运行'
+
   return (
-    <Card title="Turnstile Solver" size="small" style={{ marginBottom: 16 }}>
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          gap: 12,
-          flexWrap: 'wrap',
-        }}
+    <>
+      <Modal
+        open={logModal.open}
+        title="Turnstile Solver 日志"
+        onCancel={() => setLogModal((current) => ({ ...current, open: false }))}
+        onOk={() => setLogModal((current) => ({ ...current, open: false }))}
+        width={900}
+        okText="关闭"
+        cancelButtonProps={{ style: { display: 'none' } }}
       >
-        <Space size={8}>
-          {running === null ? (
-            <SyncOutlined spin style={{ color: '#7a8ba3' }} />
-          ) : running ? (
-            <CheckCircleOutlined style={{ color: '#10b981' }} />
-          ) : (
-            <CloseCircleOutlined style={{ color: '#ef4444' }} />
-          )}
-          <span style={{ color: running ? '#10b981' : '#7a8ba3', fontWeight: 500 }}>
-            {running === null ? '检测中' : running ? '运行中' : '未运行'}
-          </span>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8, gap: 12, flexWrap: 'wrap' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+            <div style={{ fontSize: 12, color: '#7a8ba3' }}>
+              {logModal.path || '暂无日志文件路径'}
+              {logModal.truncated ? ' · 已截取最近日志' : ''}
+            </div>
+            <Segmented<LogViewMode>
+              size="small"
+              value={logViewMode}
+              onChange={(value) => setLogViewMode(value)}
+              options={[
+                { label: '实时日志', value: 'live' },
+                { label: '静态日志', value: 'static' },
+              ]}
+            />
+          </div>
+          <Space>
+            <Button size="small" onClick={() => loadLog()} loading={logModal.loading}>
+              刷新日志
+            </Button>
+            <Button size="small" onClick={copyLogContent} disabled={!logModal.content}>
+              复制日志
+            </Button>
+          </Space>
+        </div>
+        <pre
+          ref={logContainerRef}
+          style={{
+            margin: 0,
+            maxHeight: 520,
+            overflow: 'auto',
+            padding: 12,
+            borderRadius: 8,
+            background: 'rgba(127,127,127,0.08)',
+            fontSize: 12,
+            lineHeight: 1.5,
+            whiteSpace: 'pre-wrap',
+            wordBreak: 'break-word',
+          }}
+        >
+          {logModal.loading && !logModal.content
+            ? '日志加载中...'
+            : logModal.content || (logModal.exists ? '日志文件暂无内容。' : '日志文件尚未生成。')}
+        </pre>
+        <div style={{ marginTop: 8, fontSize: 12, color: '#7a8ba3' }}>
+          {logViewMode === 'live' ? '实时日志模式：每秒自动刷新一次。' : '静态日志模式：仅在点击“刷新日志”时更新。'}
+        </div>
+      </Modal>
+
+      <Card
+        title="Turnstile Solver"
+        extra={<span style={{ fontSize: 12, color: '#7a8ba3' }}>本地验证码服务，供浏览器注册流程复用</span>}
+        style={{ marginBottom: 16 }}
+      >
+        <Space direction="vertical" style={{ width: '100%' }}>
+          <div>
+            状态：
+            <Tag color={statusColor} style={{ marginLeft: 8 }}>
+              {statusText}
+            </Tag>
+            <Tag color={solver?.enabled === false ? 'red' : 'blue'} style={{ marginLeft: 8 }}>
+              {solver?.enabled === false ? '已禁用' : '已启用'}
+            </Tag>
+            {solver?.pid ? <span style={{ marginLeft: 8 }}>PID: {solver.pid}</span> : null}
+          </div>
+          {solver?.url ? <div>地址：<Typography.Text copyable>{solver.url}</Typography.Text></div> : null}
+          <div>浏览器：{solver?.browser_type || '未配置'}{solver?.bind_host ? ` · 监听 ${solver.bind_host}` : ''}</div>
+          <div>日志：<Typography.Text copyable>{solver?.log_path || '暂无日志路径'}</Typography.Text></div>
+          {solver?.last_error ? <div style={{ color: '#ef4444' }}>最近错误：{solver.last_error}</div> : null}
+          <Space wrap>
+            <Button onClick={openLogModal}>
+              查看日志
+            </Button>
+            <Button loading={restarting} onClick={restartSolver}>
+              重启
+            </Button>
+            <Button loading={loading} onClick={() => loadSolver()}>
+              刷新状态
+            </Button>
+          </Space>
         </Space>
-        <Button size="small" onClick={restartSolver}>
-          重启 Solver
-        </Button>
-      </div>
-    </Card>
+      </Card>
+    </>
   )
 }
 

@@ -81,6 +81,11 @@ class TurnstileAPIServer:
         self.browser_name = browser_name
         self.browser_version = browser_version
         self.console = Console()
+        self._playwright = None
+        self._camoufox = None
+        self._browsers = []
+        self._cleanup_task = None
+        self._shutting_down = False
         
         # Initialize useragent and sec_ch_ua attributes
         self.useragent = useragent
@@ -143,6 +148,7 @@ class TurnstileAPIServer:
     def _setup_routes(self) -> None:
         """Set up the application routes."""
         self.app.before_serving(self._startup)
+        self.app.after_serving(self._shutdown)
         self.app.route('/turnstile', methods=['GET'])(self.process_turnstile)
         self.app.route('/result', methods=['GET'])(self.get_result)
         self.app.route('/')(self.index)
@@ -157,11 +163,65 @@ class TurnstileAPIServer:
             await self._initialize_browser()
             
             # Запускаем периодическую очистку старых результатов
-            asyncio.create_task(self._periodic_cleanup())
+            self._cleanup_task = asyncio.create_task(self._periodic_cleanup())
             
         except Exception as e:
             logger.error(f"Failed to initialize browser: {str(e)}")
             raise
+
+    async def _await_maybe(self, value):
+        if asyncio.iscoroutine(value) or isinstance(value, asyncio.Future):
+            return await value
+        return value
+
+    async def _close_resource(self, resource, methods: tuple[str, ...], label: str) -> bool:
+        if resource is None:
+            return False
+        for method_name in methods:
+            method = getattr(resource, method_name, None)
+            if not callable(method):
+                continue
+            try:
+                await self._await_maybe(method())
+                if self.debug:
+                    logger.debug(f"Shutdown: closed {label} via {method_name}()")
+                return True
+            except Exception as e:
+                logger.warning(f"Shutdown: failed closing {label} via {method_name}(): {e}")
+        return False
+
+    async def _shutdown(self) -> None:
+        if self._shutting_down:
+            return
+
+        self._shutting_down = True
+        logger.info("Starting solver shutdown cleanup")
+
+        if self._cleanup_task:
+            self._cleanup_task.cancel()
+            try:
+                await self._cleanup_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                logger.warning(f"Cleanup task stop failed: {e}")
+            self._cleanup_task = None
+
+        while not self.browser_pool.empty():
+            try:
+                self.browser_pool.get_nowait()
+            except Exception:
+                break
+
+        for index, browser in enumerate(self._browsers, start=1):
+            await self._close_resource(browser, ("close", "stop"), f"browser-{index}")
+        self._browsers.clear()
+
+        await self._close_resource(self._playwright, ("stop", "close"), "playwright")
+        await self._close_resource(self._camoufox, ("stop", "close"), "camoufox")
+        self._playwright = None
+        self._camoufox = None
+        logger.info("Solver shutdown cleanup completed")
 
     async def _initialize_browser(self) -> None:
         """Initialize the browser and create the page pool."""
@@ -174,12 +234,14 @@ class TurnstileAPIServer:
                     "当前浏览器模式需要 patchright，但未安装。请执行: pip install patchright"
                 )
             playwright = await async_playwright().start()
+            self._playwright = playwright
         elif self.browser_type == "camoufox":
             if AsyncCamoufox is None:
                 raise RuntimeError(
                     "当前浏览器模式需要 camoufox，但未安装。请执行: pip install camoufox && python -m camoufox fetch"
                 )
             camoufox = AsyncCamoufox(headless=self.headless)
+            self._camoufox = camoufox
 
         browser_configs = []
         for _ in range(self.thread_count):
@@ -235,6 +297,7 @@ class TurnstileAPIServer:
                 browser = await camoufox.start()
 
             if browser:
+                self._browsers.append(browser)
                 await self.browser_pool.put((i+1, browser, config))
 
             if self.debug:
@@ -263,6 +326,8 @@ class TurnstileAPIServer:
                 deleted_count = await cleanup_old_results(days_old=7)
                 if deleted_count > 0:
                     logger.info(f"Cleaned up {deleted_count} old results")
+            except asyncio.CancelledError:
+                break
             except Exception as e:
                 logger.error(f"Error during periodic cleanup: {e}")
 
@@ -932,7 +997,7 @@ class TurnstileAPIServer:
                     logger.warning(f"Browser {index}: Error closing context: {str(e)}")
             
             try:
-                if hasattr(browser, 'is_connected') and browser.is_connected():
+                if not self._shutting_down and hasattr(browser, 'is_connected') and browser.is_connected():
                     await self.browser_pool.put((index, browser, browser_config))
                     if self.debug:
                         logger.debug(f"Browser {index}: Browser returned to pool")

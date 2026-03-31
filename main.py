@@ -89,16 +89,26 @@ app.include_router(integrations_router, prefix="/api")
 
 @app.get("/api/solver/status")
 def solver_status():
-    from services.solver_manager import is_running
-    return {"running": is_running()}
+    from services.solver_manager import status
+
+    return status()
+
+
+@app.get("/api/solver/logs")
+def solver_logs(lines: int = 400):
+    from services.solver_manager import read_log
+
+    return read_log(max_lines=max(50, min(int(lines or 400), 2000)))
 
 
 @app.post("/api/solver/restart")
 def solver_restart():
-    from services.solver_manager import stop, start_async
-    stop()
-    start_async()
-    return {"message": "重启中"}
+    from services.solver_manager import restart_async, status
+
+    restart_async()
+    data = status()
+    data["message"] = "重启中"
+    return data
 
 
 _static_dir = os.path.join(os.path.dirname(__file__), "static")
