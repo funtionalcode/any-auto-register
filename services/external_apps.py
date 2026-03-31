@@ -445,49 +445,96 @@ def _ensure_cliproxyapi_runtime_config(repo: Path):
         shutil.copyfile(repo / "config.example.yaml", config_path)
     secret = _get_setting("cliproxyapi_management_key", "cliproxyapi")
     lines = config_path.read_text(encoding="utf-8").splitlines()
-    updated_lines = []
+    updated_lines: list[str] = []
     replaced_secret = False
     replaced_remote = False
-    in_remote_section = False
+    index = 0
 
-    for line in lines:
+    while index < len(lines):
+        line = lines[index]
         stripped = line.lstrip()
-        # 处理 secret-key
-        if stripped.startswith("secret-key:"):
-            indent = line[: len(line) - len(line.lstrip())]
-            updated_lines.append(f'{indent}secret-key: "{secret}"')
+        indent = line[: len(line) - len(stripped)]
+
+        # 兼容旧版本顶层 secret-key 配置
+        if not indent and stripped.startswith("secret-key:"):
+            updated_lines.append(f'secret-key: "{secret}"')
             replaced_secret = True
+            index += 1
             continue
 
-        # 处理 remote-management section
-        if stripped.startswith("remote-management:"):
-            in_remote_section = True
-            updated_lines.append(line)
-            continue
+        # 处理 remote-management section，只保留第一个顶层 section
+        if not indent and stripped.startswith("remote-management:"):
+            if replaced_remote:
+                index += 1
+                while index < len(lines):
+                    next_line = lines[index]
+                    next_stripped = next_line.lstrip()
+                    next_indent = next_line[: len(next_line) - len(next_stripped)]
+                    if next_stripped and not next_indent:
+                        break
+                    index += 1
+                continue
 
-        # 在 remote-management section 内处理 allow-remote
-        if in_remote_section and stripped.startswith("allow-remote:"):
-            indent = line[: len(line) - len(line.lstrip())]
-            updated_lines.append(f'{indent}allow-remote: true')
             replaced_remote = True
-            in_remote_section = False
-            continue
+            updated_lines.append(line)
+            index += 1
 
-        # 退出 section
-        if in_remote_section and stripped and not stripped.startswith(" ") and not stripped.startswith("\t"):
-            in_remote_section = False
+            allow_remote_written = False
+            secret_key_written = False
+            child_indent = "  "
+
+            while index < len(lines):
+                next_line = lines[index]
+                next_stripped = next_line.lstrip()
+                next_indent = next_line[: len(next_line) - len(next_stripped)]
+
+                if next_stripped and not next_indent:
+                    break
+
+                if next_stripped.startswith("allow-remote:"):
+                    child_indent = next_indent or child_indent
+                    if not allow_remote_written:
+                        updated_lines.append(f"{child_indent}allow-remote: true")
+                        allow_remote_written = True
+                    index += 1
+                    continue
+
+                if next_stripped.startswith("secret-key:"):
+                    child_indent = next_indent or child_indent
+                    if not secret_key_written:
+                        updated_lines.append(f'{child_indent}secret-key: "{secret}"')
+                        secret_key_written = True
+                        replaced_secret = True
+                    index += 1
+                    continue
+
+                if next_indent:
+                    child_indent = next_indent
+                updated_lines.append(next_line)
+                index += 1
+
+            if not allow_remote_written:
+                updated_lines.append(f"{child_indent}allow-remote: true")
+            if not secret_key_written:
+                updated_lines.append(f'{child_indent}secret-key: "{secret}"')
+                replaced_secret = True
+            continue
 
         updated_lines.append(line)
-
-    # 如果没有找到 secret-key，添加到 remote-management section 或作为独立配置
-    if not replaced_secret:
-        updated_lines.append(f'secret-key: "{secret}"')
+        index += 1
 
     # 如果没有找到 remote-management section，添加它
     if not replaced_remote:
-        updated_lines.append("")
+        if updated_lines and updated_lines[-1].strip():
+            updated_lines.append("")
         updated_lines.append("remote-management:")
         updated_lines.append("  allow-remote: true")
+        updated_lines.append(f'  secret-key: "{secret}"')
+        replaced_secret = True
+
+    # 兼容旧版本没有 remote-management 的配置
+    if not replaced_secret:
+        updated_lines.append(f'secret-key: "{secret}"')
 
     config_path.write_text("\n".join(updated_lines) + "\n", encoding="utf-8")
 
