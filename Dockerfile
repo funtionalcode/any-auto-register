@@ -37,6 +37,9 @@ COPY scripts/install_camoufox.py /tmp/install_camoufox.py
 
 # Install system dependencies
 RUN apt-get update
+RUN apt-get install -y --no-install-recommends \
+    curl git net-tools vim telnet \
+    && rm -rf /var/lib/apt/lists/*
 
 RUN curl -LO https://go.dev/dl/go1.24.0.linux-amd64.tar.gz \
     && tar -C /usr/local -xzf go1.24.0.linux-amd64.tar.gz \
