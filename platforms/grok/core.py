@@ -31,11 +31,19 @@ def _rand_password(n: int = 12) -> str:
 
 
 class GrokRegister:
-    def __init__(self, captcha_solver=None, yescaptcha_key: str = "", proxy=None, log_fn=print):
+    def __init__(
+        self,
+        captcha_solver=None,
+        yescaptcha_key: str = "",
+        proxy=None,
+        log_fn=print,
+        headless: Optional[bool] = None,
+    ):
         self.captcha_solver = captcha_solver
         self.key = yescaptcha_key
         self.proxy = proxy
         self.log = log_fn
+        self.headless = headless
 
     def _wait_until(self, fn: Callable[[], bool], timeout: float = 30.0, interval: float = 0.5, desc: str = ""):
         start = time.time()
@@ -73,14 +81,35 @@ class GrokRegister:
             f" 请先执行: `{install_cmd}`。{extra_hint}"
         )
 
+    def _resolve_headless(self) -> bool:
+        override = os.getenv("GROK_HEADLESS", "").strip().lower()
+        if override in {"1", "true", "yes", "on"}:
+            return True
+        if override in {"0", "false", "no", "off"}:
+            return False
+
+        requested = bool(self.headless)
+        missing_display = (
+            os.name != "nt"
+            and not os.getenv("DISPLAY")
+            and not os.getenv("WAYLAND_DISPLAY")
+        )
+        if os.getenv("INSIDE_DOCKER") == "1" or missing_display:
+            if not requested:
+                self.log("  当前环境无可用图形界面，Grok 浏览器自动切换为 headless")
+            return True
+        return requested
+
     def _launch_browser(self):
         from patchright.sync_api import sync_playwright
 
         playwright = sync_playwright().start()
+        headless = self._resolve_headless()
         launch_kwargs = {
-            "headless": False,
-            "channel": "msedge",
+            "headless": headless,
         }
+        if not headless and os.name == "nt":
+            launch_kwargs["channel"] = "msedge"
         if self.proxy:
             launch_kwargs["proxy"] = {"server": self.proxy}
         try:

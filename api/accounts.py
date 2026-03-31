@@ -45,6 +45,8 @@ def list_accounts(
     page_size: int = 20,
     session: Session = Depends(get_session),
 ):
+    page = max(1, int(page or 1))
+    page_size = max(1, min(int(page_size or 20), 500))
     q = select(AccountModel)
     if platform:
         q = q.where(AccountModel.platform == platform)
@@ -52,9 +54,14 @@ def list_accounts(
         q = q.where(AccountModel.status == status)
     if email:
         q = q.where(AccountModel.email.contains(email))
-    total = len(session.exec(q).all())
-    items = session.exec(q.offset((page - 1) * page_size).limit(page_size)).all()
-    return {"total": total, "page": page, "items": items}
+
+    total = session.exec(
+        select(func.count()).select_from(q.subquery())
+    ).one()
+    items = session.exec(
+        q.order_by(AccountModel.id.desc()).offset((page - 1) * page_size).limit(page_size)
+    ).all()
+    return {"total": total, "page": page, "page_size": page_size, "items": items}
 
 
 @router.post("")

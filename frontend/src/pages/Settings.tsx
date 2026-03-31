@@ -62,6 +62,7 @@ const CHATGPT_MODULE_OPTIONS = [
   { label: 'SMSToMe 手机验证', value: 'smstome' },
 ]
 const CHATGPT_MODULE_KEYS = CHATGPT_MODULE_OPTIONS.map((option) => option.value)
+const SETTINGS_ACTIVE_TAB_STORAGE_KEY = 'settings.activeTab'
 
 const TAB_ITEMS = [
   {
@@ -1080,8 +1081,17 @@ export default function Settings() {
   const [form] = Form.useForm()
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
-  const [activeTab, setActiveTab] = useState('register')
+  const [activeTab, setActiveTab] = useState(() => {
+    if (typeof window === 'undefined') return 'register'
+    const stored = window.localStorage.getItem(SETTINGS_ACTIVE_TAB_STORAGE_KEY) || 'register'
+    return TAB_ITEMS.some((item) => item.key === stored) ? stored : 'register'
+  })
   const [loadedConfig, setLoadedConfig] = useState<Record<string, unknown>>({})
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    window.localStorage.setItem(SETTINGS_ACTIVE_TAB_STORAGE_KEY, activeTab)
+  }, [activeTab])
 
   useEffect(() => {
     apiFetch('/config').then((data) => {

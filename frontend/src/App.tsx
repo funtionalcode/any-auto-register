@@ -18,6 +18,7 @@ import Proxies from '@/pages/Proxies'
 import Settings from '@/pages/Settings'
 import TaskHistory from '@/pages/TaskHistory'
 import { darkTheme, lightTheme } from './theme'
+import { RegisterTaskCenterProvider } from '@/components/RegisterTaskCenter'
 
 const { Sider, Content } = Layout
 
@@ -94,92 +95,94 @@ function AppContent() {
 
   return (
     <ConfigProvider theme={currentTheme} locale={zhCN}>
-      <Layout style={{ minHeight: '100vh' }}>
-        <Sider
-          collapsible
-          collapsed={collapsed}
-          onCollapse={setCollapsed}
-          style={{
-            background: currentTheme.token?.colorBgContainer,
-            borderRight: `1px solid ${currentTheme.token?.colorBorder}`,
-          }}
-          width={220}
-        >
-          <div
+      <RegisterTaskCenterProvider>
+        <Layout style={{ minHeight: '100vh' }}>
+          <Sider
+            collapsible
+            collapsed={collapsed}
+            onCollapse={setCollapsed}
             style={{
-              height: 64,
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              borderBottom: `1px solid ${currentTheme.token?.colorBorder}`,
+              background: currentTheme.token?.colorBgContainer,
+              borderRight: `1px solid ${currentTheme.token?.colorBorder}`,
             }}
+            width={220}
           >
-            <DashboardOutlined style={{ fontSize: 20, color: currentTheme.token?.colorPrimary }} />
-            {!collapsed && (
-              <span
-                style={{
-                  marginLeft: 8,
-                  fontWeight: 600,
-                  fontSize: 14,
-                  color: currentTheme.token?.colorText,
-                }}
-              >
-                Account Manager
-              </span>
-            )}
-          </div>
-          <Menu
-            mode="inline"
-            selectedKeys={getSelectedKey()}
-            defaultOpenKeys={['/accounts']}
-            items={menuItems}
-            onClick={({ key }) => navigate(key)}
-            style={{
-              borderRight: 0,
-              background: 'transparent',
-            }}
-          />
-          <div
-            style={{
-              position: 'absolute',
-              bottom: 16,
-              left: 0,
-              right: 0,
-              padding: '0 16px',
-            }}
-          >
-            <Button
-              block
-              icon={isLight ? <SunOutlined /> : <MoonOutlined />}
-              onClick={() => setThemeMode(isLight ? 'dark' : 'light')}
+            <div
               style={{
+                height: 64,
                 display: 'flex',
                 alignItems: 'center',
-                justifyContent: collapsed ? 'center' : 'space-between',
+                justifyContent: 'center',
+                borderBottom: `1px solid ${currentTheme.token?.colorBorder}`,
               }}
             >
-              {!collapsed && (isLight ? '亮色模式' : '暗色模式')}
-            </Button>
-          </div>
-        </Sider>
-        <Content
-          style={{
-            padding: 24,
-            overflow: 'auto',
-            background: currentTheme.token?.colorBgLayout,
-          }}
-        >
-          <Routes>
-            <Route path="/" element={<Dashboard />} />
-            <Route path="/accounts" element={<Accounts />} />
-            <Route path="/accounts/:platform" element={<Accounts />} />
-            <Route path="/register" element={<Register />} />
-            <Route path="/history" element={<TaskHistory />} />
-            <Route path="/proxies" element={<Proxies />} />
-            <Route path="/settings" element={<Settings />} />
-          </Routes>
-        </Content>
-      </Layout>
+              <DashboardOutlined style={{ fontSize: 20, color: currentTheme.token?.colorPrimary }} />
+              {!collapsed && (
+                <span
+                  style={{
+                    marginLeft: 8,
+                    fontWeight: 600,
+                    fontSize: 14,
+                    color: currentTheme.token?.colorText,
+                  }}
+                >
+                  Account Manager
+                </span>
+              )}
+            </div>
+            <Menu
+              mode="inline"
+              selectedKeys={getSelectedKey()}
+              defaultOpenKeys={['/accounts']}
+              items={menuItems}
+              onClick={({ key }) => navigate(key)}
+              style={{
+                borderRight: 0,
+                background: 'transparent',
+              }}
+            />
+            <div
+              style={{
+                position: 'absolute',
+                bottom: 16,
+                left: 0,
+                right: 0,
+                padding: '0 16px',
+              }}
+            >
+              <Button
+                block
+                icon={isLight ? <SunOutlined /> : <MoonOutlined />}
+                onClick={() => setThemeMode(isLight ? 'dark' : 'light')}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: collapsed ? 'center' : 'space-between',
+                }}
+              >
+                {!collapsed && (isLight ? '亮色模式' : '暗色模式')}
+              </Button>
+            </div>
+          </Sider>
+          <Content
+            style={{
+              padding: 24,
+              overflow: 'auto',
+              background: currentTheme.token?.colorBgLayout,
+            }}
+          >
+            <Routes>
+              <Route path="/" element={<Dashboard />} />
+              <Route path="/accounts" element={<Accounts />} />
+              <Route path="/accounts/:platform" element={<Accounts />} />
+              <Route path="/register" element={<Register />} />
+              <Route path="/history" element={<TaskHistory />} />
+              <Route path="/proxies" element={<Proxies />} />
+              <Route path="/settings" element={<Settings />} />
+            </Routes>
+          </Content>
+        </Layout>
+      </RegisterTaskCenterProvider>
     </ConfigProvider>
   )
 }

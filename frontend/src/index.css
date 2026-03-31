@@ -119,3 +119,90 @@ body {
   background: rgba(99, 102, 241, 0.35);
   color: inherit;
 }
+
+.register-task-dock {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: 1080;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: min(360px, calc(100vw - 24px));
+  max-height: calc(100vh - 40px);
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.register-task-dock-toolbar,
+.register-task-dock-card {
+  border-radius: 16px;
+  overflow: hidden;
+  backdrop-filter: blur(14px);
+  box-shadow: 0 18px 50px rgba(15, 23, 42, 0.18);
+}
+
+.register-task-dock-toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
+
+.register-task-group {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.register-task-group-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 2px 4px;
+}
+
+.register-task-group-toggle {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 10px;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  border-radius: 12px;
+  background: rgba(15, 23, 42, 0.18);
+  color: inherit;
+  cursor: pointer;
+  transition: background 0.2s ease-out, border-color 0.2s ease-out, transform 0.2s ease-out;
+}
+
+.register-task-group-toggle:hover {
+  background: rgba(99, 102, 241, 0.14);
+  border-color: rgba(99, 102, 241, 0.32);
+}
+
+.register-task-group-toggle:focus-visible {
+  outline: 2px solid rgba(99, 102, 241, 0.72);
+  outline-offset: 2px;
+}
+
+.register-task-dock-card .ant-card-head {
+  min-height: 48px;
+}
+
+.register-task-dock-card .ant-card-actions {
+  background: transparent;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .register-task-dock-card {
+    animation: slideInRight 0.24s ease-out;
+  }
+}
+
+@media (max-width: 768px) {
+  .register-task-dock {
+    right: 12px;
+    bottom: 12px;
+    width: calc(100vw - 24px);
+  }
+}

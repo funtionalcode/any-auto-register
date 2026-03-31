@@ -6,19 +6,18 @@ import {
   InputNumber,
   Select,
   Button,
-  Tag,
   Space,
   Typography,
-  Descriptions,
+  Alert,
+  message,
 } from 'antd'
 import {
   PlayCircleOutlined,
-  CheckCircleOutlined,
-  CloseCircleOutlined,
   LoadingOutlined,
 } from '@ant-design/icons'
 import { apiFetch } from '@/lib/utils'
 import { getExecutorOptions, normalizeExecutorForPlatform } from '@/lib/registerOptions'
+import { useRegisterTaskCenter } from '@/components/RegisterTaskCenter'
 
 const { Text } = Typography
 
@@ -60,8 +59,8 @@ function parseStoredSelectionList(value: unknown, allowedValues: string[]): stri
 
 export default function Register() {
   const [form] = Form.useForm()
-  const [task, setTask] = useState<any>(null)
-  const [polling, setPolling] = useState(false)
+  const { launchTask, tasks } = useRegisterTaskCenter()
+  const [submitting, setSubmitting] = useState(false)
   const [enabledMailboxServiceKeys, setEnabledMailboxServiceKeys] = useState<string[]>([])
 
   // 邮箱服务配置列表
@@ -141,13 +140,14 @@ export default function Register() {
 
   const submit = async () => {
     const values = await form.validateFields()
-    const res = await apiFetch('/tasks/register', {
-      method: 'POST',
-      body: JSON.stringify({
+    setSubmitting(true)
+    try {
+      await launchTask({
         platform: values.platform,
         email: values.email || null,
         password: values.password || null,
         count: values.count,
+        concurrency: values.concurrency || 1,
         register_delay_seconds: values.register_delay_seconds || 0,
         proxy: values.proxy || null,
         executor_type: values.executor_type,
@@ -191,31 +191,20 @@ export default function Register() {
           yescaptcha_key: values.yescaptcha_key,
           solver_url: values.solver_url,
         },
-      }),
-    })
-    setTask(res)
-    setPolling(true)
-    pollTask(res.task_id)
-  }
-
-  const pollTask = async (id: string) => {
-    const interval = setInterval(async () => {
-      const t = await apiFetch(`/tasks/${id}`)
-      setTask(t)
-      if (t.status === 'done' || t.status === 'failed') {
-        clearInterval(interval)
-        setPolling(false)
-        if (t.cashier_urls && t.cashier_urls.length > 0) {
-          t.cashier_urls.forEach((url: string) => window.open(url, '_blank'))
-        }
-      }
-    }, 2000)
+      })
+      message.success('注册任务已启动，可最小化到右下角后台执行')
+    } catch (e: any) {
+      message.error(`启动注册任务失败: ${e?.message || e || '未知错误'}`)
+    } finally {
+      setSubmitting(false)
+    }
   }
 
   const mailProvider = Form.useWatch('mail_provider', form)
   const captchaSolver = Form.useWatch('captcha_solver', form)
   const platform = Form.useWatch('platform', form)
   const executorOptions = getExecutorOptions(platform)
+  const trackedTaskCount = tasks.length
 
   useEffect(() => {
     const currentExecutor = form.getFieldValue('executor_type')
@@ -229,8 +218,16 @@ export default function Register() {
     <div style={{ maxWidth: 800 }}>
       <div style={{ marginBottom: 24 }}>
         <h1 style={{ fontSize: 24, fontWeight: 'bold', margin: 0 }}>注册任务</h1>
-        <p style={{ color: '#7a8ba3', marginTop: 4 }}>创建账号自动注册任务</p>
+        <p style={{ color: '#7a8ba3', marginTop: 4 }}>创建账号自动注册任务，日志会进入右下角任务托盘</p>
       </div>
+
+      <Alert
+        type="info"
+        showIcon
+        style={{ marginBottom: 16 }}
+        message="支持后台执行与多任务并行跟踪"
+        description={`当前任务中心已跟踪 ${trackedTaskCount} 个任务。启动后可最小化到右下角，继续发起新的 ChatGPT / Grok 批量注册。`}
+      />
 
       <Form form={form} layout="vertical" onFinish={submit} initialValues={{
         platform: 'trae',
@@ -238,6 +235,7 @@ export default function Register() {
         captcha_solver: 'yescaptcha',
         mail_provider: 'moemail',
         count: 1,
+        concurrency: 1,
         register_delay_seconds: 0,
         maliapi_base_url: 'https://maliapi.215.im/v1',
         maliapi_auto_domain_strategy: 'balanced',
@@ -273,6 +271,11 @@ export default function Register() {
             <Form.Item name="count" label="批量数量" style={{ flex: 1 }}>
               <Input type="number" min={1} />
             </Form.Item>
+            <Form.Item name="concurrency" label="并发数" style={{ flex: 1 }}>
+              <Input type="number" min={1} max={5} />
+            </Form.Item>
+          </Space>
+          <Space style={{ width: '100%' }}>
             <Form.Item name="register_delay_seconds" label="每个注册延迟(秒)" style={{ flex: 1 }}>
               <InputNumber min={0} precision={1} step={0.5} style={{ width: '100%' }} placeholder="0" />
             </Form.Item>
@@ -429,50 +432,10 @@ export default function Register() {
           </Card>
         )}
 
-        <Button type="primary" htmlType="submit" block disabled={polling} icon={polling ? <LoadingOutlined /> : <PlayCircleOutlined />}>
-          {polling ? '注册中...' : '开始注册'}
+        <Button type="primary" htmlType="submit" block disabled={submitting} icon={submitting ? <LoadingOutlined /> : <PlayCircleOutlined />}>
+          {submitting ? '提交中...' : '启动后台注册'}
         </Button>
       </Form>
-
-      {task && (
-        <Card title={
-          <Space>
-            <span>任务状态</span>
-            <Tag color={
-              task.status === 'done' ? 'success' :
-              task.status === 'failed' ? 'error' : 'processing'
-            }>
-              {task.status}
-            </Tag>
-          </Space>
-        } style={{ marginTop: 16 }}>
-          <Descriptions column={1} size="small">
-            <Descriptions.Item label="任务 ID">
-              <Text copyable style={{ fontFamily: 'monospace' }}>{task.id}</Text>
-            </Descriptions.Item>
-            <Descriptions.Item label="进度">{task.progress}</Descriptions.Item>
-          </Descriptions>
-          {task.success != null && (
-            <div style={{ marginTop: 8, color: '#10b981' }}>
-              <CheckCircleOutlined /> 成功 {task.success} 个
-            </div>
-          )}
-          {task.errors?.length > 0 && (
-            <div style={{ marginTop: 8 }}>
-              {task.errors.map((e: string, i: number) => (
-                <div key={i} style={{ color: '#ef4444', marginBottom: 4 }}>
-                  <CloseCircleOutlined /> {e}
-                </div>
-              ))}
-            </div>
-          )}
-          {task.error && (
-            <div style={{ marginTop: 8, color: '#ef4444' }}>
-              <CloseCircleOutlined /> {task.error}
-            </div>
-          )}
-        </Card>
-      )}
     </div>
   )
 }

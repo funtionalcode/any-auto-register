@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef, useCallback } from 'react'
+import { useEffect, useState, useCallback } from 'react'
 import { useParams } from 'react-router-dom'
 import {
   Table,
@@ -27,8 +27,9 @@ import {
   MoreOutlined,
   DeleteOutlined,
 } from '@ant-design/icons'
-import { apiFetch, API_BASE } from '@/lib/utils'
+import { apiFetch } from '@/lib/utils'
 import { normalizeExecutorForPlatform } from '@/lib/registerOptions'
+import { useRegisterTaskCenter } from '@/components/RegisterTaskCenter'
 
 const { Text } = Typography
 
@@ -38,6 +39,22 @@ const STATUS_COLORS: Record<string, string> = {
   subscribed: 'success',
   expired: 'warning',
   invalid: 'error',
+}
+
+const DEFAULT_ACCOUNT_PAGE_SIZE = 20
+const ACCOUNT_PAGE_SIZE_OPTIONS = [20, 50, 100, 200]
+const ACCOUNT_PAGE_SIZE_STORAGE_PREFIX = 'accounts.pageSize.'
+
+function readPersistedAccountPageSize(platform: string) {
+  if (typeof window === 'undefined') return DEFAULT_ACCOUNT_PAGE_SIZE
+  const raw = window.localStorage.getItem(`${ACCOUNT_PAGE_SIZE_STORAGE_PREFIX}${platform}`)
+  const value = Number(raw || DEFAULT_ACCOUNT_PAGE_SIZE)
+  return ACCOUNT_PAGE_SIZE_OPTIONS.includes(value) ? value : DEFAULT_ACCOUNT_PAGE_SIZE
+}
+
+function persistAccountPageSize(platform: string, pageSize: number) {
+  if (typeof window === 'undefined') return
+  window.localStorage.setItem(`${ACCOUNT_PAGE_SIZE_STORAGE_PREFIX}${platform}`, String(pageSize))
 }
 
 function parseExtraJson(raw: string | undefined) {
@@ -61,84 +78,6 @@ function formatSyncTime(value?: string) {
   if (!value) return ''
   const date = new Date(value)
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString()
-}
-
-function LogPanel({ taskId, onDone }: { taskId: string; onDone: () => void }) {
-  const [lines, setLines] = useState<string[]>([])
-  const [done, setDone] = useState(false)
-  const bottomRef = useRef<HTMLDivElement>(null)
-  const handleCopyAll = async () => {
-    try {
-      await navigator.clipboard.writeText(lines.join('\n'))
-      message.success('日志已复制')
-    } catch {
-      message.error('复制失败')
-    }
-  }
-
-  useEffect(() => {
-    if (!taskId) return
-    const es = new EventSource(`${API_BASE}/tasks/${taskId}/logs/stream`)
-    es.onmessage = (e) => {
-      const d = JSON.parse(e.data)
-      if (d.line) setLines((prev) => [...prev, d.line])
-      if (d.done) {
-        setDone(true)
-        es.close()
-        onDone()
-      }
-    }
-    es.onerror = () => es.close()
-    return () => es.close()
-  }, [taskId])
-
-  useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [lines])
-
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
-      <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 8 }}>
-        <Button size="small" icon={<CopyOutlined />} onClick={handleCopyAll} disabled={lines.length === 0}>
-          复制日志
-        </Button>
-      </div>
-      <div
-        className="log-panel"
-        style={{
-          flex: 1,
-          overflow: 'auto',
-          background: '#ffffff',
-          border: '1px solid #e5e7eb',
-          borderRadius: 8,
-          padding: 12,
-          fontFamily: 'monospace',
-          fontSize: 12,
-          minHeight: 200,
-          maxHeight: 400,
-          userSelect: 'text',
-          WebkitUserSelect: 'text',
-          cursor: 'text',
-          whiteSpace: 'pre-wrap',
-        }}
-      >
-        {lines.length === 0 && <div style={{ color: '#9ca3af' }}>等待日志...</div>}
-        {lines.map((l, i) => (
-          <div
-            key={i}
-            style={{
-              lineHeight: 1.5,
-              color: l.includes('✓') || l.includes('成功') ? '#059669' : l.includes('✗') || l.includes('失败') || l.includes('错误') ? '#dc2626' : '#1f2937',
-            }}
-          >
-            {l}
-          </div>
-        ))}
-        <div ref={bottomRef} />
-      </div>
-      {done && <div style={{ fontSize: 12, color: '#10b981', marginTop: 8 }}>注册完成</div>}
-    </div>
-  )
 }
 
 function ActionMenu({ acc, onRefresh }: { acc: any; onRefresh: () => void }) {
@@ -282,6 +221,7 @@ function ActionMenu({ acc, onRefresh }: { acc: any; onRefresh: () => void }) {
 }
 
 export default function Accounts() {
+  const { launchTask, completionVersion } = useRegisterTaskCenter()
   const { platform } = useParams<{ platform: string }>()
   const [currentPlatform, setCurrentPlatform] = useState(platform || 'trae')
   const [accounts, setAccounts] = useState<any[]>([])
@@ -289,6 +229,8 @@ export default function Accounts() {
   const [loading, setLoading] = useState(false)
   const [search, setSearch] = useState('')
   const [filterStatus, setFilterStatus] = useState('')
+  const [page, setPage] = useState(1)
+  const [pageSize, setPageSize] = useState(() => readPersistedAccountPageSize(platform || 'trae'))
   const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([])
 
   const [registerModalOpen, setRegisterModalOpen] = useState(false)
@@ -302,7 +244,6 @@ export default function Accounts() {
   const [detailForm] = Form.useForm()
   const [importText, setImportText] = useState('')
   const [importLoading, setImportLoading] = useState(false)
-  const [taskId, setTaskId] = useState<string | null>(null)
   const [registerLoading, setRegisterLoading] = useState(false)
   const [cpaSyncLoading, setCpaSyncLoading] = useState<'pending' | 'selected' | ''>('')
 
@@ -310,23 +251,44 @@ export default function Accounts() {
     if (platform) setCurrentPlatform(platform)
   }, [platform])
 
+  useEffect(() => {
+    setPage(1)
+    setPageSize(readPersistedAccountPageSize(currentPlatform))
+    setSelectedRowKeys([])
+  }, [currentPlatform])
+
   const load = useCallback(async () => {
     setLoading(true)
     try {
-      const params = new URLSearchParams({ platform: currentPlatform, page: '1', page_size: '100' })
+      const params = new URLSearchParams({
+        platform: currentPlatform,
+        page: String(page),
+        page_size: String(pageSize),
+      })
       if (search) params.set('email', search)
       if (filterStatus) params.set('status', filterStatus)
       const data = await apiFetch(`/accounts?${params}`)
+      const nextTotal = Number(data.total || 0)
+      const maxPage = Math.max(1, Math.ceil(nextTotal / pageSize))
+      if (page > maxPage) {
+        setPage(maxPage)
+        return
+      }
       setAccounts((data.items || []).map(normalizeAccount))
-      setTotal(data.total)
+      setTotal(nextTotal)
     } finally {
       setLoading(false)
     }
-  }, [currentPlatform, search, filterStatus])
+  }, [currentPlatform, filterStatus, page, pageSize, search])
 
   useEffect(() => {
     load()
   }, [load])
+
+  useEffect(() => {
+    if (completionVersion === 0) return
+    load()
+  }, [completionVersion, load])
 
   const copyText = (text: string) => {
     navigator.clipboard.writeText(text)
@@ -343,15 +305,10 @@ export default function Accounts() {
   }
 
   const exportCsv = () => {
-    const header = 'email,password,status,region,cashier_url,created_at'
-    const rows = accounts.map((a) => [a.email, a.password, a.status, a.region, a.cashier_url, a.created_at].join(','))
-    const blob = new Blob([[header, ...rows].join('\n')], { type: 'text/csv' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `${currentPlatform}_accounts.csv`
-    a.click()
-    URL.revokeObjectURL(url)
+    const params = new URLSearchParams()
+    params.set('platform', currentPlatform)
+    if (filterStatus) params.set('status', filterStatus)
+    window.open(`/api/accounts/export?${params.toString()}`, '_blank', 'noopener,noreferrer')
   }
 
   const handleDelete = async (id: number) => {
@@ -409,54 +366,54 @@ export default function Accounts() {
     try {
       const cfg = await apiFetch('/config')
       const executorType = normalizeExecutorForPlatform(currentPlatform, cfg.default_executor)
-      const res = await apiFetch('/tasks/register', {
-        method: 'POST',
-        body: JSON.stringify({
-          platform: currentPlatform,
-          count: values.count,
-          concurrency: values.concurrency,
-          register_delay_seconds: values.register_delay_seconds || 0,
-          executor_type: executorType,
-          captcha_solver: cfg.default_captcha_solver || 'yescaptcha',
-          proxy: null,
-          extra: {
-            mail_provider: cfg.mail_provider || 'laoudo',
-            laoudo_auth: cfg.laoudo_auth,
-            laoudo_email: cfg.laoudo_email,
-            laoudo_account_id: cfg.laoudo_account_id,
-            maliapi_base_url: cfg.maliapi_base_url,
-            maliapi_api_key: cfg.maliapi_api_key,
-            maliapi_domain: cfg.maliapi_domain,
-            maliapi_auto_domain_strategy: cfg.maliapi_auto_domain_strategy,
-            yescaptcha_key: cfg.yescaptcha_key,
-            moemail_api_url: cfg.moemail_api_url,
-            skymail_api_base: cfg.skymail_api_base,
-            skymail_token: cfg.skymail_token,
-            skymail_domain: cfg.skymail_domain,
-            duckmail_address: cfg.duckmail_address,
-            duckmail_password: cfg.duckmail_password,
-            duckmail_api_url: cfg.duckmail_api_url,
-            duckmail_provider_url: cfg.duckmail_provider_url,
-            duckmail_bearer: cfg.duckmail_bearer,
-            freemail_api_url: cfg.freemail_api_url,
-            freemail_admin_token: cfg.freemail_admin_token,
-            freemail_username: cfg.freemail_username,
-            freemail_password: cfg.freemail_password,
-            cfworker_api_url: cfg.cfworker_api_url,
-            cfworker_admin_token: cfg.cfworker_admin_token,
-            cfworker_custom_auth: cfg.cfworker_custom_auth,
-            cfworker_domain: cfg.cfworker_domain,
-            cfworker_fingerprint: cfg.cfworker_fingerprint,
-            smstome_cookie: cfg.smstome_cookie,
-            smstome_country_slugs: cfg.smstome_country_slugs,
-            smstome_phone_attempts: cfg.smstome_phone_attempts,
-            smstome_otp_timeout_seconds: cfg.smstome_otp_timeout_seconds,
-            smstome_poll_interval_seconds: cfg.smstome_poll_interval_seconds,
-            smstome_sync_max_pages_per_country: cfg.smstome_sync_max_pages_per_country,
-          },
-        }),
+      await launchTask({
+        platform: currentPlatform,
+        count: values.count,
+        concurrency: values.concurrency,
+        register_delay_seconds: values.register_delay_seconds || 0,
+        executor_type: executorType,
+        captcha_solver: cfg.default_captcha_solver || 'yescaptcha',
+        proxy: null,
+        extra: {
+          mail_provider: cfg.mail_provider || 'laoudo',
+          laoudo_auth: cfg.laoudo_auth,
+          laoudo_email: cfg.laoudo_email,
+          laoudo_account_id: cfg.laoudo_account_id,
+          maliapi_base_url: cfg.maliapi_base_url,
+          maliapi_api_key: cfg.maliapi_api_key,
+          maliapi_domain: cfg.maliapi_domain,
+          maliapi_auto_domain_strategy: cfg.maliapi_auto_domain_strategy,
+          yescaptcha_key: cfg.yescaptcha_key,
+          moemail_api_url: cfg.moemail_api_url,
+          skymail_api_base: cfg.skymail_api_base,
+          skymail_token: cfg.skymail_token,
+          skymail_domain: cfg.skymail_domain,
+          duckmail_address: cfg.duckmail_address,
+          duckmail_password: cfg.duckmail_password,
+          duckmail_api_url: cfg.duckmail_api_url,
+          duckmail_provider_url: cfg.duckmail_provider_url,
+          duckmail_bearer: cfg.duckmail_bearer,
+          freemail_api_url: cfg.freemail_api_url,
+          freemail_admin_token: cfg.freemail_admin_token,
+          freemail_username: cfg.freemail_username,
+          freemail_password: cfg.freemail_password,
+          cfworker_api_url: cfg.cfworker_api_url,
+          cfworker_admin_token: cfg.cfworker_admin_token,
+          cfworker_custom_auth: cfg.cfworker_custom_auth,
+          cfworker_domain: cfg.cfworker_domain,
+          cfworker_fingerprint: cfg.cfworker_fingerprint,
+          smstome_cookie: cfg.smstome_cookie,
+          smstome_country_slugs: cfg.smstome_country_slugs,
+          smstome_phone_attempts: cfg.smstome_phone_attempts,
+          smstome_otp_timeout_seconds: cfg.smstome_otp_timeout_seconds,
+          smstome_poll_interval_seconds: cfg.smstome_poll_interval_seconds,
+          smstome_sync_max_pages_per_country: cfg.smstome_sync_max_pages_per_country,
+        },
       })
-      setTaskId(res.task_id)
+      message.success('注册任务已启动，可最小化到右下角后台执行')
+      setRegisterModalOpen(false)
+    } catch (e: any) {
+      message.error(`启动注册任务失败: ${e?.message || e || '未知错误'}`)
     } finally {
       setRegisterLoading(false)
     }
@@ -690,14 +647,20 @@ export default function Accounts() {
           <Input.Search
             placeholder="搜索邮箱..."
             allowClear
-            onSearch={setSearch}
+            onSearch={(value) => {
+              setSearch(value)
+              setPage(1)
+            }}
             style={{ width: 200 }}
           />
           <Select
             placeholder="状态筛选"
             allowClear
             style={{ width: 120 }}
-            onChange={setFilterStatus}
+            onChange={(value) => {
+              setFilterStatus(value || '')
+              setPage(1)
+            }}
             options={[
               { value: 'registered', label: '已注册' },
               { value: 'trial', label: '试用中' },
@@ -754,7 +717,24 @@ export default function Accounts() {
           selectedRowKeys,
           onChange: setSelectedRowKeys,
         }}
-        pagination={{ pageSize: 20, showSizeChanger: false }}
+        pagination={{
+          current: page,
+          pageSize,
+          total,
+          showSizeChanger: true,
+          pageSizeOptions: ACCOUNT_PAGE_SIZE_OPTIONS.map(String),
+          showTotal: (count) => `共 ${count} 个账号`,
+          onChange: (nextPage, nextPageSize) => {
+            const normalizedPageSize = nextPageSize || pageSize
+            if (normalizedPageSize !== pageSize) {
+              persistAccountPageSize(currentPlatform, normalizedPageSize)
+              setPageSize(normalizedPageSize)
+              setPage(1)
+            } else {
+              setPage(nextPage)
+            }
+          },
+        }}
         onRow={(record) => ({
           onDoubleClick: () => {
             setCurrentAccount(record)
@@ -766,31 +746,34 @@ export default function Accounts() {
       <Modal
         title={`注册 ${currentPlatform}`}
         open={registerModalOpen}
-        onCancel={() => { setRegisterModalOpen(false); setTaskId(null); registerForm.resetFields(); }}
+        onCancel={() => setRegisterModalOpen(false)}
         footer={null}
         width={500}
         maskClosable={false}
       >
-        {!taskId ? (
-          <Form form={registerForm} layout="vertical" onFinish={handleRegister}>
-            <Form.Item name="count" label="注册数量" initialValue={1} rules={[{ required: true }]}>
-              <Input type="number" min={1} max={99} />
-            </Form.Item>
-            <Form.Item name="concurrency" label="并发数" initialValue={1} rules={[{ required: true }]}>
-              <Input type="number" min={1} max={5} />
-            </Form.Item>
-            <Form.Item name="register_delay_seconds" label="每个注册延迟(秒)" initialValue={0}>
-              <InputNumber min={0} precision={1} step={0.5} style={{ width: '100%' }} placeholder="0 = 不延迟" />
-            </Form.Item>
-            <Form.Item>
-              <Button type="primary" htmlType="submit" block loading={registerLoading}>
-                开始注册
-              </Button>
-            </Form.Item>
-          </Form>
-        ) : (
-          <LogPanel taskId={taskId} onDone={() => { load(); }} />
-        )}
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 16 }}
+          message="启动后会进入右下角任务托盘"
+          description="任务支持最小化、恢复查看日志，并且可以继续发起新的批量注册。"
+        />
+        <Form form={registerForm} layout="vertical" onFinish={handleRegister}>
+          <Form.Item name="count" label="注册数量" initialValue={1} rules={[{ required: true }]}>
+            <Input type="number" min={1} max={99} />
+          </Form.Item>
+          <Form.Item name="concurrency" label="并发数" initialValue={1} rules={[{ required: true }]}>
+            <Input type="number" min={1} max={5} />
+          </Form.Item>
+          <Form.Item name="register_delay_seconds" label="每个注册延迟(秒)" initialValue={0}>
+            <InputNumber min={0} precision={1} step={0.5} style={{ width: '100%' }} placeholder="0 = 不延迟" />
+          </Form.Item>
+          <Form.Item>
+            <Button type="primary" htmlType="submit" block loading={registerLoading}>
+              启动后台注册
+            </Button>
+          </Form.Item>
+        </Form>
       </Modal>
 
       <Modal

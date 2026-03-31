@@ -96,6 +96,8 @@ class TraeRegister:
         user_id = self.step3_register(email, password, otp)
         self.step4_trae_login()
         token = self.step5_get_token()
+        if not token:
+            raise RuntimeError("Trae 注册失败：已完成邮箱验证，但未获取到登录 token")
         result = self.step6_check_login()
         cashier_url = self.step7_create_order(token)
         return {
