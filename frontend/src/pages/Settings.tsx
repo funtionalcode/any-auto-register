@@ -434,14 +434,15 @@ const MAILBOX_SERVICES = [
 
 function MailboxServiceManager({ form }: { form: any }) {
   const [enabledServices, setEnabledServices] = useState<string[]>([])
-  const [configValues, setConfigValues] = useState<Record<string, any>>({})
+  const [, setConfigValues] = useState<Record<string, unknown>>({})
 
   // 监听配置变化
   useEffect(() => {
-    const subscription = form.onValuesChange((changedValues, allValues) => {
+    const subscription = form.onValuesChange((changedValues: Record<string, unknown>) => {
       // 监听邮箱服务启用状态
       if (changedValues.mailbox_services_enabled !== undefined) {
-        const enabled = (changedValues.mailbox_services_enabled || '').split(',').filter(Boolean)
+        const enabledValue = changedValues.mailbox_services_enabled
+        const enabled = typeof enabledValue === 'string' ? enabledValue.split(',').filter(Boolean) : []
         setEnabledServices(enabled)
       }
       // 监听各邮箱配置
