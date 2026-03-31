@@ -1,5 +1,6 @@
 """Turnstile Solver 进程管理 - 后端启动时自动拉起"""
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -14,6 +15,8 @@ _proc: subprocess.Popen | None = None
 _log_file = None
 _last_error = ""
 _lock = threading.Lock()
+_ANSI_ESCAPE_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+_ORPHAN_ANSI_CODE_RE = re.compile(r"\[(?:\d{1,3}(?:;\d{1,3})*)m")
 
 
 def _log_path() -> Path:
@@ -77,7 +80,10 @@ def status() -> dict[str, Any]:
 def _clean_log_text(text: str) -> str:
     if not text:
         return ""
-    return str(text).replace("\r\n", "\n").replace("\r", "\n")
+    cleaned = str(text).replace("\r\n", "\n").replace("\r", "\n")
+    cleaned = _ANSI_ESCAPE_RE.sub("", cleaned)
+    cleaned = _ORPHAN_ANSI_CODE_RE.sub("", cleaned)
+    return cleaned
 
 
 def read_log(max_lines: int = 400, max_bytes: int = 128 * 1024) -> dict[str, Any]:

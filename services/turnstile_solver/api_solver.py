@@ -27,18 +27,19 @@ from rich.align import Align
 from rich import box
 
 
-
+_ORIGINAL_LOGGER_CLASS = logging.getLoggerClass()
+_COLOR_ENABLED = sys.stdout.isatty() and os.getenv("NO_COLOR", "").strip() == ""
 COLORS = {
-    'MAGENTA': '\033[35m',
-    'BLUE': '\033[34m',
-    'GREEN': '\033[32m',
-    'YELLOW': '\033[33m',
-    'RED': '\033[31m',
-    'RESET': '\033[0m',
+    'MAGENTA': '\033[35m' if _COLOR_ENABLED else '',
+    'BLUE': '\033[34m' if _COLOR_ENABLED else '',
+    'GREEN': '\033[32m' if _COLOR_ENABLED else '',
+    'YELLOW': '\033[33m' if _COLOR_ENABLED else '',
+    'RED': '\033[31m' if _COLOR_ENABLED else '',
+    'RESET': '\033[0m' if _COLOR_ENABLED else '',
 }
 
 
-class CustomLogger(logging.Logger):
+class CustomLogger(_ORIGINAL_LOGGER_CLASS):
     @staticmethod
     def format_message(level, color, message):
         timestamp = time.strftime('%H:%M:%S')
@@ -62,9 +63,13 @@ class CustomLogger(logging.Logger):
 
 logging.setLoggerClass(CustomLogger)
 logger: CustomLogger = logging.getLogger("TurnstileAPIServer")  # type: ignore
+logging.setLoggerClass(_ORIGINAL_LOGGER_CLASS)
 logger.setLevel(logging.DEBUG)
-handler = logging.StreamHandler(sys.stdout)
-logger.addHandler(handler)
+logger.propagate = False
+if not logger.handlers:
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(logging.Formatter('%(message)s'))
+    logger.addHandler(handler)
 
 
 class TurnstileAPIServer:
