@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Card, Form, Input, Select, Button, message, Tabs, Space, Tag, Typography, Modal, Segmented } from 'antd'
+import { Card, Form, Input, Select, Button, message, Tabs, Space, Tag, Typography, Modal, Segmented, Alert } from 'antd'
 import type { FormInstance } from 'antd'
 import {
   SaveOutlined,
@@ -270,6 +270,33 @@ interface MailboxInboxItem {
   content: string
   html: string
   verification_code: string
+}
+
+interface MailboxCreateResult {
+  provider?: string
+  email?: string
+  account_id?: string
+  extra?: Record<string, unknown>
+}
+
+interface MailboxMessagesResult {
+  provider?: string
+  email?: string
+  account_id?: string
+  total?: number
+  items?: MailboxInboxItem[]
+}
+
+interface MailboxTaskSnapshot {
+  id: string
+  action: 'create' | 'messages' | string
+  status: 'pending' | 'running' | 'done' | 'failed' | string
+  message?: string
+  error_message?: string
+  result?: MailboxCreateResult | MailboxMessagesResult
+  created_at: number
+  updated_at: number
+  finished_at?: number | null
 }
 
 interface TabConfig {
@@ -769,6 +796,7 @@ const MAILBOX_SERVICES: MailboxServiceConfig[] = [
 const MAILBOX_SERVICE_KEYS = MAILBOX_SERVICES.map((service) => service.key)
 
 function MailboxSettingsPanel({ form }: { form: FormInstance }) {
+  const mailboxTaskPollTimerRef = useRef<number | null>(null)
   const selectedServiceKey = Form.useWatch('mail_provider', form) || 'moemail'
   const enabledServiceKeys = normalizeSelectionList(
     Form.useWatch('mailbox_services_enabled', form) || [],
@@ -782,6 +810,7 @@ function MailboxSettingsPanel({ form }: { form: FormInstance }) {
   const [inboxProxy, setInboxProxy] = useState('')
   const [inboxLoading, setInboxLoading] = useState(false)
   const [inboxCreating, setInboxCreating] = useState(false)
+  const [mailboxTask, setMailboxTask] = useState<MailboxTaskSnapshot | null>(null)
   const [inboxLoaded, setInboxLoaded] = useState(false)
   const [inboxItems, setInboxItems] = useState<MailboxInboxItem[]>([])
   const [activeInboxItem, setActiveInboxItem] = useState<MailboxInboxItem | null>(null)
@@ -794,34 +823,117 @@ function MailboxSettingsPanel({ form }: { form: FormInstance }) {
     setActiveInboxItem(null)
   }, [selectedServiceKey])
 
-  const createTestInbox = async () => {
-    setInboxCreating(true)
-    try {
-      const data = await apiFetch('/mailbox/inbox/create', {
-        method: 'POST',
-        body: JSON.stringify({
-          provider: selectedServiceKey,
-          config: form.getFieldsValue(true),
-          proxy: inboxProxy,
-        }),
-      })
+  useEffect(() => {
+    return () => {
+      if (mailboxTaskPollTimerRef.current !== null) {
+        window.clearInterval(mailboxTaskPollTimerRef.current)
+      }
+    }
+  }, [])
+
+  const stopMailboxTaskPolling = () => {
+    if (mailboxTaskPollTimerRef.current !== null) {
+      window.clearInterval(mailboxTaskPollTimerRef.current)
+      mailboxTaskPollTimerRef.current = null
+    }
+  }
+
+  const finalizeMailboxTask = async (snapshot: MailboxTaskSnapshot) => {
+    stopMailboxTaskPolling()
+    setMailboxTask(null)
+
+    if (snapshot.action === 'create') {
+      setInboxCreating(false)
+    } else if (snapshot.action === 'messages') {
+      setInboxLoading(false)
+    }
+
+    if (snapshot.status === 'failed') {
+      message.error(snapshot.error_message || (snapshot.action === 'create' ? '生成测试邮箱失败' : '读取收件箱失败'))
+      return
+    }
+
+    if (snapshot.action === 'create') {
+      const data = (snapshot.result || {}) as MailboxCreateResult
       setInboxEmail(String(data.email || ''))
       setInboxAccountId(String(data.account_id || ''))
       setInboxExtra(data.extra && typeof data.extra === 'object' ? data.extra : {})
       setInboxItems([])
       setInboxLoaded(false)
       message.success('测试邮箱已生成')
+      return
+    }
+
+    const data = (snapshot.result || {}) as MailboxMessagesResult
+    setInboxEmail(String(data.email || inboxEmail || ''))
+    setInboxAccountId(String(data.account_id || inboxAccountId || ''))
+    setInboxItems(Array.isArray(data.items) ? data.items : [])
+    setInboxLoaded(true)
+    message.success(`收件箱刷新完成，共 ${Number(data.total || 0)} 封邮件`)
+  }
+
+  const pollMailboxTask = async (taskId: string) => {
+    try {
+      const snapshot = await apiFetch(`/mailbox/inbox/tasks/${taskId}`) as MailboxTaskSnapshot
+      setMailboxTask(snapshot)
+      if (snapshot.status === 'done' || snapshot.status === 'failed') {
+        await finalizeMailboxTask(snapshot)
+      }
+      return snapshot
+    } catch (e: any) {
+      stopMailboxTaskPolling()
+      setMailboxTask(null)
+      setInboxCreating(false)
+      setInboxLoading(false)
+      message.error(`获取邮箱测试任务状态失败: ${e?.message || e || '未知错误'}`)
+      return null
+    }
+  }
+
+  const createTestInbox = async () => {
+    if (inboxCreating || inboxLoading) {
+      message.info('已有邮箱测试任务正在执行')
+      return
+    }
+    setInboxCreating(true)
+    try {
+      const task = await apiFetch('/mailbox/inbox/create/async', {
+        method: 'POST',
+        body: JSON.stringify({
+          provider: selectedServiceKey,
+          config: form.getFieldsValue(true),
+          proxy: inboxProxy,
+        }),
+      }) as MailboxTaskSnapshot
+      setMailboxTask(task)
+      message.success('测试邮箱任务已转入后台执行')
+
+      stopMailboxTaskPolling()
+      const snapshot = await pollMailboxTask(task.id)
+      if (snapshot && snapshot.status !== 'done' && snapshot.status !== 'failed') {
+        mailboxTaskPollTimerRef.current = window.setInterval(() => {
+          void pollMailboxTask(task.id)
+        }, 1500)
+      }
     } catch (e: any) {
       message.error(e?.message || '生成测试邮箱失败')
-    } finally {
       setInboxCreating(false)
+      setMailboxTask(null)
+    } finally {
+      if (!mailboxTaskPollTimerRef.current) {
+        setInboxCreating(false)
+      }
     }
   }
 
   const loadInbox = async () => {
+    if (inboxCreating || inboxLoading) {
+      message.info('已有邮箱测试任务正在执行')
+      return
+    }
     setInboxLoading(true)
     try {
-      const data = await apiFetch('/mailbox/inbox/messages', {
+      const task = await apiFetch('/mailbox/inbox/messages/async', {
         method: 'POST',
         body: JSON.stringify({
           provider: selectedServiceKey,
@@ -832,16 +944,25 @@ function MailboxSettingsPanel({ form }: { form: FormInstance }) {
           proxy: inboxProxy,
           limit: 10,
         }),
-      })
-      setInboxEmail(String(data.email || inboxEmail || ''))
-      setInboxAccountId(String(data.account_id || inboxAccountId || ''))
-      setInboxItems(Array.isArray(data.items) ? data.items : [])
-      setInboxLoaded(true)
-      message.success(`收件箱刷新完成，共 ${Number(data.total || 0)} 封邮件`)
+      }) as MailboxTaskSnapshot
+      setMailboxTask(task)
+      message.success('收件箱刷新任务已转入后台执行')
+
+      stopMailboxTaskPolling()
+      const snapshot = await pollMailboxTask(task.id)
+      if (snapshot && snapshot.status !== 'done' && snapshot.status !== 'failed') {
+        mailboxTaskPollTimerRef.current = window.setInterval(() => {
+          void pollMailboxTask(task.id)
+        }, 1500)
+      }
     } catch (e: any) {
       message.error(e?.message || '读取收件箱失败')
-    } finally {
       setInboxLoading(false)
+      setMailboxTask(null)
+    } finally {
+      if (!mailboxTaskPollTimerRef.current) {
+        setInboxLoading(false)
+      }
     }
   }
 
@@ -965,6 +1086,29 @@ function MailboxSettingsPanel({ form }: { form: FormInstance }) {
           <Typography.Text type="secondary">
             可直接生成测试邮箱，也可手动填写已有邮箱和账号 ID / Token 查看当前收件箱。部分服务如 TempMail.lol、DuckMail、API Mail 需要 Token。
           </Typography.Text>
+          {mailboxTask ? (
+            <Alert
+              showIcon
+              type={
+                mailboxTask.status === 'failed'
+                  ? 'error'
+                  : mailboxTask.status === 'done'
+                    ? 'success'
+                    : 'info'
+              }
+              message={
+                mailboxTask.status === 'failed'
+                  ? '收件箱测试后台任务失败'
+                  : mailboxTask.status === 'done'
+                    ? '收件箱测试后台任务已完成'
+                    : '收件箱测试后台任务运行中'
+              }
+              description={[
+                mailboxTask.action === 'create' ? '生成测试邮箱' : '刷新收件箱',
+                mailboxTask.message || '',
+              ].filter(Boolean).join(' · ')}
+            />
+          ) : null}
           <Form.Item label="邮箱地址" style={{ marginBottom: 0 }}>
             <Input
               value={inboxEmail}
@@ -987,10 +1131,10 @@ function MailboxSettingsPanel({ form }: { form: FormInstance }) {
             />
           </Form.Item>
           <Space wrap>
-            <Button onClick={createTestInbox} loading={inboxCreating}>
+            <Button onClick={createTestInbox} loading={inboxCreating} disabled={inboxLoading}>
               生成测试邮箱
             </Button>
-            <Button type="primary" onClick={loadInbox} loading={inboxLoading}>
+            <Button type="primary" onClick={loadInbox} loading={inboxLoading} disabled={inboxCreating}>
               刷新收件箱
             </Button>
           </Space>

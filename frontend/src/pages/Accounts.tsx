@@ -70,6 +70,21 @@ interface AccountBatchCheckResponse {
   items: AccountCheckItem[]
 }
 
+interface AccountBatchCheckTaskSnapshot extends AccountBatchCheckResponse {
+  id: string
+  status: 'pending' | 'running' | 'done' | 'failed' | string
+  message?: string
+  error_message?: string
+  created_at: number
+  updated_at: number
+  finished_at?: number | null
+}
+
+interface ActiveAccountBatchCheckTask extends AccountBatchCheckTaskSnapshot {
+  scope: 'page' | 'selected' | number
+  title: string
+}
+
 interface CpaBackfillTaskSnapshot {
   id: string
   status: 'pending' | 'running' | 'done' | 'failed' | string
@@ -386,6 +401,7 @@ export default function Accounts() {
   const exportFrameRef = useRef<HTMLIFrameElement | null>(null)
   const exportResetTimerRef = useRef<number | null>(null)
   const cpaTaskPollTimerRef = useRef<number | null>(null)
+  const batchCheckTaskPollTimerRef = useRef<number | null>(null)
   const [currentPlatform, setCurrentPlatform] = useState(platform || 'trae')
   const [accounts, setAccounts] = useState<any[]>([])
   const [total, setTotal] = useState(0)
@@ -412,6 +428,7 @@ export default function Accounts() {
   const [cpaSyncLoading, setCpaSyncLoading] = useState<'pending' | 'selected' | ''>('')
   const [cpaTask, setCpaTask] = useState<ActiveCpaBackfillTask | null>(null)
   const [testing, setTesting] = useState<'page' | 'selected' | number | null>(null)
+  const [batchCheckTask, setBatchCheckTask] = useState<ActiveAccountBatchCheckTask | null>(null)
   const [testDeleting, setTestDeleting] = useState(false)
   const [testResult, setTestResult] = useState<{
     open: boolean
@@ -434,6 +451,9 @@ export default function Accounts() {
       }
       if (cpaTaskPollTimerRef.current !== null) {
         window.clearInterval(cpaTaskPollTimerRef.current)
+      }
+      if (batchCheckTaskPollTimerRef.current !== null) {
+        window.clearInterval(batchCheckTaskPollTimerRef.current)
       }
     }
   }, [])
@@ -660,6 +680,13 @@ export default function Accounts() {
     }
   }
 
+  const stopBatchCheckTaskPolling = () => {
+    if (batchCheckTaskPollTimerRef.current !== null) {
+      window.clearInterval(batchCheckTaskPollTimerRef.current)
+      batchCheckTaskPollTimerRef.current = null
+    }
+  }
+
   const finalizeCpaTask = async (snapshot: ActiveCpaBackfillTask) => {
     stopCpaTaskPolling()
     setCpaSyncLoading('')
@@ -697,6 +724,64 @@ export default function Accounts() {
       stopCpaTaskPolling()
       setCpaSyncLoading('')
       message.error(`获取 CPA 后台任务状态失败: ${e?.message || e || '未知错误'}`)
+      return null
+    }
+  }
+
+  const finalizeBatchCheckTask = async (snapshot: ActiveAccountBatchCheckTask) => {
+    stopBatchCheckTaskPolling()
+    setTesting(null)
+    setBatchCheckTask(null)
+
+    const result: AccountBatchCheckResponse = {
+      total_requested: snapshot.total_requested,
+      tested: snapshot.tested,
+      valid: snapshot.valid,
+      invalid: snapshot.invalid,
+      error: snapshot.error,
+      invalid_ids: snapshot.invalid_ids,
+      error_ids: snapshot.error_ids,
+      not_found: snapshot.not_found,
+      items: snapshot.items,
+    }
+
+    if (snapshot.status === 'failed') {
+      message.error(snapshot.error_message || '账号测试失败')
+    } else if (result.invalid === 0 && result.error === 0) {
+      message.success(`测试完成：${result.valid} 个通过`)
+    } else if (result.error === 0) {
+      message.warning(`测试完成：通过 ${result.valid}，失败 ${result.invalid}`)
+    } else {
+      message.warning(`测试完成：通过 ${result.valid}，失败 ${result.invalid}，异常 ${result.error}`)
+    }
+
+    setTestResult({
+      open: true,
+      title: snapshot.title,
+      data: result,
+    })
+    await load()
+  }
+
+  const pollBatchCheckTask = async (
+    taskId: string,
+    scope: 'page' | 'selected' | number,
+    title: string,
+  ) => {
+    try {
+      const snapshot = await apiFetch(`/accounts/batch-check/tasks/${taskId}`) as AccountBatchCheckTaskSnapshot
+      const nextTask: ActiveAccountBatchCheckTask = { ...snapshot, scope, title }
+      setBatchCheckTask(nextTask)
+
+      if (snapshot.status === 'done' || snapshot.status === 'failed') {
+        await finalizeBatchCheckTask(nextTask)
+      }
+      return snapshot
+    } catch (e: any) {
+      stopBatchCheckTaskPolling()
+      setTesting(null)
+      setBatchCheckTask(null)
+      message.error(`获取账号测试任务状态失败: ${e?.message || e || '未知错误'}`)
       return null
     }
   }
@@ -768,32 +853,36 @@ export default function Accounts() {
       message.warning('没有可测试的账号')
       return
     }
+    if (testing !== null) {
+      message.info('已有账号测试任务正在执行')
+      return
+    }
 
     setTesting(scope)
     try {
-      const result = await apiFetch('/accounts/batch-check', {
+      const task = await apiFetch('/accounts/batch-check/async', {
         method: 'POST',
         body: JSON.stringify({ ids: normalizedIds }),
-      }) as AccountBatchCheckResponse
+      }) as AccountBatchCheckTaskSnapshot
 
-      if (result.invalid === 0 && result.error === 0) {
-        message.success(`测试完成：${result.valid} 个通过`)
-      } else if (result.error === 0) {
-        message.warning(`测试完成：通过 ${result.valid}，失败 ${result.invalid}`)
-      } else {
-        message.warning(`测试完成：通过 ${result.valid}，失败 ${result.invalid}，异常 ${result.error}`)
+      setBatchCheckTask({ ...task, scope, title })
+      message.success('账号测试已转入后台执行')
+
+      stopBatchCheckTaskPolling()
+      const snapshot = await pollBatchCheckTask(task.id, scope, title)
+      if (snapshot && snapshot.status !== 'done' && snapshot.status !== 'failed') {
+        batchCheckTaskPollTimerRef.current = window.setInterval(() => {
+          void pollBatchCheckTask(task.id, scope, title)
+        }, 2000)
       }
-
-      setTestResult({
-        open: true,
-        title,
-        data: result,
-      })
-      await load()
     } catch (e: any) {
       message.error(`测试失败: ${e?.message || e || '未知错误'}`)
-    } finally {
       setTesting(null)
+      setBatchCheckTask(null)
+    } finally {
+      if (!batchCheckTaskPollTimerRef.current) {
+        setTesting(null)
+      }
     }
   }
 
@@ -883,6 +972,7 @@ export default function Accounts() {
             type="link"
             size="small"
             loading={testing === record.id}
+            disabled={testing !== null && testing !== record.id}
             onClick={() => runBatchCheck([record.id], record.id, `${record.email} 测试结果`)}
           >
             测试
@@ -988,6 +1078,34 @@ export default function Accounts() {
           }
         />
       )}
+      {batchCheckTask && (
+        <Alert
+          showIcon
+          type={
+            batchCheckTask.status === 'failed'
+              ? 'error'
+              : batchCheckTask.status === 'done'
+                ? (batchCheckTask.invalid > 0 || batchCheckTask.error > 0 ? 'warning' : 'success')
+                : 'info'
+          }
+          style={{ marginBottom: 12 }}
+          message={
+            batchCheckTask.status === 'failed'
+              ? '账号测试后台任务失败'
+              : batchCheckTask.status === 'done'
+                ? '账号测试后台任务已完成'
+                : '账号测试后台任务运行中'
+          }
+          description={
+            [
+              batchCheckTask.title,
+              batchCheckTask.message || '',
+              `进度 ${batchCheckTask.tested}/${batchCheckTask.total_requested || 0}`,
+              `通过 ${batchCheckTask.valid}，失败 ${batchCheckTask.invalid}，异常 ${batchCheckTask.error}`,
+            ].filter(Boolean).join(' · ')
+          }
+        />
+      )}
       <div style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 }}>
         <Space>
           <Input.Search
@@ -1025,6 +1143,7 @@ export default function Accounts() {
             <Button
               icon={<SafetyOutlined />}
               loading={testing === 'selected'}
+              disabled={testing !== null && testing !== 'selected'}
               onClick={() => runBatchCheck(selectedRowKeys, 'selected', '所选账号测试结果')}
             >
               测试所选
@@ -1033,8 +1152,8 @@ export default function Accounts() {
           <Button
             icon={<SafetyOutlined />}
             loading={testing === 'page'}
+            disabled={(testing !== null && testing !== 'page') || accounts.length === 0}
             onClick={() => runBatchCheck(accounts.map((item) => item.id), 'page', `${currentPlatform} 当前页测试结果`)}
-            disabled={accounts.length === 0}
           >
             测试当前页
           </Button>

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Card, Table, Button, Input, Tag, Space, Popconfirm, message, Modal, Typography } from 'antd'
 import {
   PlusOutlined,
@@ -35,6 +35,23 @@ interface ProxyTestResult {
   proxy?: ProxyItem
 }
 
+interface ProxyTestTaskSnapshot {
+  id: string
+  status: 'pending' | 'running' | 'done' | 'failed' | string
+  message?: string
+  error_message?: string
+  proxy_id?: number | null
+  current_region?: string
+  result?: ProxyTestResult
+  created_at: number
+  updated_at: number
+  finished_at?: number | null
+}
+
+interface ActiveProxyTestTask extends ProxyTestTaskSnapshot {
+  scope: number | 'draft'
+}
+
 function formatDateTime(value?: string | null) {
   if (!value) return '-'
   const date = new Date(value)
@@ -42,12 +59,14 @@ function formatDateTime(value?: string | null) {
 }
 
 export default function Proxies() {
+  const proxyTestPollTimerRef = useRef<number | null>(null)
   const [proxies, setProxies] = useState<ProxyItem[]>([])
   const [newProxy, setNewProxy] = useState('')
   const [region, setRegion] = useState('')
   const [checking, setChecking] = useState(false)
   const [loading, setLoading] = useState(false)
   const [testing, setTesting] = useState<number | 'draft' | null>(null)
+  const [testTask, setTestTask] = useState<ActiveProxyTestTask | null>(null)
   const [editingProxy, setEditingProxy] = useState<ProxyItem | null>(null)
   const [editingRegion, setEditingRegion] = useState('')
   const [testResult, setTestResult] = useState<{
@@ -74,6 +93,14 @@ export default function Proxies() {
 
   useEffect(() => {
     load()
+  }, [])
+
+  useEffect(() => {
+    return () => {
+      if (proxyTestPollTimerRef.current !== null) {
+        window.clearInterval(proxyTestPollTimerRef.current)
+      }
+    }
   }, [])
 
   const add = async () => {
@@ -136,56 +163,124 @@ export default function Proxies() {
     }
   }
 
+  const stopProxyTestPolling = () => {
+    if (proxyTestPollTimerRef.current !== null) {
+      window.clearInterval(proxyTestPollTimerRef.current)
+      proxyTestPollTimerRef.current = null
+    }
+  }
+
+  const finalizeProxyTestTask = async (snapshot: ActiveProxyTestTask) => {
+    stopProxyTestPolling()
+    setTesting(null)
+    setTestTask(null)
+
+    if (snapshot.status === 'failed') {
+      message.error(snapshot.error_message || '代理测试失败')
+      return
+    }
+
+    const data = snapshot.result || {}
+    if (snapshot.scope === 'draft' && !region && data.region_label) {
+      setRegion(String(data.region_label))
+    }
+    setTestResult({
+      open: true,
+      title: '代理测试结果',
+      proxyId: snapshot.proxy_id ? Number(snapshot.proxy_id) : undefined,
+      currentRegion: snapshot.current_region || undefined,
+      detectedRegion: String(data.region_label || ''),
+      data,
+    })
+    message.success('代理测试成功')
+    await load()
+  }
+
+  const pollProxyTestTask = async (taskId: string, scope: number | 'draft') => {
+    try {
+      const snapshot = await apiFetch(`/proxies/test/tasks/${taskId}`) as ProxyTestTaskSnapshot
+      const nextTask: ActiveProxyTestTask = { ...snapshot, scope }
+      setTestTask(nextTask)
+
+      if (snapshot.status === 'done' || snapshot.status === 'failed') {
+        await finalizeProxyTestTask(nextTask)
+      }
+      return snapshot
+    } catch (e: any) {
+      stopProxyTestPolling()
+      setTesting(null)
+      setTestTask(null)
+      message.error(`获取代理测试任务状态失败: ${e?.message || e || '未知错误'}`)
+      return null
+    }
+  }
+
   const runDraftTest = async () => {
     const lines = newProxy.trim().split('\n').map((line) => line.trim()).filter(Boolean)
     if (lines.length !== 1) {
       message.error('测试输入代理时请只保留一条代理地址')
       return
     }
+    if (testing !== null) {
+      message.info('已有代理测试任务正在执行')
+      return
+    }
     setTesting('draft')
     try {
-      const data = await apiFetch('/proxies/test', {
+      const task = await apiFetch('/proxies/test/async', {
         method: 'POST',
         body: JSON.stringify({ url: lines[0] }),
-      }) as ProxyTestResult
-      if (!region && data.region_label) {
-        setRegion(String(data.region_label))
+      }) as ProxyTestTaskSnapshot
+      setTestTask({ ...task, scope: 'draft' })
+      message.success('代理测试已转入后台执行')
+
+      stopProxyTestPolling()
+      const snapshot = await pollProxyTestTask(task.id, 'draft')
+      if (snapshot && snapshot.status !== 'done' && snapshot.status !== 'failed') {
+        proxyTestPollTimerRef.current = window.setInterval(() => {
+          void pollProxyTestTask(task.id, 'draft')
+        }, 1500)
       }
-      setTestResult({
-        open: true,
-        title: '代理测试结果',
-        detectedRegion: String(data.region_label || ''),
-        data,
-      })
-      message.success('代理测试成功')
     } catch (e: any) {
       message.error(`测试失败: ${e.message}`)
-    } finally {
       setTesting(null)
+      setTestTask(null)
+    } finally {
+      if (!proxyTestPollTimerRef.current) {
+        setTesting(null)
+      }
     }
   }
 
   const runSavedProxyTest = async (record: ProxyItem) => {
+    if (testing !== null) {
+      message.info('已有代理测试任务正在执行')
+      return
+    }
     setTesting(record.id)
     try {
-      const data = await apiFetch(`/proxies/${record.id}/test`, {
+      const task = await apiFetch(`/proxies/${record.id}/test/async`, {
         method: 'POST',
         body: JSON.stringify({ save_region: false }),
-      }) as ProxyTestResult
-      setTestResult({
-        open: true,
-        title: '代理测试结果',
-        proxyId: record.id,
-        currentRegion: record.region,
-        detectedRegion: String(data.region_label || ''),
-        data,
-      })
-      message.success('代理测试成功')
+      }) as ProxyTestTaskSnapshot
+      setTestTask({ ...task, scope: record.id })
+      message.success('代理测试已转入后台执行')
+
+      stopProxyTestPolling()
+      const snapshot = await pollProxyTestTask(task.id, record.id)
+      if (snapshot && snapshot.status !== 'done' && snapshot.status !== 'failed') {
+        proxyTestPollTimerRef.current = window.setInterval(() => {
+          void pollProxyTestTask(task.id, record.id)
+        }, 1500)
+      }
     } catch (e: any) {
       message.error(`测试失败: ${e.message}`)
-    } finally {
-      await load()
       setTesting(null)
+      setTestTask(null)
+    } finally {
+      if (!proxyTestPollTimerRef.current) {
+        setTesting(null)
+      }
     }
   }
 
@@ -244,6 +339,7 @@ export default function Proxies() {
             size="small"
             icon={<ApiOutlined />}
             loading={testing === record.id}
+            disabled={testing !== null && testing !== record.id}
             onClick={() => runSavedProxyTest(record)}
           />
           <Button
@@ -333,6 +429,21 @@ export default function Proxies() {
           检测全部
         </Button>
       </div>
+
+      {testTask ? (
+        <Card size="small">
+          <Typography.Text strong>
+            {testTask.status === 'failed'
+              ? '代理测试后台任务失败'
+              : testTask.status === 'done'
+                ? '代理测试后台任务已完成'
+                : '代理测试后台任务运行中'}
+          </Typography.Text>
+          <div style={{ color: '#7a8ba3', marginTop: 6 }}>
+            {[testTask.message || '', `对象 ${testTask.scope === 'draft' ? '草稿代理' : `#${testTask.scope}`}`].filter(Boolean).join(' · ')}
+          </div>
+        </Card>
+      ) : null}
 
       <Card title="添加代理（每行一个）">
         <Space direction="vertical" style={{ width: '100%' }}>

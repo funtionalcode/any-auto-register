@@ -2,6 +2,8 @@ import csv
 import io
 import json
 import logging
+import threading
+import time
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any, Iterator, Optional
@@ -20,6 +22,10 @@ from core.registry import get, load_all
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/accounts", tags=["accounts"])
+
+_batch_check_tasks: dict[str, dict[str, Any]] = {}
+_batch_check_tasks_lock = threading.Lock()
+_MAX_FINISHED_BATCH_CHECK_TASKS = 50
 
 
 class AccountCreate(BaseModel):
@@ -69,6 +75,112 @@ class ChatGPTModelsRequest(BaseModel):
 
 
 DEFAULT_CHATGPT_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
+
+
+def _cleanup_batch_check_tasks() -> None:
+    with _batch_check_tasks_lock:
+        finished = [
+            task_id
+            for task_id, task in _batch_check_tasks.items()
+            if task.get("status") in {"done", "failed"}
+        ]
+        if len(finished) <= _MAX_FINISHED_BATCH_CHECK_TASKS:
+            return
+        finished.sort()
+        for task_id in finished[: len(finished) - _MAX_FINISHED_BATCH_CHECK_TASKS]:
+            _batch_check_tasks.pop(task_id, None)
+
+
+def _serialize_batch_check_task(task: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not task:
+        return None
+    return {
+        "id": str(task.get("id") or ""),
+        "status": str(task.get("status") or "pending"),
+        "message": str(task.get("message") or ""),
+        "error_message": str(task.get("error_message") or ""),
+        "total_requested": int(task.get("total_requested") or 0),
+        "tested": int(task.get("tested") or 0),
+        "valid": int(task.get("valid") or 0),
+        "invalid": int(task.get("invalid") or 0),
+        "error": int(task.get("error") or 0),
+        "invalid_ids": list(task.get("invalid_ids") or []),
+        "error_ids": list(task.get("error_ids") or []),
+        "not_found": list(task.get("not_found") or []),
+        "items": list(task.get("items") or []),
+        "request": dict(task.get("request") or {}),
+        "created_at": float(task.get("created_at") or 0),
+        "updated_at": float(task.get("updated_at") or 0),
+        "finished_at": task.get("finished_at"),
+    }
+
+
+def _create_batch_check_task(body: BatchCheckRequest) -> dict[str, Any]:
+    now = time.time()
+    task_id = f"account_check_{int(now * 1000)}"
+    task = {
+        "id": task_id,
+        "status": "pending",
+        "message": "排队中",
+        "error_message": "",
+        "total_requested": 0,
+        "tested": 0,
+        "valid": 0,
+        "invalid": 0,
+        "error": 0,
+        "invalid_ids": [],
+        "error_ids": [],
+        "not_found": [],
+        "items": [],
+        "request": body.model_dump(),
+        "created_at": now,
+        "updated_at": now,
+        "finished_at": None,
+    }
+    with _batch_check_tasks_lock:
+        _batch_check_tasks[task_id] = task
+    _cleanup_batch_check_tasks()
+    return _serialize_batch_check_task(task) or {}
+
+
+def _get_batch_check_task(task_id: str) -> dict[str, Any] | None:
+    with _batch_check_tasks_lock:
+        return _serialize_batch_check_task(_batch_check_tasks.get(task_id))
+
+
+def _update_batch_check_task(task_id: str, **changes: Any) -> None:
+    with _batch_check_tasks_lock:
+        task = _batch_check_tasks.get(task_id)
+        if not task:
+            return
+        task.update(changes)
+        task["updated_at"] = time.time()
+
+
+def _sync_batch_check_task_progress(
+    task_id: str,
+    *,
+    total_requested: int,
+    results: list[dict[str, Any]],
+    invalid_ids: list[int],
+    error_ids: list[int],
+    not_found: list[int],
+    message: str,
+) -> None:
+    tested = len(results)
+    _update_batch_check_task(
+        task_id,
+        message=message,
+        total_requested=total_requested,
+        tested=tested,
+        valid=sum(1 for item in results if item.get("status") == "valid"),
+        invalid=len(invalid_ids),
+        error=len(error_ids),
+        invalid_ids=list(invalid_ids),
+        error_ids=list(error_ids),
+        not_found=list(not_found),
+        items=list(results),
+    )
 
 
 def _normalize_account_ids(ids: list[int], *, max_size: int = 200) -> list[int]:
@@ -720,6 +832,125 @@ def _check_account_validity(acc: AccountModel, *, config: RegisterConfig | None 
     }
 
 
+def _perform_batch_check(
+    body: BatchCheckRequest,
+    session: Session,
+    *,
+    task_id: str | None = None,
+) -> dict[str, Any]:
+    account_ids = _normalize_account_ids(body.ids)
+    load_all()
+
+    rows = session.exec(
+        select(AccountModel).where(AccountModel.id.in_(account_ids))
+    ).all()
+    row_map = {int(row.id): row for row in rows if row.id is not None}
+
+    shared_config = RegisterConfig(extra=config_store.get_all())
+    results: list[dict] = []
+    invalid_ids: list[int] = []
+    error_ids: list[int] = []
+    not_found: list[int] = []
+    dirty_rows: list[AccountModel] = []
+    total_requested = len(account_ids)
+
+    if task_id:
+        _update_batch_check_task(
+            task_id,
+            status="running",
+            message=f"待测试 {total_requested} 个账号",
+            total_requested=total_requested,
+        )
+
+    for index, account_id in enumerate(account_ids, start=1):
+        acc = row_map.get(account_id)
+        if not acc:
+            not_found.append(account_id)
+            if task_id:
+                _sync_batch_check_task_progress(
+                    task_id,
+                    total_requested=total_requested,
+                    results=results,
+                    invalid_ids=invalid_ids,
+                    error_ids=error_ids,
+                    not_found=not_found,
+                    message=f"已处理 {index}/{total_requested}",
+                )
+            continue
+
+        try:
+            result = _check_account_validity(acc, config=shared_config)
+            results.append(result)
+
+            acc.updated_at = datetime.now(timezone.utc)
+            if not result["valid"]:
+                acc.status = AccountStatus.INVALID.value
+                invalid_ids.append(account_id)
+            dirty_rows.append(acc)
+        except Exception as e:
+            logger.exception("检测账号 %s 时出错", account_id)
+            error_ids.append(account_id)
+            results.append({
+                "id": acc.id,
+                "platform": acc.platform,
+                "email": acc.email,
+                "valid": False,
+                "status": "error",
+                "message": str(e) or "检测异常",
+            })
+
+        if task_id:
+            _sync_batch_check_task_progress(
+                task_id,
+                total_requested=total_requested,
+                results=results,
+                invalid_ids=invalid_ids,
+                error_ids=error_ids,
+                not_found=not_found,
+                message=f"已处理 {index}/{total_requested}",
+            )
+
+    if dirty_rows:
+        for row in dirty_rows:
+            session.add(row)
+        session.commit()
+
+    return {
+        "total_requested": total_requested,
+        "tested": len(results),
+        "valid": sum(1 for item in results if item["status"] == "valid"),
+        "invalid": len(invalid_ids),
+        "error": len(error_ids),
+        "invalid_ids": invalid_ids,
+        "error_ids": error_ids,
+        "not_found": not_found,
+        "items": results,
+    }
+
+
+def _run_batch_check_task(task_id: str, body: BatchCheckRequest) -> None:
+    try:
+        with Session(engine) as session:
+            result = _perform_batch_check(body, session, task_id=task_id)
+        _update_batch_check_task(
+            task_id,
+            status="done",
+            message="执行完成",
+            finished_at=time.time(),
+            **result,
+        )
+    except Exception as exc:
+        logger.exception("批量测试账号任务失败: %s", task_id)
+        message = _exception_message(exc, "批量测试任务失败")
+        _update_batch_check_task(
+            task_id,
+            status="failed",
+            message=message,
+            error_message=message,
+            finished_at=time.time(),
+        )
+
+
 @router.get("")
 def list_accounts(
     platform: Optional[str] = None,
@@ -962,64 +1193,29 @@ def batch_check_accounts(
     body: BatchCheckRequest,
     session: Session = Depends(get_session),
 ):
-    account_ids = _normalize_account_ids(body.ids)
-    load_all()
+    return _perform_batch_check(body, session)
 
-    rows = session.exec(
-        select(AccountModel).where(AccountModel.id.in_(account_ids))
-    ).all()
-    row_map = {int(row.id): row for row in rows if row.id is not None}
 
-    shared_config = RegisterConfig(extra=config_store.get_all())
-    results: list[dict] = []
-    invalid_ids: list[int] = []
-    error_ids: list[int] = []
-    not_found: list[int] = []
-    dirty_rows: list[AccountModel] = []
+@router.post("/batch-check/async")
+def batch_check_accounts_async(body: BatchCheckRequest):
+    normalized_ids = _normalize_account_ids(body.ids)
+    prepared = BatchCheckRequest(ids=normalized_ids)
+    task = _create_batch_check_task(prepared)
+    thread = threading.Thread(
+        target=_run_batch_check_task,
+        args=(str(task["id"]), prepared),
+        daemon=True,
+    )
+    thread.start()
+    return task
 
-    for account_id in account_ids:
-        acc = row_map.get(account_id)
-        if not acc:
-            not_found.append(account_id)
-            continue
 
-        try:
-            result = _check_account_validity(acc, config=shared_config)
-            results.append(result)
-
-            acc.updated_at = datetime.now(timezone.utc)
-            if not result["valid"]:
-                acc.status = AccountStatus.INVALID.value
-                invalid_ids.append(account_id)
-            dirty_rows.append(acc)
-        except Exception as e:
-            logger.exception("检测账号 %s 时出错", account_id)
-            error_ids.append(account_id)
-            results.append({
-                "id": acc.id,
-                "platform": acc.platform,
-                "email": acc.email,
-                "valid": False,
-                "status": "error",
-                "message": str(e) or "检测异常",
-            })
-
-    if dirty_rows:
-        for row in dirty_rows:
-            session.add(row)
-        session.commit()
-
-    return {
-        "total_requested": len(account_ids),
-        "tested": len(results),
-        "valid": sum(1 for item in results if item["status"] == "valid"),
-        "invalid": len(invalid_ids),
-        "error": len(error_ids),
-        "invalid_ids": invalid_ids,
-        "error_ids": error_ids,
-        "not_found": not_found,
-        "items": results,
-    }
+@router.get("/batch-check/tasks/{task_id}")
+def get_batch_check_task_snapshot(task_id: str):
+    snapshot = _get_batch_check_task(task_id)
+    if not snapshot:
+        raise HTTPException(404, "批量测试任务不存在")
+    return snapshot
 
 
 @router.post("/{account_id}/chatgpt/chat-stream")

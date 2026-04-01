@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import threading
+import time
 from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlparse
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from core.base_mailbox import (
@@ -25,6 +27,10 @@ from core.config_store import config_store
 
 router = APIRouter(prefix="/mailbox", tags=["mailbox"])
 
+_mailbox_tasks: dict[str, dict[str, Any]] = {}
+_mailbox_tasks_lock = threading.Lock()
+_MAX_FINISHED_MAILBOX_TASKS = 50
+
 
 class InboxCreateRequest(BaseModel):
     provider: str | None = None
@@ -40,6 +46,70 @@ class InboxMessagesRequest(BaseModel):
     extra: dict[str, Any] = Field(default_factory=dict)
     proxy: str | None = None
     limit: int = 10
+
+
+def _cleanup_mailbox_tasks() -> None:
+    with _mailbox_tasks_lock:
+        finished = [
+            task_id
+            for task_id, task in _mailbox_tasks.items()
+            if task.get("status") in {"done", "failed"}
+        ]
+        if len(finished) <= _MAX_FINISHED_MAILBOX_TASKS:
+            return
+        finished.sort()
+        for task_id in finished[: len(finished) - _MAX_FINISHED_MAILBOX_TASKS]:
+            _mailbox_tasks.pop(task_id, None)
+
+
+def _serialize_mailbox_task(task: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not task:
+        return None
+    return {
+        "id": str(task.get("id") or ""),
+        "action": str(task.get("action") or ""),
+        "status": str(task.get("status") or "pending"),
+        "message": str(task.get("message") or ""),
+        "error_message": str(task.get("error_message") or ""),
+        "result": dict(task.get("result") or {}),
+        "created_at": float(task.get("created_at") or 0),
+        "updated_at": float(task.get("updated_at") or 0),
+        "finished_at": task.get("finished_at"),
+    }
+
+
+def _create_mailbox_task(action: str) -> dict[str, Any]:
+    now = time.time()
+    task_id = f"mailbox_{action}_{int(now * 1000)}"
+    task = {
+        "id": task_id,
+        "action": action,
+        "status": "pending",
+        "message": "排队中",
+        "error_message": "",
+        "result": {},
+        "created_at": now,
+        "updated_at": now,
+        "finished_at": None,
+    }
+    with _mailbox_tasks_lock:
+        _mailbox_tasks[task_id] = task
+    _cleanup_mailbox_tasks()
+    return _serialize_mailbox_task(task) or {}
+
+
+def _get_mailbox_task(task_id: str) -> dict[str, Any] | None:
+    with _mailbox_tasks_lock:
+        return _serialize_mailbox_task(_mailbox_tasks.get(task_id))
+
+
+def _update_mailbox_task(task_id: str, **changes: Any) -> None:
+    with _mailbox_tasks_lock:
+        task = _mailbox_tasks.get(task_id)
+        if not task:
+            return
+        task.update(changes)
+        task["updated_at"] = time.time()
 
 
 def _merge_mailbox_config(raw_config: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -483,8 +553,7 @@ def _list_messages(provider: str, mailbox, account: MailboxAccount, limit: int) 
     raise RuntimeError(f"{provider} 暂未实现收件箱读取")
 
 
-@router.post("/inbox/create")
-def create_test_inbox(body: InboxCreateRequest):
+def _create_test_inbox_payload(body: InboxCreateRequest) -> dict[str, Any]:
     merged_config = _merge_mailbox_config(body.config)
     provider = _resolve_provider(body.provider, merged_config)
     mailbox = _build_mailbox(provider, merged_config, body.proxy)
@@ -497,8 +566,7 @@ def create_test_inbox(body: InboxCreateRequest):
     }
 
 
-@router.post("/inbox/messages")
-def list_inbox_messages(body: InboxMessagesRequest):
+def _list_inbox_messages_payload(body: InboxMessagesRequest) -> dict[str, Any]:
     merged_config = _merge_mailbox_config(body.config)
     provider = _resolve_provider(body.provider, merged_config)
     mailbox = _build_mailbox(provider, merged_config, body.proxy)
@@ -511,3 +579,77 @@ def list_inbox_messages(body: InboxMessagesRequest):
         "total": len(messages),
         "items": messages,
     }
+
+
+def _run_mailbox_task(task_id: str, *, action: str, payload: dict[str, Any]) -> None:
+    try:
+        _update_mailbox_task(
+            task_id,
+            status="running",
+            message="正在生成测试邮箱" if action == "create" else "正在刷新收件箱",
+        )
+        if action == "create":
+            result = _create_test_inbox_payload(InboxCreateRequest(**payload))
+        elif action == "messages":
+            result = _list_inbox_messages_payload(InboxMessagesRequest(**payload))
+        else:
+            raise RuntimeError("未知邮箱任务类型")
+        _update_mailbox_task(
+            task_id,
+            status="done",
+            message="执行完成",
+            result=result,
+            finished_at=time.time(),
+        )
+    except Exception as exc:
+        _update_mailbox_task(
+            task_id,
+            status="failed",
+            message=str(exc) or "邮箱测试失败",
+            error_message=str(exc) or "邮箱测试失败",
+            finished_at=time.time(),
+        )
+
+
+@router.post("/inbox/create")
+def create_test_inbox(body: InboxCreateRequest):
+    return _create_test_inbox_payload(body)
+
+
+@router.post("/inbox/create/async")
+def create_test_inbox_async(body: InboxCreateRequest):
+    task = _create_mailbox_task("create")
+    thread = threading.Thread(
+        target=_run_mailbox_task,
+        args=(str(task["id"]),),
+        kwargs={"action": "create", "payload": body.model_dump()},
+        daemon=True,
+    )
+    thread.start()
+    return task
+
+
+@router.post("/inbox/messages")
+def list_inbox_messages(body: InboxMessagesRequest):
+    return _list_inbox_messages_payload(body)
+
+
+@router.post("/inbox/messages/async")
+def list_inbox_messages_async(body: InboxMessagesRequest):
+    task = _create_mailbox_task("messages")
+    thread = threading.Thread(
+        target=_run_mailbox_task,
+        args=(str(task["id"]),),
+        kwargs={"action": "messages", "payload": body.model_dump()},
+        daemon=True,
+    )
+    thread.start()
+    return task
+
+
+@router.get("/inbox/tasks/{task_id}")
+def get_mailbox_task_snapshot(task_id: str):
+    snapshot = _get_mailbox_task(task_id)
+    if not snapshot:
+        raise HTTPException(404, "邮箱测试任务不存在")
+    return snapshot

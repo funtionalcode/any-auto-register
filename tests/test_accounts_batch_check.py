@@ -1,7 +1,10 @@
 import tempfile
+import time
 import unittest
 from unittest import mock
 
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 from sqlmodel import Session, SQLModel, create_engine, select
 
 from api import accounts as accounts_api
@@ -130,6 +133,79 @@ class AccountsBatchCheckTests(unittest.TestCase):
 
             self.assertEqual(rows["good@example.com"].token, "new-token")
             self.assertEqual(rows["bad@example.com"].status, "invalid")
+
+    def test_batch_check_async_runs_in_background_and_exposes_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            engine = create_engine(f"sqlite:///{tmp_dir}/test.db")
+            SQLModel.metadata.create_all(engine)
+
+            original_engine = accounts_api.engine
+            accounts_api.engine = engine
+            with accounts_api._batch_check_tasks_lock:
+                accounts_api._batch_check_tasks.clear()
+
+            app = FastAPI()
+            app.include_router(accounts_api.router, prefix="/api")
+            client = TestClient(app)
+
+            try:
+                with Session(engine) as session:
+                    good = AccountModel(platform="trae", email="good@example.com", password="pw", status="trial", token="token-a")
+                    invalid = AccountModel(platform="trae", email="invalid@example.com", password="pw", status="registered", token="token-b")
+                    errored = AccountModel(platform="trae", email="error@example.com", password="pw", status="registered", token="token-c")
+                    session.add(good)
+                    session.add(invalid)
+                    session.add(errored)
+                    session.commit()
+                    session.refresh(good)
+                    session.refresh(invalid)
+                    session.refresh(errored)
+
+                with mock.patch.object(accounts_api, "load_all", lambda: None), \
+                        mock.patch.object(accounts_api, "get", lambda _name: _FakePlatform), \
+                        mock.patch.object(accounts_api.config_store, "get_all", lambda: {}):
+                    create_resp = client.post(
+                        "/api/accounts/batch-check/async",
+                        json={"ids": [good.id, invalid.id, errored.id, 999]},
+                    )
+
+                    self.assertEqual(create_resp.status_code, 200, create_resp.text)
+                    payload = create_resp.json()
+                    self.assertIn("id", payload)
+
+                    snapshot = payload
+                    for _ in range(40):
+                        detail_resp = client.get(f"/api/accounts/batch-check/tasks/{payload['id']}")
+                        self.assertEqual(detail_resp.status_code, 200, detail_resp.text)
+                        snapshot = detail_resp.json()
+                        if snapshot["status"] in {"done", "failed"}:
+                            break
+                        time.sleep(0.05)
+
+                self.assertEqual(snapshot["status"], "done")
+                self.assertEqual(snapshot["total_requested"], 4)
+                self.assertEqual(snapshot["tested"], 3)
+                self.assertEqual(snapshot["valid"], 1)
+                self.assertEqual(snapshot["invalid"], 1)
+                self.assertEqual(snapshot["error"], 1)
+                self.assertEqual(snapshot["invalid_ids"], [invalid.id])
+                self.assertEqual(snapshot["error_ids"], [errored.id])
+                self.assertEqual(snapshot["not_found"], [999])
+
+                with Session(engine) as session:
+                    rows = {
+                        row.email: row
+                        for row in session.exec(select(AccountModel)).all()
+                    }
+
+                self.assertEqual(rows["good@example.com"].status, "trial")
+                self.assertEqual(rows["invalid@example.com"].status, "invalid")
+                self.assertEqual(rows["error@example.com"].status, "registered")
+            finally:
+                client.close()
+                accounts_api.engine = original_engine
+                with accounts_api._batch_check_tasks_lock:
+                    accounts_api._batch_check_tasks.clear()
 
 
 if __name__ == "__main__":
