@@ -26,6 +26,7 @@ from core.security import (
 
 router = APIRouter(tags=["sk"])
 openai_router = APIRouter(prefix="/v1", tags=["openai"])
+anthropic_apps_router = APIRouter(prefix="/apps/anthropic", tags=["anthropic-apps"])
 _sk_bearer_scheme = HTTPBearer(auto_error=False)
 OFFICIAL_CHATGPT_BASE = "https://chatgpt.com"
 OFFICIAL_CHATGPT_CONVERSATION_URL = f"{OFFICIAL_CHATGPT_BASE}/backend-api/conversation"
@@ -2633,6 +2634,8 @@ async def sk_chat_completions(
 
 @router.post("/sk/anthropic/messages")
 @openai_router.post("/messages")
+@anthropic_apps_router.post("/messages")
+@anthropic_apps_router.post("/v1/messages")
 async def anthropic_messages(
     request: Request,
     session: Session = Depends(get_session),

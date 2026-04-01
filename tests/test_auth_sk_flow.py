@@ -11,7 +11,7 @@ from sqlmodel import Session, SQLModel, create_engine
 
 import api.sk_keys as sk_keys_module
 from api.auth import router as auth_router
-from api.sk_keys import openai_router, router as sk_router
+from api.sk_keys import anthropic_apps_router, openai_router, router as sk_router
 from core.db import AccountModel, ProxyModel, get_session
 
 
@@ -62,6 +62,7 @@ class AuthAndSkFlowTests(unittest.TestCase):
         app.include_router(auth_router, prefix="/api")
         app.include_router(sk_router, prefix="/api")
         app.include_router(openai_router)
+        app.include_router(anthropic_apps_router)
 
         def override_get_session():
             with Session(self.engine) as session:
@@ -605,6 +606,57 @@ class AuthAndSkFlowTests(unittest.TestCase):
         self.assertIn('"text": "po"', response.text)
         self.assertIn('"text": "ng"', response.text)
         self.assertIn("event: message_stop", response.text)
+
+    def test_apps_anthropic_prefix_routes_to_chatgpt_conversation(self):
+        _, admin_headers = self._bootstrap_admin()
+
+        create_key_resp = self.client.post(
+            "/api/sk-keys",
+            headers=admin_headers,
+            json={
+                "name": "anthropic-apps-key",
+                "upstream_api_key": "chatgpt-access-token",
+            },
+        )
+        self.assertEqual(create_key_resp.status_code, 200, create_key_resp.text)
+        create_key_payload = create_key_resp.json()
+        headers = {
+            "x-api-key": create_key_payload["secret_key"],
+            "anthropic-version": "2023-06-01",
+        }
+
+        completion_result = SimpleNamespace(
+            ok=True,
+            invalid=False,
+            message="ok",
+            response_excerpt="pong",
+            response_text="pong",
+            model="claude-sonnet-4-20250514",
+            conversation_id="conv_apps_anthropic",
+            response_message_id="msg_apps_anthropic",
+            used_proxy="",
+            updated_access_token="",
+            updated_refresh_token="",
+        )
+
+        with mock.patch("platforms.chatgpt.message_tester.send_chat_message", return_value=completion_result) as mock_send:
+            response = self.client.post(
+                "/apps/anthropic/v1/messages",
+                headers=headers,
+                json={
+                    "model": "claude-sonnet-4-20250514",
+                    "max_tokens": 128,
+                    "messages": [{"role": "user", "content": "hello"}],
+                },
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["content"][0]["text"], "pong")
+        self.assertTrue(mock_send.called)
+        self.assertEqual(
+            mock_send.call_args.kwargs["target_url"],
+            "https://chatgpt.com/backend-api/conversation",
+        )
 
     def test_sk_key_supports_openai_responses_protocol(self):
         _, admin_headers = self._bootstrap_admin()
