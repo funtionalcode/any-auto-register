@@ -543,9 +543,9 @@ export default function ChatGPTConversation() {
             value={prompt}
             onChange={(e) => setPrompt(e.target.value)}
             rows={5}
-            placeholder="输入消息，Ctrl+Enter 发送"
+            placeholder="输入消息，Enter 发送，Shift+Enter 换行"
             onPressEnter={(e) => {
-              if ((e.ctrlKey || e.metaKey) && !sending) {
+              if (!e.shiftKey && !sending) {
                 e.preventDefault()
                 handleSend()
               }

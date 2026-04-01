@@ -554,6 +554,7 @@ def stream_chat_message(
             conversation_id=conversation_id,
             parent_message_id=parent_message_id,
         )
+        response = None
 
         yield {
             "event": "meta",
@@ -565,13 +566,14 @@ def stream_chat_message(
             },
         }
 
-        with client.session.post(
+        response = client.session.post(
             url,
             json=payload,
             headers=headers,
             timeout=180,
             stream=True,
-        ) as response:
+        )
+        try:
             if response.status_code >= 400:
                 result = _result_from_http_error(
                     status_code=response.status_code,
@@ -661,9 +663,15 @@ def stream_chat_message(
                     "used_proxy": proxy,
                     "model": str(model or "auto").strip() or "auto",
                     "updated_access_token": updated_access_token,
-                    "updated_refresh_token": updated_refresh_token,
-                },
-            }
+                        "updated_refresh_token": updated_refresh_token,
+                    },
+                }
+        finally:
+            try:
+                if response is not None:
+                    response.close()
+            except Exception:
+                pass
     except Exception as e:
         yield {
             "event": "error",
