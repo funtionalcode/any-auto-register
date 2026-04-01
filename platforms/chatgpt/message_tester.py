@@ -458,6 +458,7 @@ def _build_conversation_payload(
     model: str = "auto",
     conversation_id: str = "",
     parent_message_id: str = "",
+    history_and_training_disabled: bool = False,
 ) -> dict[str, Any]:
     payload = {
         "action": "next",
@@ -477,7 +478,7 @@ def _build_conversation_payload(
         "timezone_offset_min": -480,
         "timezone": "Asia/Shanghai",
         "suggestions": [],
-        "history_and_training_disabled": True,
+        "history_and_training_disabled": bool(history_and_training_disabled),
         "conversation_mode": {"kind": "primary_assistant"},
         "supports_buffering": True,
     }
@@ -496,6 +497,7 @@ def _prepare_chat_request(
     conversation_id: str = "",
     parent_message_id: str = "",
     target_url: str = "",
+    history_and_training_disabled: bool = False,
     chain_name: str,
 ) -> PreparedChatRequest:
     normalized_model = str(model or "auto").strip() or "auto"
@@ -504,12 +506,13 @@ def _prepare_chat_request(
     client = ChatGPTClient(proxy=proxy, verbose=False)
 
     logger.info(
-        "[chatgpt-message] chain=%s start shared_test_flow=true proxy=%s model=%s conversation_id=%s parent_message_id=%s prompt_len=%s",
+        "[chatgpt-message] chain=%s start shared_test_flow=true proxy=%s model=%s conversation_id=%s parent_message_id=%s history_disabled=%s prompt_len=%s",
         chain_name,
         _sanitize_proxy(proxy),
         normalized_model,
         normalized_conversation_id,
         normalized_parent_message_id,
+        bool(history_and_training_disabled),
         len(str(prompt or "")),
     )
 
@@ -538,6 +541,7 @@ def _prepare_chat_request(
         model=normalized_model,
         conversation_id=normalized_conversation_id,
         parent_message_id=normalized_parent_message_id,
+        history_and_training_disabled=history_and_training_disabled,
     )
     logger.info(
         "[chatgpt-message] chain=%s step=build_conversation_request ok url=%s has_conversation_id=%s",
@@ -565,13 +569,28 @@ def _result_from_http_error(
     updated_refresh_token: str,
     response_text: str = "",
 ) -> ChatGPTMessageTestResult:
+    normalized_response_text = str(response_text or "")
+    if status_code == 404 and (
+        "history_disabled_conversation_not_found" in normalized_response_text
+        or "Conversation not found" in normalized_response_text
+    ):
+        return ChatGPTMessageTestResult(
+            ok=False,
+            invalid=False,
+            message="当前会话上下文不存在，请新建会话后重试",
+            response_text=normalized_response_text,
+            response_excerpt=normalized_response_text[:200],
+            used_proxy=proxy,
+            updated_access_token=updated_access_token,
+            updated_refresh_token=updated_refresh_token,
+        )
     if status_code == 401:
         return ChatGPTMessageTestResult(
             ok=False,
             invalid=True,
             message="会话无效或 access_token 已过期",
-            response_text=response_text,
-            response_excerpt=response_text[:200],
+            response_text=normalized_response_text,
+            response_excerpt=normalized_response_text[:200],
             used_proxy=proxy,
             updated_access_token=updated_access_token,
             updated_refresh_token=updated_refresh_token,
@@ -581,8 +600,8 @@ def _result_from_http_error(
             ok=False,
             invalid=True,
             message="账号被拒绝访问或已受限",
-            response_text=response_text,
-            response_excerpt=response_text[:200],
+            response_text=normalized_response_text,
+            response_excerpt=normalized_response_text[:200],
             used_proxy=proxy,
             updated_access_token=updated_access_token,
             updated_refresh_token=updated_refresh_token,
@@ -591,8 +610,8 @@ def _result_from_http_error(
         ok=False,
         invalid=False,
         message=f"发消息失败: HTTP {status_code}",
-        response_text=response_text,
-        response_excerpt=response_text[:200],
+        response_text=normalized_response_text,
+        response_excerpt=normalized_response_text[:200],
         used_proxy=proxy,
         updated_access_token=updated_access_token,
         updated_refresh_token=updated_refresh_token,
@@ -608,6 +627,7 @@ def send_chat_message(
     conversation_id: str = "",
     parent_message_id: str = "",
     target_url: str = "",
+    history_and_training_disabled: bool = False,
     archive_after_send: bool = False,
 ) -> ChatGPTMessageTestResult:
     if not proxy:
@@ -629,6 +649,7 @@ def send_chat_message(
             conversation_id=conversation_id,
             parent_message_id=parent_message_id,
             target_url=target_url,
+            history_and_training_disabled=history_and_training_disabled,
             chain_name=chain_name,
         )
         client = prepared.client
@@ -730,6 +751,7 @@ def send_test_message(account: Any, proxy: str, prompt: str = TEST_PROMPT) -> Ch
         proxy=proxy,
         prompt=prompt,
         model="auto",
+        history_and_training_disabled=True,
         archive_after_send=True,
     )
 
@@ -743,6 +765,7 @@ def stream_chat_message(
     conversation_id: str = "",
     parent_message_id: str = "",
     target_url: str = "",
+    history_and_training_disabled: bool = False,
 ) -> Iterator[dict[str, Any]]:
     if not proxy:
         yield {
@@ -768,6 +791,7 @@ def stream_chat_message(
             conversation_id=conversation_id,
             parent_message_id=parent_message_id,
             target_url=target_url,
+            history_and_training_disabled=history_and_training_disabled,
             chain_name=chain_name,
         )
         client = prepared.client

@@ -72,6 +72,16 @@ class _FakeClient:
 
 
 class ChatGPTMessageStreamTests(unittest.TestCase):
+    def test_build_conversation_payload_defaults_to_persistent_history(self):
+        payload = message_tester._build_conversation_payload("hello")
+        self.assertFalse(payload["history_and_training_disabled"])
+
+        transient_payload = message_tester._build_conversation_payload(
+            "hello",
+            history_and_training_disabled=True,
+        )
+        self.assertTrue(transient_payload["history_and_training_disabled"])
+
     def test_stream_chat_message_handles_non_context_manager_response(self):
         account = SimpleNamespace(
             access_token="access_token",

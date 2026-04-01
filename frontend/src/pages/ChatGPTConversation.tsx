@@ -98,9 +98,7 @@ function buildChatErrorDetail(data: any, fallback: string) {
     ? data.debug_raw_lines.map((item: any) => String(item || '').trim()).filter(Boolean)
     : []
 
-  if (detailText) {
-    sections.push(detailText)
-  }
+  sections.push(detailText || fallback)
   if (chain) {
     sections.push(
       `chain: ${chain}${data?.shared_test_flow ? ' (shares preflight with test flow)' : ''}`,
@@ -123,6 +121,19 @@ function buildChatErrorDetail(data: any, fallback: string) {
   }
 
   return sections.join('\n\n') || fallback
+}
+
+function shouldResetOfficialConversation(data: any) {
+  const combined = [
+    String(data?.message || ''),
+    String(data?.response_text || ''),
+  ]
+    .join('\n')
+    .toLowerCase()
+  return (
+    combined.includes('history_disabled_conversation_not_found') ||
+    combined.includes('conversation not found')
+  )
 }
 
 function proxyLabel(item: ProxyItem) {
@@ -331,7 +342,17 @@ export default function ChatGPTConversation() {
 
           if (event === 'error') {
             const errorText = String(data?.message || '发送失败')
-            const detailText = buildChatErrorDetail(data, errorText)
+            const shouldResetConversation = mode === 'official' && shouldResetOfficialConversation(data)
+            const detailText = buildChatErrorDetail(
+              data,
+              shouldResetConversation
+                ? `${errorText}\n\n已自动清空当前会话上下文，请重新发送。`
+                : errorText,
+            )
+            if (shouldResetConversation) {
+              setConversationId('')
+              setParentMessageId('')
+            }
             updateAssistantMessage(assistantId, (current) => ({
               ...current,
               content: detailText,
@@ -368,7 +389,17 @@ export default function ChatGPTConversation() {
         }
         if (trailingEvent.event === 'error') {
           const errorText = String(data?.message || '发送失败')
-          const detailText = buildChatErrorDetail(data, errorText)
+          const shouldResetConversation = mode === 'official' && shouldResetOfficialConversation(data)
+          const detailText = buildChatErrorDetail(
+            data,
+            shouldResetConversation
+              ? `${errorText}\n\n已自动清空当前会话上下文，请重新发送。`
+              : errorText,
+          )
+          if (shouldResetConversation) {
+            setConversationId('')
+            setParentMessageId('')
+          }
           updateAssistantMessage(assistantId, (current) => ({
             ...current,
             content: detailText,
