@@ -15,6 +15,16 @@ from curl_cffi import CurlMime
 logger = logging.getLogger(__name__)
 
 
+def _with_request_url(message: str, request_url: str | None = None) -> str:
+    detail = str(message or "").strip()
+    url = str(request_url or "").strip()
+    if not url:
+        return detail
+    if not detail:
+        return f"请求地址: {url}"
+    return f"{detail} | 请求地址: {url}"
+
+
 def _decode_jwt_payload(token: str) -> dict:
     try:
         parts = token.split(".")
@@ -246,11 +256,11 @@ def upload_to_cpa(
                 error_msg = error_detail.get("message", error_msg)
         except Exception:
             error_msg = f"{error_msg} - {response.text[:200]}"
-        return False, error_msg
+        return False, _with_request_url(error_msg, upload_url)
 
     except Exception as e:
-        logger.error(f"CPA 上传异常: {e}")
-        return False, f"上传异常: {str(e)}"
+        logger.error("CPA 上传异常: %s, request_url=%s", e, upload_url)
+        return False, _with_request_url(f"上传异常: {str(e)}", upload_url)
     finally:
         if mime:
             mime.close()
