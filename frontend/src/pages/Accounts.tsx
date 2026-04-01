@@ -627,6 +627,17 @@ export default function Accounts() {
 
   const columns: any[] = [
     {
+      title: 'ID',
+      dataIndex: 'id',
+      key: 'id',
+      width: 88,
+      render: (value: number) => (
+        <Text copyable={{ text: String(value) }} style={{ fontFamily: 'monospace', fontSize: 12 }}>
+          {value}
+        </Text>
+      ),
+    },
+    {
       title: '邮箱',
       dataIndex: 'email',
       key: 'email',
