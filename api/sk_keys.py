@@ -6,12 +6,12 @@ from typing import Any, Optional
 from urllib.parse import urlsplit, urlunsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
-from core.db import ProxyModel, SKApiKeyModel, SKApiKeyUsageLog, UserModel, get_session
+from core.db import ProxyModel, SKApiKeyModel, SKApiKeyUsageLog, UserModel, engine, get_session
 from core.proxy_utils import build_requests_proxy_config, normalize_proxy_url
 from core.security import (
     generate_sk_api_key,
@@ -20,6 +20,7 @@ from core.security import (
 )
 
 router = APIRouter(tags=["sk"])
+openai_router = APIRouter(prefix="/v1", tags=["openai"])
 _sk_bearer_scheme = HTTPBearer(auto_error=False)
 
 
@@ -64,6 +65,12 @@ def _estimate_chat_tokens(messages: list[dict[str, Any]]) -> int:
     return total
 
 
+def _planned_completion_tokens(payload: dict[str, Any]) -> int:
+    if "max_completion_tokens" in payload:
+        return _normalize_non_negative_int(payload.get("max_completion_tokens", 0), field_name="max_completion_tokens")
+    return _normalize_non_negative_int(payload.get("max_tokens", 0), field_name="max_tokens")
+
+
 def _normalize_chat_url(target_url: str) -> str:
     value = str(target_url or "").strip()
     if not value:
@@ -76,6 +83,54 @@ def _normalize_chat_url(target_url: str) -> str:
 
     next_path = f"{path}/chat/completions" if path else "/chat/completions"
     return urlunsplit(parts._replace(path=next_path))
+
+
+def _derive_models_url(target_url: str) -> str:
+    normalized = _normalize_chat_url(target_url)
+    parts = urlsplit(normalized)
+    path = str(parts.path or "")
+    if path.endswith("/chat/completions"):
+        path = f"{path[:-len('/chat/completions')]}/models"
+    else:
+        path = "/models"
+    return urlunsplit(parts._replace(path=path))
+
+
+def _extract_chunk_text(payload: dict[str, Any]) -> str:
+    choices = payload.get("choices")
+    if not isinstance(choices, list):
+        return ""
+
+    parts: list[str] = []
+    for choice in choices:
+        if not isinstance(choice, dict):
+            continue
+        for field in ("delta", "message"):
+            content_holder = choice.get(field)
+            if not isinstance(content_holder, dict):
+                continue
+            content = content_holder.get("content")
+            if isinstance(content, str) and content:
+                parts.append(content)
+            elif isinstance(content, list):
+                for item in content:
+                    if isinstance(item, str) and item:
+                        parts.append(item)
+                    elif isinstance(item, dict):
+                        text = str(item.get("text") or item.get("content") or "").strip()
+                        if text:
+                            parts.append(text)
+    return "".join(parts)
+
+
+def _resolve_usage_from_json(response_json: dict[str, Any], *, prompt_tokens_estimate: int, completion_fallback: str) -> tuple[int, int]:
+    usage = response_json.get("usage")
+    if isinstance(usage, dict):
+        return (
+            _normalize_non_negative_int(usage.get("prompt_tokens", 0), field_name="prompt_tokens"),
+            _normalize_non_negative_int(usage.get("completion_tokens", 0), field_name="completion_tokens"),
+        )
+    return prompt_tokens_estimate, _estimate_text_tokens(completion_fallback)
 
 
 def _serialize_proxy(proxy: ProxyModel | None) -> Optional[dict]:
@@ -202,6 +257,34 @@ def _record_usage(
     )
     session.commit()
     session.refresh(item)
+
+
+def _record_usage_by_key_id(
+    api_key_id: int,
+    *,
+    model: str,
+    target_url: str,
+    proxy_url: str,
+    prompt_tokens: int,
+    completion_tokens: int,
+    success: bool,
+    error: str = "",
+) -> None:
+    with Session(engine) as session:
+        item = session.get(SKApiKeyModel, api_key_id)
+        if not item:
+            return
+        _record_usage(
+            session,
+            item,
+            model=model,
+            target_url=target_url,
+            proxy_url=proxy_url,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            success=success,
+            error=error,
+        )
 
 
 def _ensure_quota(item: SKApiKeyModel, planned_tokens: int) -> None:
@@ -497,11 +580,69 @@ def authorize_sk_key(auth: SKAuthContext = Depends(get_sk_auth_context)):
     }
 
 
+def _build_upstream_headers(auth: SKAuthContext) -> dict[str, str]:
+    headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    upstream_api_key = str(auth.api_key.upstream_api_key or "").strip()
+    if upstream_api_key:
+        headers["Authorization"] = f"Bearer {upstream_api_key}"
+    return headers
+
+
+def _build_upstream_payload(payload: dict[str, Any], model: str, messages: list[dict[str, Any]], *, stream: bool) -> dict[str, Any]:
+    request_payload = dict(payload)
+    request_payload.pop("target_url", None)
+    request_payload["model"] = model
+    request_payload["messages"] = messages
+    request_payload["stream"] = stream
+    return request_payload
+
+
+@router.get("/sk/models")
+@openai_router.get("/models")
+def list_openai_models(auth: SKAuthContext = Depends(get_sk_auth_context)):
+    import requests
+
+    if not str(auth.api_key.target_url or "").strip():
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="未配置 target_url")
+
+    models_url = _derive_models_url(auth.api_key.target_url)
+    response = requests.get(
+        models_url,
+        headers=_build_upstream_headers(auth),
+        proxies=build_requests_proxy_config(auth.proxy_url),
+        timeout=60,
+    )
+    success = response.status_code < 400
+    error_text = "" if success else str(response.text or "")[:500]
+    _record_usage_by_key_id(
+        int(auth.api_key.id or 0),
+        model="models",
+        target_url=models_url,
+        proxy_url=auth.proxy_url,
+        prompt_tokens=0,
+        completion_tokens=0,
+        success=success,
+        error=error_text,
+    )
+
+    response_content_type = str(response.headers.get("Content-Type", "") or "")
+    if "json" in response_content_type.lower():
+        try:
+            return JSONResponse(content=response.json(), status_code=response.status_code)
+        except ValueError:
+            pass
+    return Response(
+        content=str(response.text or ""),
+        status_code=response.status_code,
+        media_type=response_content_type or "text/plain",
+    )
+
+
 @router.post("/sk/chat/completions")
+@openai_router.post("/chat/completions")
 async def sk_chat_completions(
     request: Request,
     auth: SKAuthContext = Depends(get_sk_auth_context),
-    session: Session = Depends(get_session),
 ):
     try:
         payload = await request.json()
@@ -510,8 +651,6 @@ async def sk_chat_completions(
 
     if not isinstance(payload, dict):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="请求体必须是 JSON 对象")
-    if bool(payload.get("stream")):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="当前 SK 网关仅支持非流式请求")
 
     messages = payload.get("messages") or []
     if not isinstance(messages, list) or not messages:
@@ -525,73 +664,138 @@ async def sk_chat_completions(
     if not target_url:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="未配置 target_url")
 
+    stream = bool(payload.get("stream"))
     prompt_tokens_estimate = _estimate_chat_tokens(messages)
-    planned_completion_tokens = _normalize_non_negative_int(
-        payload.get("max_tokens", 0),
-        field_name="max_tokens",
-    )
+    planned_completion_tokens = _planned_completion_tokens(payload)
     _ensure_quota(auth.api_key, prompt_tokens_estimate + planned_completion_tokens)
-
-    request_payload = dict(payload)
-    request_payload.pop("target_url", None)
-    request_payload["model"] = model
-    request_payload["messages"] = messages
-    request_payload["stream"] = False
-
-    headers = {"Content-Type": "application/json", "Accept": "application/json"}
-    upstream_api_key = str(auth.api_key.upstream_api_key or "").strip()
-    if upstream_api_key:
-        headers["Authorization"] = f"Bearer {upstream_api_key}"
 
     import requests
 
-    response = requests.post(
-        target_url,
-        json=request_payload,
-        headers=headers,
-        proxies=build_requests_proxy_config(auth.proxy_url),
-        timeout=180,
-    )
+    request_payload = _build_upstream_payload(payload, model, messages, stream=stream)
+    request_headers = _build_upstream_headers(auth)
+    request_kwargs = {
+        "json": request_payload,
+        "headers": request_headers,
+        "proxies": build_requests_proxy_config(auth.proxy_url),
+        "timeout": 180,
+    }
 
-    response_content_type = str(response.headers.get("Content-Type", "") or "")
-    response_json: dict[str, Any] | None = None
-    response_text = str(response.text or "")
-    if "json" in response_content_type.lower():
+    if not stream:
+        response = requests.post(target_url, **request_kwargs)
+        response_content_type = str(response.headers.get("Content-Type", "") or "")
+        response_json: dict[str, Any] | None = None
+        response_text = str(response.text or "")
+        if "json" in response_content_type.lower():
+            try:
+                response_json = response.json()
+            except ValueError:
+                response_json = None
+
+        success = response.status_code < 400
+        if response_json is not None and success:
+            prompt_tokens, completion_tokens = _resolve_usage_from_json(
+                response_json,
+                prompt_tokens_estimate=prompt_tokens_estimate,
+                completion_fallback=response_text,
+            )
+        elif success:
+            prompt_tokens, completion_tokens = prompt_tokens_estimate, _estimate_text_tokens(response_text)
+        else:
+            prompt_tokens, completion_tokens = 0, 0
+
+        _record_usage_by_key_id(
+            int(auth.api_key.id or 0),
+            model=model,
+            target_url=target_url,
+            proxy_url=auth.proxy_url,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            success=success,
+            error="" if success else response_text[:500],
+        )
+
+        if response_json is not None:
+            return JSONResponse(content=response_json, status_code=response.status_code)
+
+        return Response(
+            content=response_text,
+            status_code=response.status_code,
+            media_type=response_content_type or "text/plain",
+        )
+
+    upstream_response = requests.post(target_url, stream=True, **request_kwargs)
+    if upstream_response.status_code >= 400:
+        response_content_type = str(upstream_response.headers.get("Content-Type", "") or "")
+        response_text = str(upstream_response.text or "")
+        _record_usage_by_key_id(
+            int(auth.api_key.id or 0),
+            model=model,
+            target_url=target_url,
+            proxy_url=auth.proxy_url,
+            prompt_tokens=0,
+            completion_tokens=0,
+            success=False,
+            error=response_text[:500],
+        )
+        if "json" in response_content_type.lower():
+            try:
+                return JSONResponse(content=upstream_response.json(), status_code=upstream_response.status_code)
+            except ValueError:
+                pass
+        return Response(
+            content=response_text,
+            status_code=upstream_response.status_code,
+            media_type=response_content_type or "text/plain",
+        )
+
+    def event_stream():
+        accumulated_text = ""
+        prompt_tokens = prompt_tokens_estimate
+        completion_tokens = 0
+        error_text = ""
         try:
-            response_json = response.json()
-        except ValueError:
-            response_json = None
+            for raw_line in upstream_response.iter_lines(decode_unicode=True):
+                line = raw_line if isinstance(raw_line, str) else raw_line.decode("utf-8", errors="ignore")
+                if line.startswith("data:"):
+                    payload_text = line[5:].strip()
+                    if payload_text and payload_text != "[DONE]":
+                        try:
+                            chunk = json.loads(payload_text)
+                        except ValueError:
+                            chunk = None
+                        if isinstance(chunk, dict):
+                            usage = chunk.get("usage")
+                            if isinstance(usage, dict):
+                                prompt_tokens = _normalize_non_negative_int(usage.get("prompt_tokens", prompt_tokens), field_name="prompt_tokens")
+                                completion_tokens = _normalize_non_negative_int(usage.get("completion_tokens", completion_tokens), field_name="completion_tokens")
+                            else:
+                                accumulated_text += _extract_chunk_text(chunk)
+                yield f"{line}\n"
 
-    usage = response_json.get("usage") if isinstance(response_json, dict) else None
-    prompt_tokens = (
-        _normalize_non_negative_int(usage.get("prompt_tokens", 0), field_name="prompt_tokens")
-        if isinstance(usage, dict)
-        else prompt_tokens_estimate
-    )
-    completion_tokens = (
-        _normalize_non_negative_int(usage.get("completion_tokens", 0), field_name="completion_tokens")
-        if isinstance(usage, dict)
-        else (0 if not success else _estimate_text_tokens(response_text))
-    )
+            if completion_tokens <= 0 and accumulated_text:
+                completion_tokens = _estimate_text_tokens(accumulated_text)
+        except Exception as exc:
+            error_text = str(exc)[:500]
+            raise
+        finally:
+            upstream_response.close()
+            _record_usage_by_key_id(
+                int(auth.api_key.id or 0),
+                model=model,
+                target_url=target_url,
+                proxy_url=auth.proxy_url,
+                prompt_tokens=0 if error_text else prompt_tokens,
+                completion_tokens=0 if error_text else completion_tokens,
+                success=not bool(error_text),
+                error=error_text,
+            )
 
-    success = response.status_code < 400
-    _record_usage(
-        session,
-        auth.api_key,
-        model=model,
-        target_url=target_url,
-        proxy_url=auth.proxy_url,
-        prompt_tokens=prompt_tokens,
-        completion_tokens=completion_tokens,
-        success=success,
-        error="" if success else response_text[:500],
-    )
-
-    if response_json is not None:
-        return JSONResponse(content=response_json, status_code=response.status_code)
-
-    return Response(
-        content=response_text,
-        status_code=response.status_code,
-        media_type=response_content_type or "text/plain",
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
     )

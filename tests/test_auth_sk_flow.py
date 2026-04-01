@@ -8,8 +8,9 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlmodel import Session, SQLModel, create_engine
 
+import api.sk_keys as sk_keys_module
 from api.auth import router as auth_router
-from api.sk_keys import router as sk_router
+from api.sk_keys import openai_router, router as sk_router
 from core.db import ProxyModel, get_session
 
 
@@ -23,6 +24,24 @@ class _MockHTTPResponse:
     def json(self):
         return self._payload
 
+    def close(self):
+        return None
+
+
+class _MockStreamResponse:
+    def __init__(self, lines: list[str], status_code: int = 200):
+        self._lines = lines
+        self.status_code = status_code
+        self.headers = {"Content-Type": "text/event-stream"}
+        self.text = "\n".join(lines)
+
+    def iter_lines(self, decode_unicode: bool = True):
+        for line in self._lines:
+            yield line if decode_unicode else line.encode("utf-8")
+
+    def close(self):
+        return None
+
 
 class AuthAndSkFlowTests(unittest.TestCase):
     def setUp(self):
@@ -33,10 +52,13 @@ class AuthAndSkFlowTests(unittest.TestCase):
             connect_args={"check_same_thread": False},
         )
         SQLModel.metadata.create_all(self.engine)
+        self.original_sk_engine = sk_keys_module.engine
+        sk_keys_module.engine = self.engine
 
         app = FastAPI()
         app.include_router(auth_router, prefix="/api")
         app.include_router(sk_router, prefix="/api")
+        app.include_router(openai_router)
 
         def override_get_session():
             with Session(self.engine) as session:
@@ -47,6 +69,7 @@ class AuthAndSkFlowTests(unittest.TestCase):
 
     def tearDown(self):
         self.client.close()
+        sk_keys_module.engine = self.original_sk_engine
         self.temp_dir.cleanup()
 
     def _bootstrap_admin(self) -> tuple[dict, dict]:
@@ -92,7 +115,7 @@ class AuthAndSkFlowTests(unittest.TestCase):
         forbidden_resp = self.client.get("/api/auth/users", headers=user_headers)
         self.assertEqual(forbidden_resp.status_code, 403)
 
-    def test_sk_key_binds_proxy_and_enforces_token_limit(self):
+    def test_sk_key_binds_proxy_and_openai_v1_quota(self):
         _, admin_headers = self._bootstrap_admin()
         create_user_resp = self.client.post(
             "/api/auth/users",
@@ -111,7 +134,7 @@ class AuthAndSkFlowTests(unittest.TestCase):
                 "owner_user_id": alice_id,
                 "proxy_id": proxy_id,
                 "target_url": "https://example.com/v1",
-                "token_limit": 15,
+                "token_limit": 30,
             },
         )
         self.assertEqual(create_key_resp.status_code, 200, create_key_resp.text)
@@ -126,6 +149,13 @@ class AuthAndSkFlowTests(unittest.TestCase):
             "http://proxy.local:7890",
         )
 
+        models_payload = {"object": "list", "data": [{"id": "gpt-test", "object": "model"}]}
+        with mock.patch("requests.get", return_value=_MockHTTPResponse(models_payload)) as mock_get:
+            models_resp = self.client.get("/v1/models", headers=sk_headers)
+        self.assertEqual(models_resp.status_code, 200, models_resp.text)
+        self.assertEqual(models_resp.json()["data"][0]["id"], "gpt-test")
+        self.assertTrue(mock_get.called)
+
         upstream_payload = {
             "id": "chatcmpl-demo",
             "object": "chat.completion",
@@ -134,7 +164,7 @@ class AuthAndSkFlowTests(unittest.TestCase):
         }
         with mock.patch("requests.post", return_value=_MockHTTPResponse(upstream_payload)) as mock_post:
             first_chat_resp = self.client.post(
-                "/api/sk/chat/completions",
+                "/v1/chat/completions",
                 headers=sk_headers,
                 json={
                     "model": "gpt-test",
@@ -160,24 +190,51 @@ class AuthAndSkFlowTests(unittest.TestCase):
             "application/json",
         )
 
+        stream_response = _MockStreamResponse(
+            [
+                'data: {"id":"chatcmpl-stream","choices":[{"delta":{"content":"po"}}]}',
+                "",
+                'data: {"id":"chatcmpl-stream","choices":[{"delta":{"content":"ng"}}]}',
+                "",
+                'data: {"id":"chatcmpl-stream","usage":{"prompt_tokens":4,"completion_tokens":2,"total_tokens":6}}',
+                "",
+                "data: [DONE]",
+                "",
+            ]
+        )
+        with mock.patch("requests.post", return_value=stream_response):
+            streamed_resp = self.client.post(
+                "/v1/chat/completions",
+                headers=sk_headers,
+                json={
+                    "model": "gpt-test",
+                    "messages": [{"role": "user", "content": "stream hello"}],
+                    "stream": True,
+                    "max_tokens": 3,
+                },
+            )
+        self.assertEqual(streamed_resp.status_code, 200, streamed_resp.text)
+        self.assertIn("data: [DONE]", streamed_resp.text)
+
         usage_resp = self.client.get(
             f"/api/sk-keys/{create_key_payload['item']['id']}/usage",
             headers=admin_headers,
         )
         self.assertEqual(usage_resp.status_code, 200, usage_resp.text)
         usage_payload = usage_resp.json()
-        self.assertEqual(usage_payload["summary"]["total_tokens_used"], 12)
-        self.assertEqual(usage_payload["summary"]["remaining_tokens"], 3)
-        self.assertEqual(len(usage_payload["items"]), 1)
+        self.assertEqual(usage_payload["summary"]["total_tokens_used"], 18)
+        self.assertEqual(usage_payload["summary"]["remaining_tokens"], 12)
+        self.assertEqual(usage_payload["summary"]["request_count"], 3)
+        self.assertEqual(len(usage_payload["items"]), 3)
         self.assertEqual(usage_payload["items"][0]["proxy_url"], "http://proxy.local:7890")
 
         over_limit_resp = self.client.post(
-            "/api/sk/chat/completions",
+            "/v1/chat/completions",
             headers=sk_headers,
             json={
                 "model": "gpt-test",
                 "messages": [{"role": "user", "content": "hello"}],
-                "max_tokens": 5,
+                "max_tokens": 20,
             },
         )
         self.assertEqual(over_limit_resp.status_code, 429, over_limit_resp.text)

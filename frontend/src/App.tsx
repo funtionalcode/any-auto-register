@@ -7,8 +7,10 @@ import {
   GlobalOutlined,
   HistoryOutlined,
   SettingOutlined,
+  SafetyCertificateOutlined,
   SunOutlined,
   MoonOutlined,
+  LogoutOutlined,
 } from '@ant-design/icons'
 import zhCN from 'antd/locale/zh_CN'
 import Dashboard from '@/pages/Dashboard'
@@ -18,12 +20,16 @@ import Register from '@/pages/Register'
 import Proxies from '@/pages/Proxies'
 import Settings from '@/pages/Settings'
 import TaskHistory from '@/pages/TaskHistory'
+import AccessControl from '@/pages/AccessControl'
+import AuthPortal from '@/pages/AuthPortal'
 import { darkTheme, lightTheme } from './theme'
 import { RegisterTaskCenterProvider } from '@/components/RegisterTaskCenter'
+import { AuthProvider, useAuth } from '@/components/AuthProvider'
 
 const { Sider, Content } = Layout
 
 function AppContent() {
+  const { loading, user, logout } = useAuth()
   const [themeMode, setThemeMode] = useState<'dark' | 'light'>(() =>
     (localStorage.getItem('theme') as 'dark' | 'light') || 'dark'
   )
@@ -42,15 +48,32 @@ function AppContent() {
   }, [themeMode])
 
   useEffect(() => {
+    if (!user) return
     fetch('/api/platforms')
       .then(r => r.json())
       .then(d => setPlatforms((d || [])
         .filter((p: any) => !['tavily', 'cursor'].includes(p.name))
         .map((p: any) => ({ key: p.name, label: p.display_name }))))
-  }, [])
+  }, [user])
 
   const isLight = themeMode === 'light'
   const currentTheme = isLight ? lightTheme : darkTheme
+
+  if (loading) {
+    return (
+      <ConfigProvider theme={currentTheme} locale={zhCN}>
+        <div style={{ minHeight: '100vh', display: 'grid', placeItems: 'center' }}>Loading...</div>
+      </ConfigProvider>
+    )
+  }
+
+  if (!user) {
+    return (
+      <ConfigProvider theme={currentTheme} locale={zhCN}>
+        <AuthPortal />
+      </ConfigProvider>
+    )
+  }
 
   const getSelectedKey = () => {
     const path = location.pathname
@@ -66,6 +89,7 @@ function AppContent() {
     if (path === '/history') return ['/history']
     if (path === '/proxies') return ['/proxies']
     if (path === '/settings') return ['/settings']
+    if (path === '/access') return ['/access']
     return ['/']
   }
 
@@ -98,6 +122,11 @@ function AppContent() {
       key: '/settings',
       icon: <SettingOutlined />,
       label: '全局配置',
+    },
+    {
+      key: '/access',
+      icon: <SafetyCertificateOutlined />,
+      label: '访问控制',
     },
   ]
 
@@ -158,18 +187,46 @@ function AppContent() {
                 padding: '0 16px',
               }}
             >
-              <Button
-                block
-                icon={isLight ? <SunOutlined /> : <MoonOutlined />}
-                onClick={() => setThemeMode(isLight ? 'dark' : 'light')}
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: collapsed ? 'center' : 'space-between',
-                }}
-              >
-                {!collapsed && (isLight ? '亮色模式' : '暗色模式')}
-              </Button>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                {!collapsed ? (
+                  <div
+                    style={{
+                      padding: '10px 12px',
+                      borderRadius: 12,
+                      border: `1px solid ${currentTheme.token?.colorBorder}`,
+                      background: currentTheme.token?.colorBgLayout,
+                    }}
+                  >
+                    <div style={{ fontWeight: 600, fontSize: 13 }}>{user.username}</div>
+                    <div style={{ fontSize: 12, opacity: 0.72 }}>{user.role}</div>
+                  </div>
+                ) : null}
+                <Button
+                  block
+                  icon={isLight ? <SunOutlined /> : <MoonOutlined />}
+                  onClick={() => setThemeMode(isLight ? 'dark' : 'light')}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: collapsed ? 'center' : 'space-between',
+                  }}
+                >
+                  {!collapsed && (isLight ? '亮色模式' : '暗色模式')}
+                </Button>
+                <Button
+                  block
+                  icon={<LogoutOutlined />}
+                  onClick={logout}
+                  danger
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: collapsed ? 'center' : 'space-between',
+                  }}
+                >
+                  {!collapsed && '退出登录'}
+                </Button>
+              </div>
             </div>
           </Sider>
           <Content
@@ -188,6 +245,7 @@ function AppContent() {
               <Route path="/history" element={<TaskHistory />} />
               <Route path="/proxies" element={<Proxies />} />
               <Route path="/settings" element={<Settings />} />
+              <Route path="/access" element={<AccessControl />} />
             </Routes>
           </Content>
         </Layout>
@@ -198,8 +256,10 @@ function AppContent() {
 
 export default function App() {
   return (
-    <BrowserRouter>
-      <AppContent />
-    </BrowserRouter>
+    <AuthProvider>
+      <BrowserRouter>
+        <AppContent />
+      </BrowserRouter>
+    </AuthProvider>
   )
 }
