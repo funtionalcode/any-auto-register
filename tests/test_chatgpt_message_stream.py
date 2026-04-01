@@ -17,7 +17,12 @@ class _PlaceholderCurlSession:
 
 
 def _load_message_tester():
-    if importlib.util.find_spec("curl_cffi") is None:
+    try:
+        needs_fake = importlib.util.find_spec("curl_cffi") is None
+    except ValueError:
+        needs_fake = True
+
+    if needs_fake:
         fake_requests = types.SimpleNamespace(Session=_PlaceholderCurlSession)
         fake_curl_cffi = types.ModuleType("curl_cffi")
         fake_curl_cffi.requests = fake_requests

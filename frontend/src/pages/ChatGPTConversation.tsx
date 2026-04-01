@@ -40,6 +40,12 @@ interface ChatMessageItem {
   status?: 'streaming' | 'error'
 }
 
+interface OfficialModelItem {
+  id: string
+  title: string
+  description: string
+}
+
 function parseExtra(raw: string | undefined) {
   if (!raw) return {}
   try {
@@ -165,9 +171,15 @@ export default function ChatGPTConversation() {
   const [lastUsedProxy, setLastUsedProxy] = useState('')
   const [lastTargetUrl, setLastTargetUrl] = useState('')
   const [lastModel, setLastModel] = useState('')
+  const [officialModelsLoading, setOfficialModelsLoading] = useState(false)
+  const [officialModels, setOfficialModels] = useState<OfficialModelItem[]>([])
+  const [officialModelsRaw, setOfficialModelsRaw] = useState<any>(null)
+  const [officialModelsUrl, setOfficialModelsUrl] = useState('')
 
   const effectiveProxy = customProxy.trim() || selectedProxy
   const currentModel = mode === 'official' ? officialModel : customModel
+  const officialModelsRawText =
+    officialModelsRaw == null ? '' : JSON.stringify(officialModelsRaw, null, 2)
 
   const proxyOptions = useMemo(
     () => [
@@ -222,6 +234,31 @@ export default function ChatGPTConversation() {
     setMessages([])
     setConversationId('')
     setParentMessageId('')
+  }
+
+  const handleQueryOfficialModels = async () => {
+    if (!accountId || officialModelsLoading) return
+    setOfficialModelsLoading(true)
+    try {
+      const data = await apiFetch(`/accounts/${accountId}/chatgpt/models`, {
+        method: 'POST',
+        body: JSON.stringify({
+          proxy: effectiveProxy,
+          target_url: officialTargetUrl.trim(),
+        }),
+      })
+      setOfficialModels(Array.isArray(data?.models) ? data.models : [])
+      setOfficialModelsRaw(data?.data ?? null)
+      setOfficialModelsUrl(String(data?.models_url || ''))
+      if (data?.used_proxy) {
+        setLastUsedProxy(String(data.used_proxy))
+      }
+      message.success(data?.message || '模型列表已刷新')
+    } catch (e: any) {
+      message.error(e?.message || '查询模型失败')
+    } finally {
+      setOfficialModelsLoading(false)
+    }
   }
 
   const updateAssistantMessage = (messageId: string, updater: (current: ChatMessageItem) => ChatMessageItem) => {
@@ -536,14 +573,54 @@ export default function ChatGPTConversation() {
                   placeholder={OFFICIAL_DEFAULT_TARGET_URL}
                 />
               </div>
-              <div style={{ maxWidth: 220 }}>
-                <div style={{ marginBottom: 6 }}>模型</div>
-                <Input
-                  value={officialModel}
-                  onChange={(e) => setOfficialModel(e.target.value)}
-                  placeholder="auto"
-                />
-              </div>
+              <Space size={12} wrap align="end" style={{ width: '100%' }}>
+                <div style={{ minWidth: 220, maxWidth: 320 }}>
+                  <div style={{ marginBottom: 6 }}>模型</div>
+                  <Input
+                    value={officialModel}
+                    onChange={(e) => setOfficialModel(e.target.value)}
+                    placeholder="auto"
+                  />
+                </div>
+                <Button
+                  icon={<ReloadOutlined />}
+                  loading={officialModelsLoading}
+                  onClick={handleQueryOfficialModels}
+                  disabled={sending}
+                >
+                  查询 /backend-api/models
+                </Button>
+              </Space>
+              {officialModels.length > 0 || officialModelsRawText ? (
+                <Space direction="vertical" size={8} style={{ width: '100%' }}>
+                  <Text type="secondary">
+                    点击下方模型名可回填到模型输入框。
+                    {officialModelsUrl ? ` 查询地址: ${officialModelsUrl}` : ''}
+                  </Text>
+                  {officialModels.length > 0 ? (
+                    <Space size={8} wrap>
+                      {officialModels.map((item) => (
+                        <Button
+                          key={item.id}
+                          size="small"
+                          type={officialModel === item.id ? 'primary' : 'default'}
+                          onClick={() => setOfficialModel(item.id)}
+                          title={item.description || item.title || item.id}
+                        >
+                          {item.id}
+                        </Button>
+                      ))}
+                    </Space>
+                  ) : null}
+                  {officialModelsRawText ? (
+                    <Input.TextArea
+                      readOnly
+                      value={officialModelsRawText}
+                      autoSize={{ minRows: 6, maxRows: 16 }}
+                    />
+                  ) : null}
+                </Space>
+              ) : null}
             </Space>
           ) : (
             <Space direction="vertical" size={12} style={{ width: '100%' }}>

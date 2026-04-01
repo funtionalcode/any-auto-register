@@ -63,6 +63,11 @@ class ChatGPTConversationRequest(BaseModel):
     messages: list[dict] = Field(default_factory=list)
 
 
+class ChatGPTModelsRequest(BaseModel):
+    proxy: Optional[str] = None
+    target_url: Optional[str] = None
+
+
 DEFAULT_CHATGPT_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 
 
@@ -969,6 +974,46 @@ def chatgpt_chat_stream(
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@router.post("/{account_id}/chatgpt/models")
+def chatgpt_models(
+    account_id: int,
+    body: ChatGPTModelsRequest,
+    session: Session = Depends(get_session),
+):
+    acc = _get_chatgpt_account_or_404(account_id, session)
+    extra = _parse_account_extra(acc.extra_json)
+    proxy = _resolve_chatgpt_proxy(acc, extra, preferred_proxy=str(body.proxy or "").strip())
+    chatgpt_account = _build_chatgpt_message_account(acc, extra)
+
+    from platforms.chatgpt.message_tester import fetch_available_models
+
+    result = fetch_available_models(
+        chatgpt_account,
+        proxy=proxy,
+        target_url=str(body.target_url or "").strip(),
+    )
+    _report_chatgpt_proxy_result(result.used_proxy or proxy, ok=result.ok, invalid=result.invalid)
+    _persist_chatgpt_message_result(
+        int(acc.id or account_id),
+        updated_access_token=result.updated_access_token,
+        updated_refresh_token=result.updated_refresh_token,
+        invalid=result.invalid,
+    )
+
+    if not result.ok:
+        raise HTTPException(401 if result.invalid else 400, result.message)
+
+    return {
+        "ok": True,
+        "message": result.message,
+        "used_proxy": result.used_proxy or proxy,
+        "models_url": result.models_url,
+        "models": result.models,
+        "data": result.data,
+        "response_status_code": result.response_status_code,
+    }
 
 
 @router.post("/check-all")

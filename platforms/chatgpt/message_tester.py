@@ -4,7 +4,7 @@ import json
 import logging
 import re
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from http.cookies import SimpleCookie
 from typing import Any, Iterator
 from urllib.parse import urljoin, urlsplit, urlunsplit
@@ -41,6 +41,20 @@ class ChatGPTMessageTestResult:
     used_proxy: str = ""
     updated_access_token: str = ""
     updated_refresh_token: str = ""
+
+
+@dataclass
+class ChatGPTModelsResult:
+    ok: bool
+    invalid: bool
+    message: str
+    used_proxy: str = ""
+    models_url: str = ""
+    models: list[dict[str, str]] = field(default_factory=list)
+    data: Any = None
+    updated_access_token: str = ""
+    updated_refresh_token: str = ""
+    response_status_code: int = 0
 
 
 @dataclass
@@ -390,6 +404,34 @@ def _normalize_official_conversation_url(client: ChatGPTClient, target_url: str 
     return urlunsplit(parts._replace(path=path))
 
 
+def _normalize_official_models_url(client: ChatGPTClient, target_url: str = "") -> str:
+    raw = str(target_url or "").strip()
+    if not raw:
+        return f"{client.BASE}/backend-api/models"
+
+    normalized = raw
+    if "://" not in normalized:
+        normalized = urljoin(f"{client.BASE}/", normalized.lstrip("/"))
+
+    parts = urlsplit(normalized)
+    if not parts.scheme or not parts.netloc:
+        return f"{client.BASE}/backend-api/models"
+
+    path = str(parts.path or "").rstrip("/")
+    if not path:
+        path = "/backend-api/models"
+    elif path.endswith("/models"):
+        pass
+    elif path.endswith("/conversation"):
+        path = f"{path.rsplit('/', 1)[0]}/models"
+    elif path.endswith("/backend-api"):
+        path = f"{path}/models"
+    else:
+        path = "/backend-api/models"
+
+    return urlunsplit(parts._replace(path=path))
+
+
 def _official_target_origin(target_url: str, fallback: str) -> str:
     parts = urlsplit(str(target_url or "").strip())
     if parts.scheme and parts.netloc:
@@ -446,6 +488,29 @@ def _build_conversation_headers(
             "oai-language": "en-US",
             "openai-sentinel-chat-requirements-token": requirements_token,
             "openai-sentinel-proof-token": proof_token,
+            "cookie": _build_cookie_header(client),
+        },
+    )
+    return url, headers
+
+
+def _build_models_headers(
+    client: ChatGPTClient,
+    access_token: str,
+    target_url: str = "",
+) -> tuple[str, dict[str, str]]:
+    url = _normalize_official_models_url(client, target_url)
+    origin = _official_target_origin(url, client.BASE)
+    headers = client._headers(
+        url,
+        accept="application/json, text/plain, */*",
+        referer=f"{origin}/",
+        origin=origin,
+        fetch_site="same-origin",
+        extra_headers={
+            "authorization": f"Bearer {access_token}",
+            "oai-device-id": client.device_id,
+            "oai-language": "en-US",
             "cookie": _build_cookie_header(client),
         },
     )
@@ -559,6 +624,76 @@ def _prepare_chat_request(
         headers=headers,
         payload=payload,
     )
+
+
+def _normalize_model_entry(item: Any) -> dict[str, str] | None:
+    if not isinstance(item, dict):
+        return None
+
+    identifier = str(item.get("slug") or item.get("id") or item.get("name") or "").strip()
+    if not identifier:
+        return None
+
+    if "slug" not in item and not any(
+        key in item for key in ("title", "description", "max_tokens", "enabled_tools", "tags", "name")
+    ):
+        return None
+
+    title = str(item.get("title") or item.get("name") or item.get("slug") or item.get("id") or "").strip()
+    title = title or identifier
+
+    description_parts: list[str] = []
+    description = str(item.get("description") or "").strip()
+    if description:
+        description_parts.append(description)
+
+    owned_by = str(item.get("owned_by") or "").strip()
+    if owned_by:
+        description_parts.append(f"owned_by: {owned_by}")
+
+    max_tokens = item.get("max_tokens")
+    if max_tokens in (None, ""):
+        max_tokens = item.get("max_tokens_total")
+    if max_tokens not in (None, ""):
+        description_parts.append(f"max_tokens: {max_tokens}")
+
+    return {
+        "id": identifier,
+        "title": title,
+        "description": " | ".join(description_parts),
+    }
+
+
+def _extract_model_entries(payload: Any) -> list[dict[str, str]]:
+    candidates: list[Any] = []
+    if isinstance(payload, list):
+        candidates.extend(payload)
+    elif isinstance(payload, dict):
+        for key in ("models", "items", "data"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                candidates.extend(value)
+        categories = payload.get("categories")
+        if isinstance(categories, list):
+            for category in categories:
+                if not isinstance(category, dict):
+                    continue
+                models = category.get("models")
+                if isinstance(models, list):
+                    candidates.extend(models)
+
+    results: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in candidates:
+        normalized = _normalize_model_entry(item)
+        if not normalized:
+            continue
+        identifier = normalized["id"]
+        if identifier in seen:
+            continue
+        seen.add(identifier)
+        results.append(normalized)
+    return results
 
 
 def _result_from_http_error(
@@ -730,6 +865,117 @@ def send_chat_message(
             ok=False,
             invalid=False,
             message=str(e) or "ChatGPT 发消息测试失败",
+            used_proxy=proxy,
+        )
+    finally:
+        try:
+            if response is not None:
+                response.close()
+        except Exception:
+            pass
+        try:
+            if client is not None:
+                client.session.close()
+        except Exception:
+            pass
+
+
+def fetch_available_models(
+    account: Any,
+    proxy: str,
+    *,
+    target_url: str = "",
+) -> ChatGPTModelsResult:
+    if not proxy:
+        return ChatGPTModelsResult(
+            ok=False,
+            invalid=False,
+            message="未配置可用代理，无法查询 ChatGPT 模型列表",
+        )
+
+    chain_name = "fetch_available_models"
+    client = None
+    response = None
+    try:
+        client = ChatGPTClient(proxy=proxy, verbose=False)
+        _prepare_auth_context(client, account)
+
+        access_token, updated_access_token, updated_refresh_token = _ensure_access_token(account, proxy)
+        url, headers = _build_models_headers(client, access_token, target_url=target_url)
+
+        response = client.session.get(
+            url,
+            headers=headers,
+            timeout=60,
+        )
+        _log_http_response(chain_name, response, note="response_received")
+
+        raw_text = str(getattr(response, "text", "") or "")
+        if response.status_code >= 400:
+            _log_http_response(
+                chain_name,
+                response,
+                note="http_error",
+                body_excerpt=_truncate_text(raw_text, limit=600),
+            )
+            if response.status_code == 401:
+                message = "会话无效或 access_token 已过期"
+                invalid = True
+            elif response.status_code == 403:
+                message = "账号被拒绝访问或已受限"
+                invalid = True
+            else:
+                message = f"查询模型失败: HTTP {response.status_code}"
+                invalid = False
+
+            body_excerpt = _truncate_text(raw_text, limit=200)
+            if body_excerpt:
+                message = f"{message} - {body_excerpt}"
+
+            return ChatGPTModelsResult(
+                ok=False,
+                invalid=invalid,
+                message=message,
+                used_proxy=proxy,
+                models_url=url,
+                updated_access_token=updated_access_token,
+                updated_refresh_token=updated_refresh_token,
+                response_status_code=response.status_code,
+            )
+
+        try:
+            data = response.json()
+        except Exception:
+            data = raw_text
+
+        models = _extract_model_entries(data)
+        message = (
+            f"已获取 {len(models)} 个模型"
+            if models
+            else "已获取模型响应，但未解析出标准模型列表"
+        )
+        return ChatGPTModelsResult(
+            ok=True,
+            invalid=False,
+            message=message,
+            used_proxy=proxy,
+            models_url=url,
+            models=models,
+            data=data,
+            updated_access_token=updated_access_token,
+            updated_refresh_token=updated_refresh_token,
+            response_status_code=response.status_code,
+        )
+    except Exception as e:
+        logger.exception(
+            "[chatgpt-message] chain=%s note=exception proxy=%s",
+            chain_name,
+            _sanitize_proxy(proxy),
+        )
+        return ChatGPTModelsResult(
+            ok=False,
+            invalid=False,
+            message=str(e) or "查询 ChatGPT 模型列表失败",
             used_proxy=proxy,
         )
     finally:
