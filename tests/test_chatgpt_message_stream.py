@@ -110,10 +110,15 @@ class ChatGPTMessageStreamTests(unittest.TestCase):
             message_tester._build_conversation_headers = old_headers
 
         self.assertEqual([item["event"] for item in events], ["meta", "delta", "done"])
+        self.assertEqual(events[0]["data"]["chain"], "stream_chat_message")
+        self.assertTrue(events[0]["data"]["shared_test_flow"])
+        self.assertEqual(events[0]["data"]["request_mode"], "stream")
         self.assertEqual(events[1]["data"]["delta"], "Hello from ChatGPT")
         self.assertEqual(events[2]["data"]["response_text"], "Hello from ChatGPT")
         self.assertEqual(events[2]["data"]["conversation_id"], "conv_1")
         self.assertEqual(events[2]["data"]["response_message_id"], "msg_1")
+        self.assertEqual(events[2]["data"]["chain"], "stream_chat_message")
+        self.assertTrue(events[2]["data"]["shared_test_flow"])
         self.assertTrue(_FakeClient.last_instance.session.response.closed)
         self.assertTrue(_FakeClient.last_instance.session.closed)
 

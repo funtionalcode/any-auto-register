@@ -714,6 +714,20 @@ def chatgpt_chat_stream(
     chatgpt_account = _build_chatgpt_message_account(acc, extra)
     conversation_id = str(body.conversation_id or "").strip()
     parent_message_id = str(body.parent_message_id or "").strip()
+    proxy_for_log = proxy
+    if "://" in proxy_for_log and "@" in proxy_for_log:
+        scheme, remainder = proxy_for_log.split("://", 1)
+        host = remainder.rsplit("@", 1)[-1]
+        proxy_for_log = f"{scheme}://***@{host}"
+    logger.info(
+        "[chatgpt-chat-stream] account_id=%s mode=%s model=%s conversation_id=%s parent_message_id=%s proxy=%s",
+        account_id,
+        mode,
+        model or "auto",
+        conversation_id,
+        parent_message_id,
+        proxy_for_log,
+    )
 
     def event_stream():
         proxy_reported = False
@@ -728,6 +742,15 @@ def chatgpt_chat_stream(
             ):
                 event_name = str(chunk.get("event") or "message").strip() or "message"
                 data = dict(chunk.get("data") or {})
+                if event_name in {"error", "done"}:
+                    logger.info(
+                        "[chatgpt-chat-stream] account_id=%s event=%s chain=%s message=%s status=%s",
+                        account_id,
+                        event_name,
+                        str(data.get("chain") or ""),
+                        str(data.get("message") or ""),
+                        str(data.get("response_status_code") or ""),
+                    )
                 if event_name == "meta":
                     data.setdefault("used_proxy", proxy)
                     data.setdefault("target_url", "https://chatgpt.com/backend-api/conversation")
@@ -752,6 +775,7 @@ def chatgpt_chat_stream(
 
                 yield _encode_sse(event_name, data)
         except Exception as e:
+            logger.exception("[chatgpt-chat-stream] account_id=%s stream exception", account_id)
             if not proxy_reported:
                 _report_chatgpt_proxy_result(proxy, ok=False, invalid=False)
             yield _encode_sse(

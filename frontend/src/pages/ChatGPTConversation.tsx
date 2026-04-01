@@ -79,6 +79,46 @@ function parseSseBlock(block: string): { event: string; data: any } | null {
   }
 }
 
+function buildChatErrorDetail(data: any, fallback: string) {
+  const sections: string[] = []
+  const detailText = String(data?.response_text || '').trim()
+  const chain = String(data?.chain || '').trim()
+  const statusCode = data?.response_status_code
+  const headers =
+    data?.response_headers && typeof data.response_headers === 'object'
+      ? JSON.stringify(data.response_headers, null, 2)
+      : ''
+  const payloads = Array.isArray(data?.debug_payloads)
+    ? data.debug_payloads.map((item: any) => String(item || '').trim()).filter(Boolean)
+    : []
+  const rawLines = Array.isArray(data?.debug_raw_lines)
+    ? data.debug_raw_lines.map((item: any) => String(item || '').trim()).filter(Boolean)
+    : []
+
+  if (detailText) {
+    sections.push(detailText)
+  }
+  if (chain) {
+    sections.push(
+      `chain: ${chain}${data?.shared_test_flow ? ' (shares preflight with test flow)' : ''}`,
+    )
+  }
+  if (statusCode) {
+    sections.push(`status: ${statusCode}`)
+  }
+  if (headers) {
+    sections.push(`headers:\n${headers}`)
+  }
+  if (payloads.length > 0) {
+    sections.push(`payloads:\n${payloads.join('\n')}`)
+  }
+  if (rawLines.length > 0) {
+    sections.push(`raw lines:\n${rawLines.join('\n')}`)
+  }
+
+  return sections.join('\n\n') || fallback
+}
+
 function proxyLabel(item: ProxyItem) {
   return item.region ? `${item.region} | ${item.url}` : item.url
 }
@@ -282,10 +322,10 @@ export default function ChatGPTConversation() {
 
           if (event === 'error') {
             const errorText = String(data?.message || '发送失败')
-            const detailText = String(data?.response_text || '')
+            const detailText = buildChatErrorDetail(data, errorText)
             updateAssistantMessage(assistantId, (current) => ({
               ...current,
-              content: detailText || errorText,
+              content: detailText,
               status: 'error',
             }))
             message.error(errorText)
@@ -319,9 +359,10 @@ export default function ChatGPTConversation() {
         }
         if (trailingEvent.event === 'error') {
           const errorText = String(data?.message || '发送失败')
+          const detailText = buildChatErrorDetail(data, errorText)
           updateAssistantMessage(assistantId, (current) => ({
             ...current,
-            content: String(data?.response_text || errorText),
+            content: detailText,
             status: 'error',
           }))
           message.error(errorText)

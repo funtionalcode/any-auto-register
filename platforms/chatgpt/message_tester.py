@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import uuid
 from dataclasses import dataclass
@@ -14,6 +15,16 @@ from .token_refresh import TokenRefreshManager
 
 TEST_PROMPT = "Reply with exactly TEST_OK"
 TEST_PROMPT = "Reply with exactly haogege"
+logger = logging.getLogger(__name__)
+
+_DEBUG_RESPONSE_HEADERS = {
+    "content-type",
+    "cf-ray",
+    "openai-model",
+    "server",
+    "transfer-encoding",
+    "x-request-id",
+}
 
 
 @dataclass
@@ -29,6 +40,70 @@ class ChatGPTMessageTestResult:
     used_proxy: str = ""
     updated_access_token: str = ""
     updated_refresh_token: str = ""
+
+
+@dataclass
+class PreparedChatRequest:
+    client: ChatGPTClient
+    access_token: str
+    updated_access_token: str
+    updated_refresh_token: str
+    url: str
+    headers: dict[str, str]
+    payload: dict[str, Any]
+
+
+def _truncate_text(value: Any, limit: int = 400) -> str:
+    text = str(value or "")
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]}..."
+
+
+def _sanitize_proxy(proxy: str) -> str:
+    value = str(proxy or "").strip()
+    if not value or "://" not in value or "@" not in value:
+        return value
+
+    scheme, remainder = value.split("://", 1)
+    credentials, host = remainder.rsplit("@", 1)
+    username = credentials.split(":", 1)[0]
+    return f"{scheme}://{username}:***@{host}"
+
+
+def _response_header_snapshot(response: Any) -> dict[str, str]:
+    snapshot: dict[str, str] = {}
+    headers = getattr(response, "headers", None)
+    if headers is None:
+        return snapshot
+
+    try:
+        for key, value in headers.items():
+            normalized_key = str(key).lower()
+            if normalized_key not in _DEBUG_RESPONSE_HEADERS:
+                continue
+            snapshot[normalized_key] = _truncate_text(value, limit=200)
+    except Exception:
+        return snapshot
+
+    return snapshot
+
+
+def _log_http_response(chain_name: str, response: Any, *, note: str, body_excerpt: str = "") -> None:
+    logger.info(
+        "[chatgpt-message] chain=%s note=%s status=%s headers=%s",
+        chain_name,
+        note,
+        getattr(response, "status_code", ""),
+        _response_header_snapshot(response),
+    )
+    if body_excerpt:
+        logger.warning(
+            "[chatgpt-message] chain=%s note=%s body_excerpt=%s",
+            chain_name,
+            note,
+            body_excerpt,
+        )
 
 
 def _set_session_cookie(client: ChatGPTClient, name: str, value: str, domain: str = ".chatgpt.com") -> None:
@@ -380,6 +455,69 @@ def _build_conversation_payload(
     return payload
 
 
+def _prepare_chat_request(
+    account: Any,
+    proxy: str,
+    prompt: str,
+    *,
+    model: str = "auto",
+    conversation_id: str = "",
+    parent_message_id: str = "",
+    chain_name: str,
+) -> PreparedChatRequest:
+    normalized_model = str(model or "auto").strip() or "auto"
+    normalized_conversation_id = str(conversation_id or "").strip()
+    normalized_parent_message_id = str(parent_message_id or "").strip()
+    client = ChatGPTClient(proxy=proxy, verbose=False)
+
+    logger.info(
+        "[chatgpt-message] chain=%s start shared_test_flow=true proxy=%s model=%s conversation_id=%s parent_message_id=%s prompt_len=%s",
+        chain_name,
+        _sanitize_proxy(proxy),
+        normalized_model,
+        normalized_conversation_id,
+        normalized_parent_message_id,
+        len(str(prompt or "")),
+    )
+
+    _prepare_auth_context(client, account)
+    logger.info("[chatgpt-message] chain=%s step=prepare_auth_context ok", chain_name)
+
+    access_token, updated_access_token, updated_refresh_token = _ensure_access_token(account, proxy)
+    logger.info(
+        "[chatgpt-message] chain=%s step=ensure_access_token ok refreshed=%s",
+        chain_name,
+        bool(updated_access_token),
+    )
+
+    requirements_token, proof_token = _get_chat_requirements(client, access_token)
+    logger.info("[chatgpt-message] chain=%s step=get_chat_requirements ok", chain_name)
+
+    url, headers = _build_conversation_headers(client, access_token, requirements_token, proof_token)
+    payload = _build_conversation_payload(
+        prompt,
+        model=normalized_model,
+        conversation_id=normalized_conversation_id,
+        parent_message_id=normalized_parent_message_id,
+    )
+    logger.info(
+        "[chatgpt-message] chain=%s step=build_conversation_request ok url=%s has_conversation_id=%s",
+        chain_name,
+        url,
+        "conversation_id" in payload,
+    )
+
+    return PreparedChatRequest(
+        client=client,
+        access_token=access_token,
+        updated_access_token=updated_access_token,
+        updated_refresh_token=updated_refresh_token,
+        url=url,
+        headers=headers,
+        payload=payload,
+    )
+
+
 def _result_from_http_error(
     *,
     status_code: int,
@@ -439,40 +577,56 @@ def send_chat_message(
             message="未配置可用代理，无法执行 ChatGPT 发消息测试",
         )
 
-    client = ChatGPTClient(proxy=proxy, verbose=False)
+    chain_name = "send_chat_message"
+    client = None
+    response = None
     try:
-        _prepare_auth_context(client, account)
-        access_token, updated_access_token, updated_refresh_token = _ensure_access_token(account, proxy)
-        requirements_token, proof_token = _get_chat_requirements(client, access_token)
-        url, headers = _build_conversation_headers(client, access_token, requirements_token, proof_token)
-        payload = _build_conversation_payload(
+        prepared = _prepare_chat_request(
+            account,
+            proxy,
             prompt,
             model=model,
             conversation_id=conversation_id,
             parent_message_id=parent_message_id,
+            chain_name=chain_name,
         )
+        client = prepared.client
 
         response = client.session.post(
-            url,
-            json=payload,
-            headers=headers,
+            prepared.url,
+            json=prepared.payload,
+            headers=prepared.headers,
             timeout=90,
         )
+        _log_http_response(chain_name, response, note="response_received")
 
         if response.status_code >= 400:
+            response_text = str(response.text or "")
+            _log_http_response(
+                chain_name,
+                response,
+                note="http_error",
+                body_excerpt=_truncate_text(response_text, limit=600),
+            )
             return _result_from_http_error(
                 status_code=response.status_code,
                 proxy=proxy,
-                updated_access_token=updated_access_token,
-                updated_refresh_token=updated_refresh_token,
-                response_text=response.text or "",
+                updated_access_token=prepared.updated_access_token,
+                updated_refresh_token=prepared.updated_refresh_token,
+                response_text=response_text,
             )
 
-        response_text, response_conversation_id, response_message_id = _parse_sse_response(response.text)
+        raw_text = str(response.text or "")
+        response_text, response_conversation_id, response_message_id = _parse_sse_response(raw_text)
         if archive_after_send:
-            _archive_conversation(client, access_token, response_conversation_id)
+            _archive_conversation(client, prepared.access_token, response_conversation_id)
 
         if not response_text:
+            logger.warning(
+                "[chatgpt-message] chain=%s note=empty_sse_response body_excerpt=%s",
+                chain_name,
+                _truncate_text(raw_text, limit=600),
+            )
             return ChatGPTMessageTestResult(
                 ok=False,
                 invalid=False,
@@ -480,10 +634,17 @@ def send_chat_message(
                 conversation_id=response_conversation_id,
                 response_message_id=response_message_id,
                 used_proxy=proxy,
-                updated_access_token=updated_access_token,
-                updated_refresh_token=updated_refresh_token,
+                updated_access_token=prepared.updated_access_token,
+                updated_refresh_token=prepared.updated_refresh_token,
             )
 
+        logger.info(
+            "[chatgpt-message] chain=%s note=done conversation_id=%s response_message_id=%s response_excerpt=%s",
+            chain_name,
+            response_conversation_id,
+            response_message_id,
+            _truncate_text(response_text, limit=160),
+        )
         return ChatGPTMessageTestResult(
             ok=True,
             invalid=False,
@@ -494,10 +655,15 @@ def send_chat_message(
             conversation_id=response_conversation_id,
             response_message_id=response_message_id,
             used_proxy=proxy,
-            updated_access_token=updated_access_token,
-            updated_refresh_token=updated_refresh_token,
+            updated_access_token=prepared.updated_access_token,
+            updated_refresh_token=prepared.updated_refresh_token,
         )
     except Exception as e:
+        logger.exception(
+            "[chatgpt-message] chain=%s note=exception proxy=%s",
+            chain_name,
+            _sanitize_proxy(proxy),
+        )
         return ChatGPTMessageTestResult(
             ok=False,
             invalid=False,
@@ -506,7 +672,13 @@ def send_chat_message(
         )
     finally:
         try:
-            client.session.close()
+            if response is not None:
+                response.close()
+        except Exception:
+            pass
+        try:
+            if client is not None:
+                client.session.close()
         except Exception:
             pass
 
@@ -542,19 +714,20 @@ def stream_chat_message(
         }
         return
 
-    client = ChatGPTClient(proxy=proxy, verbose=False)
+    chain_name = "stream_chat_message"
+    client = None
+    response = None
     try:
-        _prepare_auth_context(client, account)
-        access_token, updated_access_token, updated_refresh_token = _ensure_access_token(account, proxy)
-        requirements_token, proof_token = _get_chat_requirements(client, access_token)
-        url, headers = _build_conversation_headers(client, access_token, requirements_token, proof_token)
-        payload = _build_conversation_payload(
+        prepared = _prepare_chat_request(
+            account,
+            proxy,
             prompt,
             model=model,
             conversation_id=conversation_id,
             parent_message_id=parent_message_id,
+            chain_name=chain_name,
         )
-        response = None
+        client = prepared.client
 
         yield {
             "event": "meta",
@@ -563,24 +736,36 @@ def stream_chat_message(
                 "model": str(model or "auto").strip() or "auto",
                 "conversation_id": str(conversation_id or "").strip(),
                 "parent_message_id": str(parent_message_id or "").strip(),
+                "chain": chain_name,
+                "shared_test_flow": True,
+                "request_mode": "stream",
             },
         }
 
         response = client.session.post(
-            url,
-            json=payload,
-            headers=headers,
+            prepared.url,
+            json=prepared.payload,
+            headers=prepared.headers,
             timeout=180,
             stream=True,
         )
+        _log_http_response(chain_name, response, note="stream_opened")
         try:
             if response.status_code >= 400:
+                response_text = str(response.text or "")
+                response_headers = _response_header_snapshot(response)
+                _log_http_response(
+                    chain_name,
+                    response,
+                    note="http_error",
+                    body_excerpt=_truncate_text(response_text, limit=600),
+                )
                 result = _result_from_http_error(
                     status_code=response.status_code,
                     proxy=proxy,
-                    updated_access_token=updated_access_token,
-                    updated_refresh_token=updated_refresh_token,
-                    response_text=response.text or "",
+                    updated_access_token=prepared.updated_access_token,
+                    updated_refresh_token=prepared.updated_refresh_token,
+                    response_text=response_text,
                 )
                 yield {
                     "event": "error",
@@ -595,6 +780,10 @@ def stream_chat_message(
                         "used_proxy": result.used_proxy,
                         "updated_access_token": result.updated_access_token,
                         "updated_refresh_token": result.updated_refresh_token,
+                        "response_status_code": response.status_code,
+                        "response_headers": response_headers,
+                        "chain": chain_name,
+                        "shared_test_flow": True,
                     },
                 }
                 return
@@ -602,14 +791,22 @@ def stream_chat_message(
             response_text = ""
             response_conversation_id = str(conversation_id or "").strip()
             response_message_id = ""
+            raw_line_samples: list[str] = []
+            payload_samples: list[str] = []
 
             for raw_line in response.iter_lines(decode_unicode=True):
-                line = str(raw_line or "").strip()
+                raw_line_text = str(raw_line or "")
+                if raw_line_text and len(raw_line_samples) < 8:
+                    raw_line_samples.append(_truncate_text(raw_line_text, limit=240))
+
+                line = raw_line_text.strip()
                 if not line or not line.startswith("data:"):
                     continue
                 payload_text = line[5:].strip()
                 if not payload_text:
                     continue
+                if len(payload_samples) < 8:
+                    payload_samples.append(_truncate_text(payload_text, limit=240))
                 if payload_text == "[DONE]":
                     break
 
@@ -632,6 +829,12 @@ def stream_chat_message(
                     }
 
             if not response_text:
+                logger.warning(
+                    "[chatgpt-message] chain=%s note=empty_stream_response raw_lines=%s payloads=%s",
+                    chain_name,
+                    raw_line_samples,
+                    payload_samples,
+                )
                 yield {
                     "event": "error",
                     "data": {
@@ -644,12 +847,24 @@ def stream_chat_message(
                         "response_message_id": response_message_id,
                         "used_proxy": proxy,
                         "model": str(model or "auto").strip() or "auto",
-                        "updated_access_token": updated_access_token,
-                        "updated_refresh_token": updated_refresh_token,
+                        "updated_access_token": prepared.updated_access_token,
+                        "updated_refresh_token": prepared.updated_refresh_token,
+                        "debug_raw_lines": raw_line_samples,
+                        "debug_payloads": payload_samples,
+                        "response_headers": _response_header_snapshot(response),
+                        "chain": chain_name,
+                        "shared_test_flow": True,
                     },
                 }
                 return
 
+            logger.info(
+                "[chatgpt-message] chain=%s note=done conversation_id=%s response_message_id=%s response_excerpt=%s",
+                chain_name,
+                response_conversation_id,
+                response_message_id,
+                _truncate_text(response_text, limit=160),
+            )
             yield {
                 "event": "done",
                 "data": {
@@ -662,10 +877,12 @@ def stream_chat_message(
                     "response_message_id": response_message_id,
                     "used_proxy": proxy,
                     "model": str(model or "auto").strip() or "auto",
-                    "updated_access_token": updated_access_token,
-                        "updated_refresh_token": updated_refresh_token,
-                    },
-                }
+                    "updated_access_token": prepared.updated_access_token,
+                    "updated_refresh_token": prepared.updated_refresh_token,
+                    "chain": chain_name,
+                    "shared_test_flow": True,
+                },
+            }
         finally:
             try:
                 if response is not None:
@@ -673,6 +890,11 @@ def stream_chat_message(
             except Exception:
                 pass
     except Exception as e:
+        logger.exception(
+            "[chatgpt-message] chain=%s note=exception proxy=%s",
+            chain_name,
+            _sanitize_proxy(proxy),
+        )
         yield {
             "event": "error",
             "data": {
@@ -681,10 +903,13 @@ def stream_chat_message(
                 "message": str(e) or "ChatGPT 发消息测试失败",
                 "used_proxy": proxy,
                 "model": str(model or "auto").strip() or "auto",
+                "chain": chain_name,
+                "shared_test_flow": True,
             },
         }
     finally:
         try:
-            client.session.close()
+            if client is not None:
+                client.session.close()
         except Exception:
             pass
