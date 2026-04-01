@@ -22,6 +22,7 @@ import {
 import { apiFetch } from '@/lib/utils'
 
 const { Text, Paragraph, Title } = Typography
+const OFFICIAL_DEFAULT_TARGET_URL = 'https://chatgpt.com/backend-api/conversation'
 
 type ConversationMode = 'official' | 'custom_api'
 
@@ -84,6 +85,7 @@ function buildChatErrorDetail(data: any, fallback: string) {
   const sections: string[] = []
   const detailText = String(data?.response_text || '').trim()
   const chain = String(data?.chain || '').trim()
+  const targetUrl = String(data?.target_url || '').trim()
   const statusCode = data?.response_status_code
   const headers =
     data?.response_headers && typeof data.response_headers === 'object'
@@ -103,6 +105,9 @@ function buildChatErrorDetail(data: any, fallback: string) {
     sections.push(
       `chain: ${chain}${data?.shared_test_flow ? ' (shares preflight with test flow)' : ''}`,
     )
+  }
+  if (targetUrl) {
+    sections.push(`target: ${targetUrl}`)
   }
   if (statusCode) {
     sections.push(`status: ${statusCode}`)
@@ -141,6 +146,7 @@ export default function ChatGPTConversation() {
   const [customProxy, setCustomProxy] = useState('')
   const [mode, setMode] = useState<ConversationMode>('official')
   const [streamEnabled, setStreamEnabled] = useState(true)
+  const [officialTargetUrl, setOfficialTargetUrl] = useState('')
   const [officialModel, setOfficialModel] = useState('auto')
   const [customTargetUrl, setCustomTargetUrl] = useState('')
   const [customApiKey, setCustomApiKey] = useState('')
@@ -253,7 +259,7 @@ export default function ChatGPTConversation() {
           proxy: effectiveProxy,
           conversation_id: mode === 'official' ? conversationId : '',
           parent_message_id: mode === 'official' ? parentMessageId : '',
-          target_url: mode === 'custom_api' ? customTargetUrl.trim() : '',
+          target_url: mode === 'official' ? officialTargetUrl.trim() : customTargetUrl.trim(),
           api_key: mode === 'custom_api' ? customApiKey.trim() : '',
           model: currentModel,
           messages: [...historyBeforeSend, { role: 'user', content: normalizedPrompt }],
@@ -291,7 +297,7 @@ export default function ChatGPTConversation() {
           if (data?.target_url) {
             setLastTargetUrl(String(data.target_url))
           } else if (mode === 'official') {
-            setLastTargetUrl('https://chatgpt.com/backend-api/conversation')
+            setLastTargetUrl(officialTargetUrl.trim() || OFFICIAL_DEFAULT_TARGET_URL)
           }
           if (data?.model) {
             setLastModel(String(data.model))
@@ -490,14 +496,24 @@ export default function ChatGPTConversation() {
           </Space>
 
           {mode === 'official' ? (
-            <div style={{ maxWidth: 220 }}>
-              <div style={{ marginBottom: 6 }}>模型</div>
-              <Input
-                value={officialModel}
-                onChange={(e) => setOfficialModel(e.target.value)}
-                placeholder="auto"
-              />
-            </div>
+            <Space direction="vertical" size={12} style={{ width: '100%' }}>
+              <div style={{ minWidth: 280, maxWidth: 520 }}>
+                <div style={{ marginBottom: 6 }}>官方 URL</div>
+                <Input
+                  value={officialTargetUrl}
+                  onChange={(e) => setOfficialTargetUrl(e.target.value)}
+                  placeholder={OFFICIAL_DEFAULT_TARGET_URL}
+                />
+              </div>
+              <div style={{ maxWidth: 220 }}>
+                <div style={{ marginBottom: 6 }}>模型</div>
+                <Input
+                  value={officialModel}
+                  onChange={(e) => setOfficialModel(e.target.value)}
+                  placeholder="auto"
+                />
+              </div>
+            </Space>
           ) : (
             <Space direction="vertical" size={12} style={{ width: '100%' }}>
               <div>
@@ -611,7 +627,7 @@ export default function ChatGPTConversation() {
           />
           <Space style={{ justifyContent: 'space-between', width: '100%' }}>
             <Text type="secondary">
-              官方模式默认目标为 `https://chatgpt.com/backend-api/conversation`，可切换流式或非流式返回
+              官方模式默认目标为 <code>{OFFICIAL_DEFAULT_TARGET_URL}</code>，也支持自定义 URL，并可切换流式或非流式返回
             </Text>
             <Button
               type="primary"

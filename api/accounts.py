@@ -517,6 +517,7 @@ def _iter_official_chat_chunks(
     model: str,
     conversation_id: str,
     parent_message_id: str,
+    target_url: str,
     stream: bool,
 ) -> Iterator[dict[str, dict]]:
     from platforms.chatgpt.message_tester import send_chat_message, stream_chat_message
@@ -524,6 +525,7 @@ def _iter_official_chat_chunks(
     normalized_model = str(model or "auto").strip() or "auto"
     normalized_conversation_id = str(conversation_id or "").strip()
     normalized_parent_message_id = str(parent_message_id or "").strip()
+    normalized_target_url = str(target_url or "").strip()
     if stream:
         yield from stream_chat_message(
             account,
@@ -532,6 +534,7 @@ def _iter_official_chat_chunks(
             model=normalized_model,
             conversation_id=normalized_conversation_id,
             parent_message_id=normalized_parent_message_id,
+            target_url=normalized_target_url,
         )
         return
 
@@ -542,6 +545,7 @@ def _iter_official_chat_chunks(
             "model": normalized_model,
             "conversation_id": normalized_conversation_id,
             "parent_message_id": normalized_parent_message_id,
+            "target_url": normalized_target_url,
             "chain": "send_chat_message",
             "shared_test_flow": True,
             "request_mode": "sync",
@@ -555,6 +559,7 @@ def _iter_official_chat_chunks(
         model=normalized_model,
         conversation_id=normalized_conversation_id,
         parent_message_id=normalized_parent_message_id,
+        target_url=normalized_target_url,
     )
     yield {
         "event": "done" if result.ok else "error",
@@ -570,6 +575,7 @@ def _iter_official_chat_chunks(
             "model": result.model or normalized_model,
             "updated_access_token": result.updated_access_token,
             "updated_refresh_token": result.updated_refresh_token,
+            "target_url": normalized_target_url,
             "chain": "send_chat_message",
             "shared_test_flow": True,
             "request_mode": "sync",
@@ -872,18 +878,20 @@ def chatgpt_chat_stream(
     chatgpt_account = _build_chatgpt_message_account(acc, extra)
     conversation_id = str(body.conversation_id or "").strip()
     parent_message_id = str(body.parent_message_id or "").strip()
+    target_url = str(body.target_url or "").strip()
     proxy_for_log = proxy
     if "://" in proxy_for_log and "@" in proxy_for_log:
         scheme, remainder = proxy_for_log.split("://", 1)
         host = remainder.rsplit("@", 1)[-1]
         proxy_for_log = f"{scheme}://***@{host}"
     logger.info(
-        "[chatgpt-chat-stream] account_id=%s mode=%s model=%s conversation_id=%s parent_message_id=%s proxy=%s stream=%s",
+        "[chatgpt-chat-stream] account_id=%s mode=%s model=%s conversation_id=%s parent_message_id=%s target_url=%s proxy=%s stream=%s",
         account_id,
         mode,
         model or "auto",
         conversation_id,
         parent_message_id,
+        target_url or "DEFAULT",
         proxy_for_log,
         stream,
     )
@@ -898,6 +906,7 @@ def chatgpt_chat_stream(
                 model=model or "auto",
                 conversation_id=conversation_id,
                 parent_message_id=parent_message_id,
+                target_url=target_url,
                 stream=stream,
             ):
                 event_name = str(chunk.get("event") or "message").strip() or "message"
@@ -913,11 +922,13 @@ def chatgpt_chat_stream(
                     )
                 if event_name == "meta":
                     data.setdefault("used_proxy", proxy)
-                    data.setdefault("target_url", "https://chatgpt.com/backend-api/conversation")
+                    data.setdefault("target_url", target_url or "https://chatgpt.com/backend-api/conversation")
                     data.setdefault("model", model or "auto")
                     data.setdefault("request_mode", "stream" if stream else "sync")
                     data["account_id"] = int(acc.id or account_id)
                     data["email"] = acc.email
+                else:
+                    data.setdefault("target_url", target_url or "https://chatgpt.com/backend-api/conversation")
 
                 if event_name in {"done", "error"} and not proxy_reported:
                     used_proxy = str(data.get("used_proxy") or proxy).strip()

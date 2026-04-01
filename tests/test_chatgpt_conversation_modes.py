@@ -15,8 +15,8 @@ class ChatGPTConversationModeTests(unittest.TestCase):
     def test_iter_official_chat_chunks_uses_send_chat_message_when_stream_disabled(self):
         sent_calls: list[tuple[str, str, str]] = []
 
-        def fake_send_chat_message(account, *, proxy, prompt, model, conversation_id, parent_message_id):
-            sent_calls.append((proxy, prompt, model))
+        def fake_send_chat_message(account, *, proxy, prompt, model, conversation_id, parent_message_id, target_url):
+            sent_calls.append((proxy, prompt, model, target_url))
             return SimpleNamespace(
                 ok=True,
                 invalid=False,
@@ -56,11 +56,13 @@ class ChatGPTConversationModeTests(unittest.TestCase):
         self.assertEqual(chunks[0]["data"]["request_mode"], "sync")
         self.assertEqual(chunks[0]["data"]["chain"], "send_chat_message")
         self.assertTrue(chunks[0]["data"]["shared_test_flow"])
+        self.assertEqual(chunks[0]["data"]["target_url"], "")
         self.assertEqual(chunks[1]["data"]["response_text"], "hello")
         self.assertEqual(chunks[1]["data"]["conversation_id"], "conv_sync")
         self.assertEqual(chunks[1]["data"]["response_message_id"], "msg_sync")
         self.assertEqual(chunks[1]["data"]["request_mode"], "sync")
-        self.assertEqual(sent_calls, [("http://127.0.0.1:7890", "hello", "auto")])
+        self.assertEqual(chunks[1]["data"]["target_url"], "")
+        self.assertEqual(sent_calls, [("http://127.0.0.1:7890", "hello", "auto", "")])
 
 
 if __name__ == "__main__":

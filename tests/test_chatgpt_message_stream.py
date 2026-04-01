@@ -90,7 +90,7 @@ class ChatGPTMessageStreamTests(unittest.TestCase):
             message_tester._prepare_auth_context = lambda client, account: None
             message_tester._ensure_access_token = lambda account, proxy: ("access_token", "", "")
             message_tester._get_chat_requirements = lambda client, access_token: ("requirements", "proof")
-            message_tester._build_conversation_headers = lambda client, access_token, requirements_token, proof_token: (
+            message_tester._build_conversation_headers = lambda client, access_token, requirements_token, proof_token, target_url="": (
                 "https://chatgpt.com/backend-api/conversation",
                 {"authorization": f"Bearer {access_token}"},
             )
@@ -113,12 +113,14 @@ class ChatGPTMessageStreamTests(unittest.TestCase):
         self.assertEqual(events[0]["data"]["chain"], "stream_chat_message")
         self.assertTrue(events[0]["data"]["shared_test_flow"])
         self.assertEqual(events[0]["data"]["request_mode"], "stream")
+        self.assertEqual(events[0]["data"]["target_url"], "https://chatgpt.com/backend-api/conversation")
         self.assertEqual(events[1]["data"]["delta"], "Hello from ChatGPT")
         self.assertEqual(events[2]["data"]["response_text"], "Hello from ChatGPT")
         self.assertEqual(events[2]["data"]["conversation_id"], "conv_1")
         self.assertEqual(events[2]["data"]["response_message_id"], "msg_1")
         self.assertEqual(events[2]["data"]["chain"], "stream_chat_message")
         self.assertTrue(events[2]["data"]["shared_test_flow"])
+        self.assertEqual(events[2]["data"]["target_url"], "https://chatgpt.com/backend-api/conversation")
         self.assertTrue(_FakeClient.last_instance.session.response.closed)
         self.assertTrue(_FakeClient.last_instance.session.closed)
 

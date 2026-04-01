@@ -7,6 +7,7 @@ import uuid
 from dataclasses import dataclass
 from http.cookies import SimpleCookie
 from typing import Any, Iterator
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 from .chatgpt_client import ChatGPTClient
 from .sentinel_token import SentinelTokenGenerator
@@ -367,6 +368,35 @@ def _parse_sse_response(raw_text: str) -> tuple[str, str, str]:
     return response_text.strip(), conversation_id, response_message_id
 
 
+def _normalize_official_conversation_url(client: ChatGPTClient, target_url: str = "") -> str:
+    raw = str(target_url or "").strip()
+    if not raw:
+        return f"{client.BASE}/backend-api/conversation"
+
+    normalized = raw
+    if "://" not in normalized:
+        normalized = urljoin(f"{client.BASE}/", normalized.lstrip("/"))
+
+    parts = urlsplit(normalized)
+    if not parts.scheme or not parts.netloc:
+        return f"{client.BASE}/backend-api/conversation"
+
+    path = str(parts.path or "").rstrip("/")
+    if not path:
+        path = "/backend-api/conversation"
+    elif path.endswith("/backend-api"):
+        path = f"{path}/conversation"
+
+    return urlunsplit(parts._replace(path=path))
+
+
+def _official_target_origin(target_url: str, fallback: str) -> str:
+    parts = urlsplit(str(target_url or "").strip())
+    if parts.scheme and parts.netloc:
+        return urlunsplit((parts.scheme, parts.netloc, "", "", ""))
+    return str(fallback or "").rstrip("/")
+
+
 def _archive_conversation(client: ChatGPTClient, access_token: str, conversation_id: str) -> None:
     conversation_id = str(conversation_id or "").strip()
     if not conversation_id:
@@ -399,13 +429,15 @@ def _build_conversation_headers(
     access_token: str,
     requirements_token: str,
     proof_token: str,
+    target_url: str = "",
 ) -> tuple[str, dict[str, str]]:
-    url = f"{client.BASE}/backend-api/conversation"
+    url = _normalize_official_conversation_url(client, target_url)
+    origin = _official_target_origin(url, client.BASE)
     headers = client._headers(
         url,
         accept="text/event-stream",
-        referer=f"{client.BASE}/",
-        origin=client.BASE,
+        referer=f"{origin}/",
+        origin=origin,
         content_type="application/json",
         fetch_site="same-origin",
         extra_headers={
@@ -463,6 +495,7 @@ def _prepare_chat_request(
     model: str = "auto",
     conversation_id: str = "",
     parent_message_id: str = "",
+    target_url: str = "",
     chain_name: str,
 ) -> PreparedChatRequest:
     normalized_model = str(model or "auto").strip() or "auto"
@@ -493,7 +526,13 @@ def _prepare_chat_request(
     requirements_token, proof_token = _get_chat_requirements(client, access_token)
     logger.info("[chatgpt-message] chain=%s step=get_chat_requirements ok", chain_name)
 
-    url, headers = _build_conversation_headers(client, access_token, requirements_token, proof_token)
+    url, headers = _build_conversation_headers(
+        client,
+        access_token,
+        requirements_token,
+        proof_token,
+        target_url=target_url,
+    )
     payload = _build_conversation_payload(
         prompt,
         model=normalized_model,
@@ -568,6 +607,7 @@ def send_chat_message(
     model: str = "auto",
     conversation_id: str = "",
     parent_message_id: str = "",
+    target_url: str = "",
     archive_after_send: bool = False,
 ) -> ChatGPTMessageTestResult:
     if not proxy:
@@ -588,6 +628,7 @@ def send_chat_message(
             model=model,
             conversation_id=conversation_id,
             parent_message_id=parent_message_id,
+            target_url=target_url,
             chain_name=chain_name,
         )
         client = prepared.client
@@ -701,6 +742,7 @@ def stream_chat_message(
     model: str = "auto",
     conversation_id: str = "",
     parent_message_id: str = "",
+    target_url: str = "",
 ) -> Iterator[dict[str, Any]]:
     if not proxy:
         yield {
@@ -725,6 +767,7 @@ def stream_chat_message(
             model=model,
             conversation_id=conversation_id,
             parent_message_id=parent_message_id,
+            target_url=target_url,
             chain_name=chain_name,
         )
         client = prepared.client
@@ -736,6 +779,7 @@ def stream_chat_message(
                 "model": str(model or "auto").strip() or "auto",
                 "conversation_id": str(conversation_id or "").strip(),
                 "parent_message_id": str(parent_message_id or "").strip(),
+                "target_url": prepared.url,
                 "chain": chain_name,
                 "shared_test_flow": True,
                 "request_mode": "stream",
@@ -780,6 +824,7 @@ def stream_chat_message(
                         "used_proxy": result.used_proxy,
                         "updated_access_token": result.updated_access_token,
                         "updated_refresh_token": result.updated_refresh_token,
+                        "target_url": prepared.url,
                         "response_status_code": response.status_code,
                         "response_headers": response_headers,
                         "chain": chain_name,
@@ -849,6 +894,7 @@ def stream_chat_message(
                         "model": str(model or "auto").strip() or "auto",
                         "updated_access_token": prepared.updated_access_token,
                         "updated_refresh_token": prepared.updated_refresh_token,
+                        "target_url": prepared.url,
                         "debug_raw_lines": raw_line_samples,
                         "debug_payloads": payload_samples,
                         "response_headers": _response_header_snapshot(response),
@@ -879,6 +925,7 @@ def stream_chat_message(
                     "model": str(model or "auto").strip() or "auto",
                     "updated_access_token": prepared.updated_access_token,
                     "updated_refresh_token": prepared.updated_refresh_token,
+                    "target_url": prepared.url,
                     "chain": chain_name,
                     "shared_test_flow": True,
                 },
@@ -903,6 +950,7 @@ def stream_chat_message(
                 "message": str(e) or "ChatGPT 发消息测试失败",
                 "used_proxy": proxy,
                 "model": str(model or "auto").strip() or "auto",
+                "target_url": str(target_url or "").strip(),
                 "chain": chain_name,
                 "shared_test_flow": True,
             },
