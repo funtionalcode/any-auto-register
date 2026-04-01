@@ -279,6 +279,8 @@ interface TabConfig {
   sections: SectionConfig[]
 }
 
+type LogViewMode = 'live' | 'static'
+
 function formatResultText(data: unknown) {
   if (typeof data === 'string') return data
   try {
@@ -286,6 +288,258 @@ function formatResultText(data: unknown) {
   } catch {
     return String(data)
   }
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+function countSearchMatches(content: string, query: string) {
+  const text = String(content || '')
+  const keyword = String(query || '').trim()
+  if (!text || !keyword) return 0
+  const matches = text.match(new RegExp(escapeRegExp(keyword), 'gi'))
+  return matches ? matches.length : 0
+}
+
+function LogViewerModal({
+  open,
+  title,
+  path,
+  content,
+  loading,
+  truncated,
+  exists,
+  viewMode,
+  onViewModeChange,
+  onRefresh,
+  onCopy,
+  onClose,
+  refreshDisabled = false,
+}: {
+  open: boolean
+  title: string
+  path: string
+  content: string
+  loading: boolean
+  truncated: boolean
+  exists: boolean
+  viewMode: LogViewMode
+  onViewModeChange: (value: LogViewMode) => void
+  onRefresh: () => void
+  onCopy: () => void
+  onClose: () => void
+  refreshDisabled?: boolean
+}) {
+  const logContainerRef = useRef<HTMLPreElement>(null)
+  const matchRefs = useRef<(HTMLSpanElement | null)[]>([])
+  const [searchInput, setSearchInput] = useState('')
+  const [activeQuery, setActiveQuery] = useState('')
+  const [activeMatchIndex, setActiveMatchIndex] = useState(0)
+
+  const displayContent =
+    loading && !content
+      ? '日志加载中...'
+      : content || (exists ? '日志文件暂无内容。' : '日志文件尚未生成。')
+  const matchCount = countSearchMatches(displayContent, activeQuery)
+
+  const applySearch = (value: string) => {
+    const keyword = String(value || '').trim()
+    setSearchInput(value)
+    setActiveQuery(keyword)
+    setActiveMatchIndex(0)
+    if (keyword && countSearchMatches(displayContent, keyword) === 0) {
+      message.warning('未找到匹配内容')
+    }
+  }
+
+  const jumpMatch = (direction: 1 | -1) => {
+    if (matchCount <= 0) return
+    setActiveMatchIndex((current) => {
+      const next = current + direction
+      if (next < 0) return matchCount - 1
+      if (next >= matchCount) return 0
+      return next
+    })
+  }
+
+  useEffect(() => {
+    if (open) return
+    setSearchInput('')
+    setActiveQuery('')
+    setActiveMatchIndex(0)
+  }, [open])
+
+  useEffect(() => {
+    if (!activeQuery) {
+      setActiveMatchIndex(0)
+      return
+    }
+    if (matchCount === 0) {
+      if (activeMatchIndex !== 0) {
+        setActiveMatchIndex(0)
+      }
+      return
+    }
+    if (activeMatchIndex >= matchCount) {
+      setActiveMatchIndex(matchCount - 1)
+    }
+  }, [activeMatchIndex, activeQuery, matchCount])
+
+  useEffect(() => {
+    if (!open) return
+    if (activeQuery && matchCount > 0) {
+      matchRefs.current[activeMatchIndex]?.scrollIntoView({
+        block: 'center',
+        behavior: 'smooth',
+      })
+      return
+    }
+    if (viewMode !== 'live') return
+    const node = logContainerRef.current
+    if (node) {
+      node.scrollTop = node.scrollHeight
+    }
+  }, [activeMatchIndex, activeQuery, displayContent, matchCount, open, viewMode])
+
+  const renderContent = () => {
+    if (!activeQuery || matchCount === 0) {
+      return displayContent
+    }
+
+    const parts: React.ReactNode[] = []
+    const regex = new RegExp(escapeRegExp(activeQuery), 'gi')
+    let cursor = 0
+    let index = 0
+
+    matchRefs.current = []
+
+    for (const match of displayContent.matchAll(regex)) {
+      const matchedText = match[0] || ''
+      const start = match.index ?? 0
+      const end = start + matchedText.length
+      if (start > cursor) {
+        parts.push(displayContent.slice(cursor, start))
+      }
+      const isActive = index === activeMatchIndex
+      const currentIndex = index
+      parts.push(
+        <span
+          key={`log-match-${start}-${currentIndex}`}
+          ref={(node) => {
+            matchRefs.current[currentIndex] = node
+          }}
+          style={{
+            background: isActive ? '#f59e0b' : 'rgba(245, 158, 11, 0.28)',
+            color: '#111827',
+            borderRadius: 2,
+            padding: '0 1px',
+          }}
+        >
+          {matchedText}
+        </span>,
+      )
+      cursor = end
+      index += 1
+    }
+
+    if (cursor < displayContent.length) {
+      parts.push(displayContent.slice(cursor))
+    }
+
+    return parts
+  }
+
+  return (
+    <Modal
+      open={open}
+      title={title}
+      onCancel={onClose}
+      onOk={onClose}
+      width={960}
+      okText="关闭"
+      cancelButtonProps={{ style: { display: 'none' } }}
+    >
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8, gap: 12, flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+          <div style={{ fontSize: 12, color: '#7a8ba3' }}>
+            {path || '暂无日志文件路径'}
+            {truncated ? ' · 已截取最近日志' : ''}
+          </div>
+          <Segmented<LogViewMode>
+            size="small"
+            value={viewMode}
+            onChange={(value) => onViewModeChange(value)}
+            options={[
+              { label: '实时日志', value: 'live' },
+              { label: '静态日志', value: 'static' },
+            ]}
+          />
+        </div>
+        <Space>
+          <Button size="small" onClick={onRefresh} loading={loading} disabled={refreshDisabled}>
+            刷新日志
+          </Button>
+          <Button size="small" onClick={onCopy} disabled={!content}>
+            复制日志
+          </Button>
+        </Space>
+      </div>
+
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8, flexWrap: 'wrap' }}>
+        <Input.Search
+          allowClear
+          enterButton="搜索"
+          placeholder="搜索日志内容，支持高亮定位"
+          value={searchInput}
+          onChange={(event) => {
+            const nextValue = event.target.value
+            setSearchInput(nextValue)
+            if (!nextValue.trim()) {
+              setActiveQuery('')
+              setActiveMatchIndex(0)
+            }
+          }}
+          onSearch={applySearch}
+          style={{ flex: '1 1 320px', minWidth: 260 }}
+        />
+        <Button size="small" onClick={() => jumpMatch(-1)} disabled={matchCount <= 1}>
+          上一个
+        </Button>
+        <Button size="small" onClick={() => jumpMatch(1)} disabled={matchCount <= 1}>
+          下一个
+        </Button>
+        <Typography.Text type={activeQuery && matchCount === 0 ? 'danger' : 'secondary'} style={{ fontSize: 12 }}>
+          {activeQuery ? `匹配 ${matchCount === 0 ? 0 : activeMatchIndex + 1} / ${matchCount}` : '未搜索'}
+        </Typography.Text>
+      </div>
+
+      <pre
+        ref={logContainerRef}
+        style={{
+          margin: 0,
+          maxHeight: 520,
+          overflow: 'auto',
+          padding: 12,
+          borderRadius: 8,
+          background: 'rgba(127,127,127,0.08)',
+          fontSize: 12,
+          lineHeight: 1.5,
+          whiteSpace: 'pre-wrap',
+          wordBreak: 'break-word',
+        }}
+      >
+        {renderContent()}
+      </pre>
+      <div style={{ marginTop: 8, fontSize: 12, color: '#7a8ba3' }}>
+        {activeQuery
+          ? '搜索已启用：所有匹配会高亮，当前匹配会自动滚动到视口中央。'
+          : viewMode === 'live'
+            ? '实时日志模式：每秒自动刷新一次。'
+            : '静态日志模式：仅在点击“刷新日志”时更新。'}
+      </div>
+    </Modal>
+  )
 }
 
 function buildMailboxHtmlDocument(rawHtml: string) {
@@ -933,7 +1187,6 @@ function CFWorkerDomainPoolSection({ form }: { form: FormInstance }) {
 }
 
 function SolverStatus() {
-  type LogViewMode = 'live' | 'static'
   const [solver, setSolver] = useState<any | null>(null)
   const [loading, setLoading] = useState(false)
   const [restarting, setRestarting] = useState(false)
@@ -946,7 +1199,6 @@ function SolverStatus() {
     truncated: false,
     exists: false,
   })
-  const logContainerRef = useRef<HTMLPreElement>(null)
 
   const loadSolver = async (options?: { silent?: boolean }) => {
     const silent = Boolean(options?.silent)
@@ -1054,76 +1306,25 @@ function SolverStatus() {
     return () => window.clearInterval(timer)
   }, [logModal.open, logViewMode])
 
-  useEffect(() => {
-    if (!logModal.open || logViewMode !== 'live') return
-    const node = logContainerRef.current
-    if (node) {
-      node.scrollTop = node.scrollHeight
-    }
-  }, [logModal.content, logModal.open, logViewMode])
-
   const statusColor = solver?.running ? 'green' : solver?.process_alive ? 'gold' : 'default'
   const statusText = solver?.running ? '运行中' : solver?.process_alive ? '启动中' : loading ? '检测中' : '未运行'
 
   return (
     <>
-      <Modal
+      <LogViewerModal
         open={logModal.open}
         title="Turnstile Solver 日志"
-        onCancel={() => setLogModal((current) => ({ ...current, open: false }))}
-        onOk={() => setLogModal((current) => ({ ...current, open: false }))}
-        width={900}
-        okText="关闭"
-        cancelButtonProps={{ style: { display: 'none' } }}
-      >
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8, gap: 12, flexWrap: 'wrap' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
-            <div style={{ fontSize: 12, color: '#7a8ba3' }}>
-              {logModal.path || '暂无日志文件路径'}
-              {logModal.truncated ? ' · 已截取最近日志' : ''}
-            </div>
-            <Segmented<LogViewMode>
-              size="small"
-              value={logViewMode}
-              onChange={(value) => setLogViewMode(value)}
-              options={[
-                { label: '实时日志', value: 'live' },
-                { label: '静态日志', value: 'static' },
-              ]}
-            />
-          </div>
-          <Space>
-            <Button size="small" onClick={() => loadLog()} loading={logModal.loading}>
-              刷新日志
-            </Button>
-            <Button size="small" onClick={copyLogContent} disabled={!logModal.content}>
-              复制日志
-            </Button>
-          </Space>
-        </div>
-        <pre
-          ref={logContainerRef}
-          style={{
-            margin: 0,
-            maxHeight: 520,
-            overflow: 'auto',
-            padding: 12,
-            borderRadius: 8,
-            background: 'rgba(127,127,127,0.08)',
-            fontSize: 12,
-            lineHeight: 1.5,
-            whiteSpace: 'pre-wrap',
-            wordBreak: 'break-word',
-          }}
-        >
-          {logModal.loading && !logModal.content
-            ? '日志加载中...'
-            : logModal.content || (logModal.exists ? '日志文件暂无内容。' : '日志文件尚未生成。')}
-        </pre>
-        <div style={{ marginTop: 8, fontSize: 12, color: '#7a8ba3' }}>
-          {logViewMode === 'live' ? '实时日志模式：每秒自动刷新一次。' : '静态日志模式：仅在点击“刷新日志”时更新。'}
-        </div>
-      </Modal>
+        path={logModal.path}
+        content={logModal.content}
+        loading={logModal.loading}
+        truncated={logModal.truncated}
+        exists={logModal.exists}
+        viewMode={logViewMode}
+        onViewModeChange={setLogViewMode}
+        onRefresh={() => void loadLog()}
+        onCopy={copyLogContent}
+        onClose={() => setLogModal((current) => ({ ...current, open: false }))}
+      />
 
       <Card
         title="Turnstile Solver"
@@ -1163,7 +1364,6 @@ function SolverStatus() {
 }
 
 function ApplicationLogPanel() {
-  type LogViewMode = 'live' | 'static'
   const [logViewMode, setLogViewMode] = useState<LogViewMode>('live')
   const [logModal, setLogModal] = useState({
     open: false,
@@ -1173,7 +1373,6 @@ function ApplicationLogPanel() {
     truncated: false,
     exists: false,
   })
-  const logContainerRef = useRef<HTMLPreElement>(null)
 
   const loadLog = async (options?: { silent?: boolean }) => {
     const silent = Boolean(options?.silent)
@@ -1230,73 +1429,22 @@ function ApplicationLogPanel() {
     return () => window.clearInterval(timer)
   }, [logModal.open, logViewMode])
 
-  useEffect(() => {
-    if (!logModal.open || logViewMode !== 'live') return
-    const node = logContainerRef.current
-    if (node) {
-      node.scrollTop = node.scrollHeight
-    }
-  }, [logModal.content, logModal.open, logViewMode])
-
   return (
     <>
-      <Modal
+      <LogViewerModal
         open={logModal.open}
         title="后端应用日志"
-        onCancel={() => setLogModal((current) => ({ ...current, open: false }))}
-        onOk={() => setLogModal((current) => ({ ...current, open: false }))}
-        width={900}
-        okText="关闭"
-        cancelButtonProps={{ style: { display: 'none' } }}
-      >
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8, gap: 12, flexWrap: 'wrap' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
-            <div style={{ fontSize: 12, color: '#7a8ba3' }}>
-              {logModal.path || '暂无日志文件路径'}
-              {logModal.truncated ? ' · 已截取最近日志' : ''}
-            </div>
-            <Segmented<LogViewMode>
-              size="small"
-              value={logViewMode}
-              onChange={(value) => setLogViewMode(value)}
-              options={[
-                { label: '实时日志', value: 'live' },
-                { label: '静态日志', value: 'static' },
-              ]}
-            />
-          </div>
-          <Space>
-            <Button size="small" onClick={() => loadLog()} loading={logModal.loading}>
-              刷新日志
-            </Button>
-            <Button size="small" onClick={copyLogContent} disabled={!logModal.content}>
-              复制日志
-            </Button>
-          </Space>
-        </div>
-        <pre
-          ref={logContainerRef}
-          style={{
-            margin: 0,
-            maxHeight: 520,
-            overflow: 'auto',
-            padding: 12,
-            borderRadius: 8,
-            background: 'rgba(127,127,127,0.08)',
-            fontSize: 12,
-            lineHeight: 1.5,
-            whiteSpace: 'pre-wrap',
-            wordBreak: 'break-word',
-          }}
-        >
-          {logModal.loading && !logModal.content
-            ? '日志加载中...'
-            : logModal.content || (logModal.exists ? '日志文件暂无内容。' : '日志文件尚未生成。')}
-        </pre>
-        <div style={{ marginTop: 8, fontSize: 12, color: '#7a8ba3' }}>
-          {logViewMode === 'live' ? '实时日志模式：每秒自动刷新一次。' : '静态日志模式：仅在点击“刷新日志”时更新。'}
-        </div>
-      </Modal>
+        path={logModal.path}
+        content={logModal.content}
+        loading={logModal.loading}
+        truncated={logModal.truncated}
+        exists={logModal.exists}
+        viewMode={logViewMode}
+        onViewModeChange={setLogViewMode}
+        onRefresh={() => void loadLog()}
+        onCopy={copyLogContent}
+        onClose={() => setLogModal((current) => ({ ...current, open: false }))}
+      />
 
       <Card
         title="后端应用日志"
@@ -1318,7 +1466,6 @@ function ApplicationLogPanel() {
 }
 
 function RequestLogPanel({ form }: { form: FormInstance }) {
-  type LogViewMode = 'live' | 'static'
   const loggingEnabled = String(Form.useWatch('request_logging_enabled', form) || '0')
   const [logViewMode, setLogViewMode] = useState<LogViewMode>('live')
   const [logModal, setLogModal] = useState({
@@ -1329,7 +1476,6 @@ function RequestLogPanel({ form }: { form: FormInstance }) {
     truncated: false,
     exists: false,
   })
-  const logContainerRef = useRef<HTMLPreElement>(null)
 
   const loadLog = async (options?: { silent?: boolean }) => {
     const silent = Boolean(options?.silent)
@@ -1386,73 +1532,22 @@ function RequestLogPanel({ form }: { form: FormInstance }) {
     return () => window.clearInterval(timer)
   }, [logModal.open, logViewMode])
 
-  useEffect(() => {
-    if (!logModal.open || logViewMode !== 'live') return
-    const node = logContainerRef.current
-    if (node) {
-      node.scrollTop = node.scrollHeight
-    }
-  }, [logModal.content, logModal.open, logViewMode])
-
   return (
     <>
-      <Modal
+      <LogViewerModal
         open={logModal.open}
         title="接口请求日志"
-        onCancel={() => setLogModal((current) => ({ ...current, open: false }))}
-        onOk={() => setLogModal((current) => ({ ...current, open: false }))}
-        width={900}
-        okText="关闭"
-        cancelButtonProps={{ style: { display: 'none' } }}
-      >
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8, gap: 12, flexWrap: 'wrap' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
-            <div style={{ fontSize: 12, color: '#7a8ba3' }}>
-              {logModal.path || '暂无日志文件路径'}
-              {logModal.truncated ? ' · 已截取最近日志' : ''}
-            </div>
-            <Segmented<LogViewMode>
-              size="small"
-              value={logViewMode}
-              onChange={(value) => setLogViewMode(value)}
-              options={[
-                { label: '实时日志', value: 'live' },
-                { label: '静态日志', value: 'static' },
-              ]}
-            />
-          </div>
-          <Space>
-            <Button size="small" onClick={() => loadLog()} loading={logModal.loading}>
-              刷新日志
-            </Button>
-            <Button size="small" onClick={copyLogContent} disabled={!logModal.content}>
-              复制日志
-            </Button>
-          </Space>
-        </div>
-        <pre
-          ref={logContainerRef}
-          style={{
-            margin: 0,
-            maxHeight: 520,
-            overflow: 'auto',
-            padding: 12,
-            borderRadius: 8,
-            background: 'rgba(127,127,127,0.08)',
-            fontSize: 12,
-            lineHeight: 1.5,
-            whiteSpace: 'pre-wrap',
-            wordBreak: 'break-word',
-          }}
-        >
-          {logModal.loading && !logModal.content
-            ? '日志加载中...'
-            : logModal.content || (logModal.exists ? '日志文件暂无内容。' : '日志文件尚未生成。')}
-        </pre>
-        <div style={{ marginTop: 8, fontSize: 12, color: '#7a8ba3' }}>
-          {logViewMode === 'live' ? '实时日志模式：每秒自动刷新一次。' : '静态日志模式：仅在点击“刷新日志”时更新。'}
-        </div>
-      </Modal>
+        path={logModal.path}
+        content={logModal.content}
+        loading={logModal.loading}
+        truncated={logModal.truncated}
+        exists={logModal.exists}
+        viewMode={logViewMode}
+        onViewModeChange={setLogViewMode}
+        onRefresh={() => void loadLog()}
+        onCopy={copyLogContent}
+        onClose={() => setLogModal((current) => ({ ...current, open: false }))}
+      />
 
       <Card
         title="接口请求日志"
@@ -1476,7 +1571,6 @@ function RequestLogPanel({ form }: { form: FormInstance }) {
 }
 
 function IntegrationsPanel() {
-  type LogViewMode = 'live' | 'static'
   const [items, setItems] = useState<any[]>([])
   const [loading, setLoading] = useState(false)
   const [busy, setBusy] = useState('')
@@ -1497,7 +1591,6 @@ function IntegrationsPanel() {
     truncated: false,
     exists: false,
   })
-  const logContainerRef = useRef<HTMLPreElement>(null)
 
   const showResultModal = (title: string, data: unknown, ok = true) => {
     setResultModal({
@@ -1574,14 +1667,6 @@ function IntegrationsPanel() {
     }, 1000)
     return () => window.clearInterval(timer)
   }, [logModal.open, logModal.name, logViewMode])
-
-  useEffect(() => {
-    if (!logModal.open || logViewMode !== 'live') return
-    const node = logContainerRef.current
-    if (node) {
-      node.scrollTop = node.scrollHeight
-    }
-  }, [logModal.content, logModal.open, logViewMode])
 
   const doAction = async (key: string, request: Promise<any>) => {
     setBusy(key)
@@ -1668,63 +1753,24 @@ function IntegrationsPanel() {
         </pre>
       </Modal>
 
-      <Modal
+      <LogViewerModal
         open={logModal.open}
         title={logModal.title}
-        onCancel={() => setLogModal((current) => ({ ...current, open: false }))}
-        onOk={() => setLogModal((current) => ({ ...current, open: false }))}
-        width={900}
-        okText="关闭"
-        cancelButtonProps={{ style: { display: 'none' } }}
-      >
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8, gap: 12, flexWrap: 'wrap' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
-            <div style={{ fontSize: 12, color: '#7a8ba3' }}>
-              {logModal.path || '暂无日志文件路径'}
-              {logModal.truncated ? ' · 已截取最近日志' : ''}
-            </div>
-            <Segmented<LogViewMode>
-              size="small"
-              value={logViewMode}
-              onChange={(value) => setLogViewMode(value)}
-              options={[
-                { label: '实时日志', value: 'live' },
-                { label: '静态日志', value: 'static' },
-              ]}
-            />
-          </div>
-          <Space>
-            <Button size="small" onClick={() => loadLog(logModal.name)} loading={logModal.loading} disabled={!logModal.name}>
-              刷新日志
-            </Button>
-            <Button size="small" onClick={copyLogContent} disabled={!logModal.content}>
-              复制日志
-            </Button>
-          </Space>
-        </div>
-        <pre
-          ref={logContainerRef}
-          style={{
-            margin: 0,
-            maxHeight: 520,
-            overflow: 'auto',
-            padding: 12,
-            borderRadius: 8,
-            background: 'rgba(127,127,127,0.08)',
-            fontSize: 12,
-            lineHeight: 1.5,
-            whiteSpace: 'pre-wrap',
-            wordBreak: 'break-word',
-          }}
-        >
-          {logModal.loading && !logModal.content
-            ? '日志加载中...'
-            : logModal.content || (logModal.exists ? '日志文件暂无内容。' : '日志文件尚未生成。')}
-        </pre>
-        <div style={{ marginTop: 8, fontSize: 12, color: '#7a8ba3' }}>
-          {logViewMode === 'live' ? '实时日志模式：每秒自动刷新一次。' : '静态日志模式：仅在点击“刷新日志”时更新。'}
-        </div>
-      </Modal>
+        path={logModal.path}
+        content={logModal.content}
+        loading={logModal.loading}
+        truncated={logModal.truncated}
+        exists={logModal.exists}
+        viewMode={logViewMode}
+        onViewModeChange={setLogViewMode}
+        onRefresh={() => {
+          if (!logModal.name) return
+          void loadLog(logModal.name)
+        }}
+        onCopy={copyLogContent}
+        onClose={() => setLogModal((current) => ({ ...current, open: false }))}
+        refreshDisabled={!logModal.name}
+      />
 
       <Card title="批量操作">
         <Space wrap>

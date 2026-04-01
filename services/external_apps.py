@@ -71,7 +71,7 @@ _STARTING: set[str] = set()
 _LOCK = threading.Lock()
 _MANAGED_SERVICE_NAMES = ("cliproxyapi", "grok2api")
 _MANAGED_SERVICE_DEFAULTS = {
-    "cliproxyapi": {"installed": True, "started": True},
+    "cliproxyapi": {"installed": False, "started": False},
     "grok2api": {"installed": True, "started": True},
 }
 _BOOTSTRAP_THREAD: threading.Thread | None = None
@@ -123,6 +123,25 @@ def _persist_service_state(name: str, installed: bool | None = None, started: bo
         _set_setting(_service_state_key(name, "started"), "true" if started else "false")
 
 
+def _migrate_managed_service_defaults(name: str, raw_installed: str, raw_started: str) -> tuple[str, str]:
+    if name != "cliproxyapi":
+        return raw_installed, raw_started
+
+    migrated_key = _service_state_key(name, "defaults_migrated_v2")
+    if _bool_setting(_get_setting(migrated_key, ""), default=False):
+        return raw_installed, raw_started
+
+    normalized_installed = str(raw_installed or "").strip().lower()
+    normalized_started = str(raw_started or "").strip().lower()
+    if normalized_installed == "true" and normalized_started == "true" and not _repo_path(name).exists():
+        _persist_service_state(name, installed=False, started=False)
+        raw_installed = "false"
+        raw_started = "false"
+
+    _set_setting(migrated_key, "true")
+    return raw_installed, raw_started
+
+
 def _load_service_state(name: str) -> dict[str, bool]:
     if name not in _SERVICE_META:
         raise KeyError(name)
@@ -131,6 +150,7 @@ def _load_service_state(name: str) -> dict[str, bool]:
     started_key = _service_state_key(name, "started")
     raw_installed = str(_get_setting(installed_key, "") or "").strip()
     raw_started = str(_get_setting(started_key, "") or "").strip()
+    raw_installed, raw_started = _migrate_managed_service_defaults(name, raw_installed, raw_started)
     managed_defaults = _MANAGED_SERVICE_DEFAULTS.get(name)
 
     if managed_defaults and not raw_installed and not raw_started:

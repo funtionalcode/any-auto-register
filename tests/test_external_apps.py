@@ -2,13 +2,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from core.log_utils import clean_log_text
 from services import external_apps
 
 
 class ExternalAppsConfigTests(unittest.TestCase):
     def test_clean_log_text_strips_ansi_escape_sequences(self):
         raw = "\x1b[32m2026-03-31 19:01:22\x1b[0m | \x1b[1mINFO\x1b[0m | [36mscheduler.py:50[0m - ok"
-        cleaned = external_apps._clean_log_text(raw)
+        cleaned = clean_log_text(raw)
 
         self.assertEqual(cleaned, "2026-03-31 19:01:22 | INFO | scheduler.py:50 - ok")
 
@@ -92,7 +93,7 @@ remote-management:
         self.assertRegex(updated, r'  secret-key: "?new-secret"?')
         self.assertIn("  disable-control-panel: false", updated)
 
-    def test_managed_service_defaults_to_installed_and_started(self):
+    def test_cliproxyapi_managed_service_defaults_to_disabled(self):
         store = {}
         old_get_setting = external_apps._get_setting
         old_set_setting = external_apps._set_setting
@@ -105,15 +106,33 @@ remote-management:
             external_apps._get_setting = old_get_setting
             external_apps._set_setting = old_set_setting
 
+        self.assertFalse(state["installed"])
+        self.assertFalse(state["started"])
+        self.assertTrue(state["managed"])
+        self.assertEqual(store["external_apps_cliproxyapi_installed"], "false")
+        self.assertEqual(store["external_apps_cliproxyapi_started"], "false")
+
+    def test_grok2api_managed_service_defaults_to_installed_and_started(self):
+        store = {}
+        old_get_setting = external_apps._get_setting
+        old_set_setting = external_apps._set_setting
+
+        external_apps._get_setting = lambda key, default="": store.get(key, default)
+        external_apps._set_setting = lambda key, value: store.__setitem__(key, str(value))
+        try:
+            state = external_apps._load_service_state("grok2api")
+        finally:
+            external_apps._get_setting = old_get_setting
+            external_apps._set_setting = old_set_setting
+
         self.assertTrue(state["installed"])
         self.assertTrue(state["started"])
         self.assertTrue(state["managed"])
-        self.assertEqual(store["external_apps_cliproxyapi_installed"], "true")
-        self.assertEqual(store["external_apps_cliproxyapi_started"], "true")
+        self.assertEqual(store["external_apps_grok2api_installed"], "true")
+        self.assertEqual(store["external_apps_grok2api_started"], "true")
 
-    def test_ensure_managed_services_ready_installs_and_starts_missing_service(self):
+    def test_ensure_managed_services_ready_skips_uninstalled_cliproxyapi_by_default(self):
         store = {}
-        running = set()
         calls = []
 
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -144,9 +163,9 @@ remote-management:
                     "desired_installed": desired["installed"],
                     "desired_running": desired["started"],
                     "managed": desired["managed"],
-                    "running": name in running,
+                    "running": False,
                     "starting": False,
-                    "process_alive": name in running,
+                    "process_alive": False,
                     "pid": None,
                     "log_path": "",
                     "last_error": external_apps._LAST_ERROR.get(name, ""),
@@ -155,17 +174,10 @@ remote-management:
 
             def fake_install(name: str, *, persist_state: bool = True):
                 calls.append(("install", name, persist_state))
-                repo = base_dir / name
-                repo.mkdir(parents=True, exist_ok=True)
-                if persist_state:
-                    external_apps._persist_service_state(name, installed=True)
                 return fake_status_one(name)
 
             def fake_start(name: str, *, persist_state: bool = True):
                 calls.append(("start", name, persist_state))
-                running.add(name)
-                if persist_state:
-                    external_apps._persist_service_state(name, installed=True, started=True)
                 return fake_status_one(name)
 
             external_apps._status_one = fake_status_one
@@ -182,14 +194,39 @@ remote-management:
                 external_apps.install = old_install
                 external_apps.start = old_start
 
-        self.assertEqual(
-            calls,
-            [("install", "cliproxyapi", False), ("start", "cliproxyapi", False)],
-        )
-        self.assertTrue(results[0]["repo_exists"])
-        self.assertTrue(results[0]["running"])
-        self.assertEqual(store["external_apps_cliproxyapi_installed"], "true")
-        self.assertEqual(store["external_apps_cliproxyapi_started"], "true")
+        self.assertEqual(calls, [])
+        self.assertFalse(results[0]["repo_exists"])
+        self.assertFalse(results[0]["running"])
+        self.assertEqual(store["external_apps_cliproxyapi_installed"], "false")
+        self.assertEqual(store["external_apps_cliproxyapi_started"], "false")
+
+    def test_cliproxyapi_migrates_legacy_auto_managed_state_when_repo_missing(self):
+        store = {
+            "external_apps_cliproxyapi_installed": "true",
+            "external_apps_cliproxyapi_started": "true",
+        }
+
+        old_get_setting = external_apps._get_setting
+        old_set_setting = external_apps._set_setting
+        old_repo_path = external_apps._repo_path
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            base_dir = Path(tmp_dir)
+            external_apps._get_setting = lambda key, default="": store.get(key, default)
+            external_apps._set_setting = lambda key, value: store.__setitem__(key, str(value))
+            external_apps._repo_path = lambda name: base_dir / name
+            try:
+                state = external_apps._load_service_state("cliproxyapi")
+            finally:
+                external_apps._get_setting = old_get_setting
+                external_apps._set_setting = old_set_setting
+                external_apps._repo_path = old_repo_path
+
+        self.assertFalse(state["installed"])
+        self.assertFalse(state["started"])
+        self.assertEqual(store["external_apps_cliproxyapi_installed"], "false")
+        self.assertEqual(store["external_apps_cliproxyapi_started"], "false")
+        self.assertEqual(store["external_apps_cliproxyapi_defaults_migrated_v2"], "true")
 
 
 if __name__ == "__main__":

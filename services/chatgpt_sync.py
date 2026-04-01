@@ -35,14 +35,14 @@ def _get_config_value(key: str, default: str = "") -> str:
 def _resolve_cliproxy_target(api_url: str | None = None, api_key: str | None = None) -> tuple[str | None, str | None]:
     resolved_url = (
         str(api_url or "").strip()
-        or _get_config_value("cliproxyapi_base_url")
         or _get_config_value("cpa_api_url")
+        or _get_config_value("cliproxyapi_base_url")
         or None
     )
     resolved_key = (
         str(api_key or "").strip()
-        or _get_config_value("cliproxyapi_management_key")
         or _get_config_value("cpa_api_key")
+        or _get_config_value("cliproxyapi_management_key")
         or None
     )
     return resolved_url, resolved_key

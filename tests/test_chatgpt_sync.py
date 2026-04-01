@@ -178,6 +178,120 @@ class ChatGPTBackfillTests(unittest.TestCase):
         self.assertTrue(result["uploaded"])
         self.assertEqual(sync_mock.call_count, 2)
 
+    def test_backfill_prefers_cpa_config_over_legacy_cliproxy_config(self):
+        account = self._make_account()
+        extra = account.get_extra()
+        extra["sync_statuses"] = {
+            "cliproxyapi": {
+                "uploaded": False,
+                "remote_state": "not_found",
+                "message": "未发现",
+            }
+        }
+        account.set_extra(extra)
+
+        config = {
+            "cpa_api_url": "https://cpa.example.com",
+            "cpa_api_key": "cpa-key",
+            "cliproxyapi_base_url": "http://127.0.0.1:8317",
+            "cliproxyapi_management_key": "cliproxyapi",
+        }
+
+        with mock.patch(
+            "services.chatgpt_sync._get_config_value",
+            side_effect=lambda key, default="": config.get(key, default),
+        ):
+            with mock.patch(
+                "services.cliproxyapi_sync.sync_chatgpt_cliproxyapi_status",
+                return_value={
+                    "uploaded": True,
+                    "remote_state": "usable",
+                    "message": "远端可用",
+                },
+            ) as sync_mock:
+                with mock.patch(
+                    "platforms.chatgpt.status_probe.probe_local_chatgpt_status",
+                    return_value={
+                        "auth": {
+                            "state": "access_token_valid",
+                            "http_status": 200,
+                            "error_code": "",
+                            "message": "ok",
+                        },
+                        "subscription": {"plan": "free"},
+                        "codex": {"state": "usable"},
+                    },
+                ):
+                    with mock.patch(
+                        "services.chatgpt_sync.upload_account_model_to_cpa",
+                        return_value=(True, "上传成功"),
+                    ) as upload_mock:
+                        result = backfill_chatgpt_account_to_cpa(account, commit=False)
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["uploaded"])
+        self.assertEqual(upload_mock.call_args.kwargs["api_url"], "https://cpa.example.com")
+        self.assertEqual(upload_mock.call_args.kwargs["api_key"], "cpa-key")
+        self.assertEqual(sync_mock.call_args.kwargs["api_url"], "https://cpa.example.com")
+        self.assertEqual(sync_mock.call_args.kwargs["api_key"], "cpa-key")
+
+    def test_backfill_uses_legacy_cliproxy_config_as_fallback(self):
+        account = self._make_account()
+        extra = account.get_extra()
+        extra["sync_statuses"] = {
+            "cliproxyapi": {
+                "uploaded": False,
+                "remote_state": "not_found",
+                "message": "未发现",
+            }
+        }
+        account.set_extra(extra)
+
+        config = {
+            "cpa_api_url": "",
+            "cpa_api_key": "",
+            "cliproxyapi_base_url": "http://127.0.0.1:8317",
+            "cliproxyapi_management_key": "cliproxyapi",
+        }
+
+        with mock.patch(
+            "services.chatgpt_sync._get_config_value",
+            side_effect=lambda key, default="": config.get(key, default),
+        ):
+            with mock.patch(
+                "services.cliproxyapi_sync.sync_chatgpt_cliproxyapi_status",
+                return_value={
+                    "uploaded": True,
+                    "remote_state": "usable",
+                    "message": "远端可用",
+                },
+            ) as sync_mock:
+                with mock.patch(
+                    "platforms.chatgpt.status_probe.probe_local_chatgpt_status",
+                    return_value={
+                        "auth": {
+                            "state": "access_token_valid",
+                            "http_status": 200,
+                            "error_code": "",
+                            "message": "ok",
+                        },
+                        "subscription": {"plan": "free"},
+                        "codex": {"state": "usable"},
+                    },
+                ):
+                    with mock.patch(
+                        "services.chatgpt_sync.upload_account_model_to_cpa",
+                        return_value=(True, "上传成功"),
+                    ) as upload_mock:
+                        result = backfill_chatgpt_account_to_cpa(account, commit=False)
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["uploaded"])
+        self.assertEqual(upload_mock.call_args.kwargs["api_url"], "http://127.0.0.1:8317")
+        self.assertEqual(upload_mock.call_args.kwargs["api_key"], "cliproxyapi")
+        self.assertEqual(sync_mock.call_args.kwargs["api_url"], "http://127.0.0.1:8317")
+        self.assertEqual(sync_mock.call_args.kwargs["api_key"], "cliproxyapi")
+
 
 if __name__ == "__main__":
     unittest.main()
