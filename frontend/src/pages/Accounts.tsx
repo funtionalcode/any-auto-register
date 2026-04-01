@@ -27,6 +27,7 @@ import {
   MoreOutlined,
   DeleteOutlined,
   SafetyOutlined,
+  MessageOutlined,
 } from '@ant-design/icons'
 import { apiFetch } from '@/lib/utils'
 import { normalizeExecutorForPlatform } from '@/lib/registerOptions'
@@ -53,6 +54,7 @@ interface AccountCheckItem {
   valid: boolean
   status: 'valid' | 'invalid' | 'error'
   message: string
+  used_proxy?: string
 }
 
 interface AccountBatchCheckResponse {
@@ -711,6 +713,16 @@ export default function Accounts() {
       key: 'action',
       render: (_: any, record: any) => (
         <Space>
+          {currentPlatform === 'chatgpt' ? (
+            <Button
+              type="link"
+              size="small"
+              icon={<MessageOutlined />}
+              onClick={() => window.open(`/accounts/chatgpt/${record.id}/conversation`, '_blank', 'noopener,noreferrer')}
+            >
+              对话
+            </Button>
+          ) : null}
           <Button
             type="link"
             size="small"
@@ -1093,6 +1105,7 @@ export default function Accounts() {
                         <Tag color={meta.color}>{meta.label}</Tag>
                         <Text style={{ fontFamily: 'monospace' }}>{item.email}</Text>
                         <Text type="secondary">#{item.id}</Text>
+                        {item.used_proxy ? <Tag color="processing">代理: {item.used_proxy}</Tag> : null}
                       </Space>
                       <Text type="secondary">{item.message || '-'}</Text>
                     </Space>

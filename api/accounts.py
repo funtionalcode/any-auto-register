@@ -3,16 +3,18 @@ import io
 import json
 import logging
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import Optional
+from urllib.parse import urlsplit, urlunsplit
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlmodel import Session, func, select
 
 from core.base_platform import Account, AccountStatus, RegisterConfig
 from core.config_store import config_store
-from core.db import AccountModel, get_session
+from core.db import AccountModel, engine, get_session
 from core.registry import get, load_all
 
 logger = logging.getLogger(__name__)
@@ -46,6 +48,21 @@ class BatchDeleteRequest(BaseModel):
 
 class BatchCheckRequest(BaseModel):
     ids: list[int]
+
+
+class ChatGPTConversationRequest(BaseModel):
+    prompt: str
+    mode: str = "official"
+    conversation_id: Optional[str] = None
+    parent_message_id: Optional[str] = None
+    proxy: Optional[str] = None
+    target_url: Optional[str] = None
+    api_key: Optional[str] = None
+    model: Optional[str] = None
+    messages: list[dict] = Field(default_factory=list)
+
+
+DEFAULT_CHATGPT_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 
 
 def _normalize_account_ids(ids: list[int], *, max_size: int = 200) -> list[int]:
@@ -99,18 +116,315 @@ def _build_runtime_account(acc: AccountModel) -> Account:
     )
 
 
+def _get_chatgpt_account_or_404(account_id: int, session: Session) -> AccountModel:
+    acc = session.get(AccountModel, account_id)
+    if not acc or acc.platform != "chatgpt":
+        raise HTTPException(404, "账号不存在")
+    return acc
+
+
+def _build_chatgpt_message_account(acc: AccountModel, extra: dict) -> SimpleNamespace:
+    return SimpleNamespace(
+        email=acc.email,
+        access_token=str(extra.get("access_token") or acc.token or "").strip(),
+        refresh_token=str(extra.get("refresh_token") or "").strip(),
+        id_token=str(extra.get("id_token") or "").strip(),
+        session_token=str(extra.get("session_token") or "").strip(),
+        client_id=str(extra.get("client_id") or DEFAULT_CHATGPT_CLIENT_ID).strip() or DEFAULT_CHATGPT_CLIENT_ID,
+        cookies=str(extra.get("cookies") or "").strip(),
+    )
+
+
+def _resolve_chatgpt_proxy(acc: AccountModel, extra: dict, preferred_proxy: str = "") -> str:
+    from core.proxy_pool import proxy_pool
+
+    proxy = str(preferred_proxy or "").strip()
+    if proxy:
+        return proxy
+
+    proxy = str(extra.get("test_proxy") or config_store.get("chatgpt_test_proxy", "") or "").strip()
+    if proxy:
+        return proxy
+
+    proxy = proxy_pool.get_next(region=acc.region or "") or proxy_pool.get_next() or ""
+    return str(proxy or "").strip()
+
+
+def _report_chatgpt_proxy_result(proxy: str, *, ok: bool, invalid: bool) -> None:
+    from core.proxy_pool import proxy_pool
+
+    normalized_proxy = str(proxy or "").strip()
+    if not normalized_proxy:
+        return
+    if ok or invalid:
+        proxy_pool.report_success(normalized_proxy)
+    else:
+        proxy_pool.report_fail(normalized_proxy)
+
+
+def _apply_chatgpt_message_result(
+    acc: AccountModel,
+    extra: dict,
+    *,
+    updated_access_token: str = "",
+    updated_refresh_token: str = "",
+    invalid: bool = False,
+) -> None:
+    changed = False
+
+    if updated_access_token:
+        extra["access_token"] = updated_access_token
+        acc.token = updated_access_token
+        changed = True
+    if updated_refresh_token:
+        extra["refresh_token"] = updated_refresh_token
+        changed = True
+    if invalid and acc.status != AccountStatus.INVALID.value:
+        acc.status = AccountStatus.INVALID.value
+        changed = True
+
+    if changed:
+        acc.extra_json = json.dumps(extra, ensure_ascii=False)
+    acc.updated_at = datetime.now(timezone.utc)
+
+
+def _persist_chatgpt_message_result(
+    account_id: int,
+    *,
+    updated_access_token: str = "",
+    updated_refresh_token: str = "",
+    invalid: bool = False,
+) -> None:
+    with Session(engine) as session:
+        acc = session.get(AccountModel, account_id)
+        if not acc or acc.platform != "chatgpt":
+            return
+        extra = _parse_account_extra(acc.extra_json)
+        _apply_chatgpt_message_result(
+            acc,
+            extra,
+            updated_access_token=updated_access_token,
+            updated_refresh_token=updated_refresh_token,
+            invalid=invalid,
+        )
+        session.add(acc)
+        session.commit()
+
+
+def _encode_sse(event: str, data: dict) -> str:
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+def _normalize_chat_messages(messages: list[dict], prompt: str) -> list[dict[str, str]]:
+    normalized: list[dict[str, str]] = []
+    for item in messages or []:
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role") or "").strip().lower()
+        content = str(item.get("content") or "").strip()
+        if role not in {"system", "user", "assistant"} or not content:
+            continue
+        normalized.append({"role": role, "content": content})
+
+    prompt_text = str(prompt or "").strip()
+    if not prompt_text:
+        return normalized
+    if normalized and normalized[-1]["role"] == "user" and normalized[-1]["content"] == prompt_text:
+        return normalized
+    normalized.append({"role": "user", "content": prompt_text})
+    return normalized
+
+
+def _normalize_openai_chat_url(target_url: str) -> str:
+    raw = str(target_url or "").strip()
+    if not raw:
+        return ""
+
+    parts = urlsplit(raw)
+    path = str(parts.path or "").rstrip("/")
+    if path.endswith("/chat/completions"):
+        return raw
+
+    next_path = f"{path}/chat/completions" if path else "/chat/completions"
+    if path.endswith("/v1"):
+        next_path = f"{path}/chat/completions"
+    return urlunsplit(parts._replace(path=next_path))
+
+
+def _stream_openai_compatible_chat(
+    *,
+    target_url: str,
+    api_key: str,
+    model: str,
+    messages: list[dict[str, str]],
+    proxy: str,
+) -> StreamingResponse:
+    import requests
+
+    from core.proxy_utils import build_requests_proxy_config
+
+    normalized_url = _normalize_openai_chat_url(target_url)
+    if not normalized_url:
+        raise HTTPException(400, "自定义对话 URL 不能为空")
+
+    def event_stream():
+        accumulated = ""
+        try:
+            yield _encode_sse(
+                "meta",
+                {
+                    "used_proxy": proxy,
+                    "target_url": normalized_url,
+                    "transport": "openai_compatible",
+                    "model": model,
+                },
+            )
+
+            response = requests.post(
+                normalized_url,
+                json={
+                    "model": model,
+                    "messages": messages,
+                    "stream": True,
+                },
+                headers={
+                    "Content-Type": "application/json",
+                    "Accept": "text/event-stream",
+                    **({"Authorization": f"Bearer {api_key}"} if str(api_key or "").strip() else {}),
+                },
+                proxies=build_requests_proxy_config(proxy),
+                timeout=180,
+                stream=True,
+            )
+
+            with response:
+                if response.status_code >= 400:
+                    _report_chatgpt_proxy_result(proxy, ok=False, invalid=False)
+                    yield _encode_sse(
+                        "error",
+                        {
+                            "ok": False,
+                            "invalid": False,
+                            "message": f"自定义接口调用失败: HTTP {response.status_code}",
+                            "response_text": response.text[:2000],
+                            "used_proxy": proxy,
+                            "target_url": normalized_url,
+                            "model": model,
+                        },
+                    )
+                    return
+
+                for raw_line in response.iter_lines(decode_unicode=True):
+                    line = str(raw_line or "").strip()
+                    if not line or not line.startswith("data:"):
+                        continue
+                    payload = line[5:].strip()
+                    if not payload:
+                        continue
+                    if payload == "[DONE]":
+                        break
+
+                    try:
+                        data = json.loads(payload)
+                    except Exception:
+                        continue
+
+                    delta = ""
+                    choices = data.get("choices")
+                    if isinstance(choices, list) and choices:
+                        first = choices[0] if isinstance(choices[0], dict) else {}
+                        delta_info = first.get("delta") if isinstance(first, dict) else {}
+                        if isinstance(delta_info, dict):
+                            content_value = delta_info.get("content")
+                            if isinstance(content_value, str):
+                                delta = content_value
+                            elif isinstance(content_value, list):
+                                parts: list[str] = []
+                                for item in content_value:
+                                    if isinstance(item, dict):
+                                        text = str(item.get("text") or "").strip()
+                                        if text:
+                                            parts.append(text)
+                                delta = "".join(parts)
+                        if not delta:
+                            message_data = first.get("message") if isinstance(first, dict) else {}
+                            if isinstance(message_data, dict):
+                                delta = str(message_data.get("content") or "")
+
+                    if not delta:
+                        continue
+
+                    accumulated += delta
+                    yield _encode_sse(
+                        "delta",
+                        {
+                            "delta": delta,
+                            "used_proxy": proxy,
+                            "target_url": normalized_url,
+                            "model": model,
+                        },
+                    )
+
+            if not accumulated:
+                _report_chatgpt_proxy_result(proxy, ok=False, invalid=False)
+                yield _encode_sse(
+                    "error",
+                    {
+                        "ok": False,
+                        "invalid": False,
+                        "message": "自定义接口已返回，但没有解析到回复内容",
+                        "used_proxy": proxy,
+                        "target_url": normalized_url,
+                        "model": model,
+                    },
+                )
+                return
+
+            _report_chatgpt_proxy_result(proxy, ok=True, invalid=False)
+            yield _encode_sse(
+                "done",
+                {
+                    "ok": True,
+                    "invalid": False,
+                    "message": f"自定义接口回复成功: {accumulated[:80]}",
+                    "response_excerpt": accumulated[:200],
+                    "response_text": accumulated,
+                    "used_proxy": proxy,
+                    "target_url": normalized_url,
+                    "model": model,
+                },
+            )
+        except Exception as e:
+            _report_chatgpt_proxy_result(proxy, ok=False, invalid=False)
+            yield _encode_sse(
+                "error",
+                {
+                    "ok": False,
+                    "invalid": False,
+                    "message": str(e) or "自定义接口对话失败",
+                    "used_proxy": proxy,
+                    "target_url": normalized_url,
+                    "model": model,
+                },
+            )
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 def _check_account_validity(acc: AccountModel, *, config: RegisterConfig | None = None) -> dict:
     if acc.platform == "chatgpt":
-        from core.proxy_pool import proxy_pool
         from platforms.chatgpt.message_tester import send_test_message
 
         extra = _parse_account_extra(acc.extra_json)
-        preferred_proxy = str(
-            extra.get("test_proxy")
-            or config_store.get("chatgpt_test_proxy", "")
-            or ""
-        ).strip()
-        proxy = preferred_proxy or proxy_pool.get_next(region=acc.region or "") or proxy_pool.get_next()
+        proxy = _resolve_chatgpt_proxy(acc, extra)
         if not proxy:
             return {
                 "id": acc.id,
@@ -121,34 +435,16 @@ def _check_account_validity(acc: AccountModel, *, config: RegisterConfig | None 
                 "message": "未配置可用代理，无法执行 ChatGPT 发消息测试",
             }
 
-        account = _build_runtime_account(acc)
-
-        class _ChatGPTAccount:
-            pass
-
-        chatgpt_account = _ChatGPTAccount()
-        chatgpt_account.email = account.email
-        chatgpt_account.access_token = extra.get("access_token") or acc.token
-        chatgpt_account.refresh_token = extra.get("refresh_token", "")
-        chatgpt_account.id_token = extra.get("id_token", "")
-        chatgpt_account.session_token = extra.get("session_token", "")
-        chatgpt_account.client_id = extra.get("client_id", "app_EMoamEEZ73f0CkXaXp7hrann")
-        chatgpt_account.cookies = extra.get("cookies", "")
-
+        chatgpt_account = _build_chatgpt_message_account(acc, extra)
         result = send_test_message(chatgpt_account, proxy=proxy)
-
-        if result.updated_access_token:
-            extra["access_token"] = result.updated_access_token
-            acc.token = result.updated_access_token
-        if result.updated_refresh_token:
-            extra["refresh_token"] = result.updated_refresh_token
-        if result.updated_access_token or result.updated_refresh_token:
-            acc.extra_json = json.dumps(extra, ensure_ascii=False)
-
-        if result.ok or result.invalid:
-            proxy_pool.report_success(proxy)
-        else:
-            proxy_pool.report_fail(proxy)
+        _apply_chatgpt_message_result(
+            acc,
+            extra,
+            updated_access_token=result.updated_access_token,
+            updated_refresh_token=result.updated_refresh_token,
+            invalid=result.invalid,
+        )
+        _report_chatgpt_proxy_result(result.used_proxy or proxy, ok=result.ok, invalid=result.invalid)
 
         return {
             "id": acc.id,
@@ -157,6 +453,7 @@ def _check_account_validity(acc: AccountModel, *, config: RegisterConfig | None 
             "valid": result.ok,
             "status": "valid" if result.ok else ("invalid" if result.invalid else "error"),
             "message": result.message,
+            "used_proxy": result.used_proxy or proxy,
         }
 
     PlatformCls = get(acc.platform)
@@ -386,6 +683,96 @@ def batch_check_accounts(
         "not_found": not_found,
         "items": results,
     }
+
+
+@router.post("/{account_id}/chatgpt/chat-stream")
+def chatgpt_chat_stream(
+    account_id: int,
+    body: ChatGPTConversationRequest,
+    session: Session = Depends(get_session),
+):
+    from platforms.chatgpt.message_tester import stream_chat_message
+
+    acc = _get_chatgpt_account_or_404(account_id, session)
+    extra = _parse_account_extra(acc.extra_json)
+    prompt = str(body.prompt or "").strip()
+    mode = str(body.mode or "official").strip().lower() or "official"
+    if not prompt:
+        raise HTTPException(400, "消息不能为空")
+
+    proxy = _resolve_chatgpt_proxy(acc, extra, preferred_proxy=str(body.proxy or "").strip())
+    model = str(body.model or "").strip()
+    if mode == "custom_api":
+        return _stream_openai_compatible_chat(
+            target_url=str(body.target_url or "").strip(),
+            api_key=str(body.api_key or "").strip(),
+            model=model or "gpt-4o-mini",
+            messages=_normalize_chat_messages(body.messages, prompt),
+            proxy=proxy,
+        )
+
+    chatgpt_account = _build_chatgpt_message_account(acc, extra)
+    conversation_id = str(body.conversation_id or "").strip()
+    parent_message_id = str(body.parent_message_id or "").strip()
+
+    def event_stream():
+        proxy_reported = False
+        try:
+            for chunk in stream_chat_message(
+                chatgpt_account,
+                proxy=proxy,
+                prompt=prompt,
+                model=model or "auto",
+                conversation_id=conversation_id,
+                parent_message_id=parent_message_id,
+            ):
+                event_name = str(chunk.get("event") or "message").strip() or "message"
+                data = dict(chunk.get("data") or {})
+                if event_name == "meta":
+                    data.setdefault("used_proxy", proxy)
+                    data.setdefault("target_url", "https://chatgpt.com/backend-api/conversation")
+                    data.setdefault("model", model or "auto")
+                    data["account_id"] = int(acc.id or account_id)
+                    data["email"] = acc.email
+
+                if event_name in {"done", "error"} and not proxy_reported:
+                    used_proxy = str(data.get("used_proxy") or proxy).strip()
+                    _report_chatgpt_proxy_result(
+                        used_proxy,
+                        ok=bool(data.get("ok")),
+                        invalid=bool(data.get("invalid")),
+                    )
+                    _persist_chatgpt_message_result(
+                        int(acc.id or account_id),
+                        updated_access_token=str(data.get("updated_access_token") or "").strip(),
+                        updated_refresh_token=str(data.get("updated_refresh_token") or "").strip(),
+                        invalid=bool(data.get("invalid")),
+                    )
+                    proxy_reported = True
+
+                yield _encode_sse(event_name, data)
+        except Exception as e:
+            if not proxy_reported:
+                _report_chatgpt_proxy_result(proxy, ok=False, invalid=False)
+            yield _encode_sse(
+                "error",
+                {
+                    "ok": False,
+                    "invalid": False,
+                    "message": str(e) or "对话发送失败",
+                    "used_proxy": proxy,
+                },
+            )
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.post("/check-all")

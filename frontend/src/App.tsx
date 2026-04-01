@@ -13,6 +13,7 @@ import {
 import zhCN from 'antd/locale/zh_CN'
 import Dashboard from '@/pages/Dashboard'
 import Accounts from '@/pages/Accounts'
+import ChatGPTConversation from '@/pages/ChatGPTConversation'
 import Register from '@/pages/Register'
 import Proxies from '@/pages/Proxies'
 import Settings from '@/pages/Settings'
@@ -54,7 +55,14 @@ function AppContent() {
   const getSelectedKey = () => {
     const path = location.pathname
     if (path === '/') return ['/']
-    if (path.startsWith('/accounts')) return [path]
+    if (path === '/accounts') return ['/accounts']
+    if (path.startsWith('/accounts/')) {
+      const parts = path.split('/').filter(Boolean)
+      if (parts.length >= 2) {
+        return [`/accounts/${parts[1]}`]
+      }
+      return ['/accounts']
+    }
     if (path === '/history') return ['/history']
     if (path === '/proxies') return ['/proxies']
     if (path === '/settings') return ['/settings']
@@ -174,6 +182,7 @@ function AppContent() {
             <Routes>
               <Route path="/" element={<Dashboard />} />
               <Route path="/accounts" element={<Accounts />} />
+              <Route path="/accounts/chatgpt/:accountId/conversation" element={<ChatGPTConversation />} />
               <Route path="/accounts/:platform" element={<Accounts />} />
               <Route path="/register" element={<Register />} />
               <Route path="/history" element={<TaskHistory />} />
