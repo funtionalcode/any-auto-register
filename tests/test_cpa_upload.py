@@ -34,6 +34,8 @@ class CpaUploadTests(unittest.TestCase):
 
         self.assertFalse(ok)
         self.assertIn("服务异常", msg)
+        self.assertIn("接口返回:", msg)
+        self.assertIn('"message": "服务异常"', msg)
         self.assertIn("请求地址: https://cpa.example.com/v0/management/auth-files", msg)
         curl_mime_mock.return_value.close.assert_called_once()
 
@@ -54,6 +56,27 @@ class CpaUploadTests(unittest.TestCase):
 
         self.assertFalse(ok)
         self.assertIn("上传异常: connect reset", msg)
+        self.assertIn("请求地址: https://cpa.example.com/v0/management/auth-files", msg)
+        curl_mime_mock.return_value.close.assert_called_once()
+
+    def test_upload_to_cpa_includes_plain_response_text_in_error(self):
+        token_data = {"email": "demo@example.com"}
+
+        with mock.patch.object(cpa_upload, "CurlMime", return_value=mock.Mock()) as curl_mime_mock:
+            with mock.patch.object(
+                cpa_upload.cffi_requests,
+                "post",
+                return_value=_FakeResponse(502, payload=None, text="upstream gateway failed"),
+            ):
+                ok, msg = cpa_upload.upload_to_cpa(
+                    token_data,
+                    api_url="https://cpa.example.com",
+                    api_key="demo-key",
+                )
+
+        self.assertFalse(ok)
+        self.assertIn("上传失败: HTTP 502", msg)
+        self.assertIn("接口返回:\nupstream gateway failed", msg)
         self.assertIn("请求地址: https://cpa.example.com/v0/management/auth-files", msg)
         curl_mime_mock.return_value.close.assert_called_once()
 

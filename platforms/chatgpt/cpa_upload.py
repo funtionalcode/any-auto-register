@@ -25,6 +25,34 @@ def _with_request_url(message: str, request_url: str | None = None) -> str:
     return f"{detail} | 请求地址: {url}"
 
 
+def _compact_text(value: str, limit: int = 1200) -> str:
+    text = str(value or "").strip()
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]}\n...<truncated>"
+
+
+def _with_response_detail(message: str, response_detail=None) -> str:
+    detail = str(message or "").strip()
+    if response_detail in (None, "", {}):
+        return detail
+
+    try:
+        if isinstance(response_detail, (dict, list)):
+            rendered = json.dumps(response_detail, ensure_ascii=False, indent=2)
+        else:
+            rendered = str(response_detail)
+    except Exception:
+        rendered = str(response_detail)
+
+    rendered = _compact_text(rendered)
+    if not rendered:
+        return detail
+    if not detail:
+        return f"接口返回:\n{rendered}"
+    return f"{detail}\n接口返回:\n{rendered}"
+
+
 def _decode_jwt_payload(token: str) -> dict:
     try:
         parts = token.split(".")
@@ -253,9 +281,15 @@ def upload_to_cpa(
         try:
             error_detail = response.json()
             if isinstance(error_detail, dict):
-                error_msg = error_detail.get("message", error_msg)
+                error_msg = str(
+                    error_detail.get("message")
+                    or error_detail.get("msg")
+                    or error_detail.get("error")
+                    or error_msg
+                )
+            error_msg = _with_response_detail(error_msg, error_detail)
         except Exception:
-            error_msg = f"{error_msg} - {response.text[:200]}"
+            error_msg = _with_response_detail(error_msg, response.text[:500])
         return False, _with_request_url(error_msg, upload_url)
 
     except Exception as e:
