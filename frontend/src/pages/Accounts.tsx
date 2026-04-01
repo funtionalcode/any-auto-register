@@ -20,7 +20,6 @@ import type { MenuProps } from 'antd'
 import {
   ReloadOutlined,
   CopyOutlined,
-  LinkOutlined,
   PlusOutlined,
   DownloadOutlined,
   UploadOutlined,
@@ -71,6 +70,18 @@ interface AccountBatchCheckResponse {
   items: AccountCheckItem[]
 }
 
+interface OfficialQuotaSnapshot {
+  account_id?: string
+  account_structure?: string
+  subscription_plan?: string
+  has_active_subscription?: boolean | null
+  remaining_value?: unknown
+  remaining_display?: string
+  remaining_path?: string
+  response_status_code?: number
+  fetched_at?: string
+}
+
 function getCheckStatusMeta(status: AccountCheckItem['status']) {
   if (status === 'valid') return { color: 'success', label: '通过' }
   if (status === 'invalid') return { color: 'error', label: '失败' }
@@ -103,7 +114,9 @@ function normalizeAccount(account: any) {
   const extra = parseExtraJson(account.extra_json)
   const syncStatuses = extra.sync_statuses && typeof extra.sync_statuses === 'object' ? extra.sync_statuses : {}
   const cpaSync = syncStatuses.cpa && typeof syncStatuses.cpa === 'object' ? syncStatuses.cpa : {}
-  return { ...account, extra, cpaSync }
+  const officialQuota =
+    extra.official_quota && typeof extra.official_quota === 'object' ? (extra.official_quota as OfficialQuotaSnapshot) : null
+  return { ...account, extra, cpaSync, officialQuota }
 }
 
 function formatSyncTime(value?: string) {
@@ -112,77 +125,17 @@ function formatSyncTime(value?: string) {
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString()
 }
 
-function formatQuotaValue(value: unknown) {
-  if (value == null || value === '') return '-'
-  if (typeof value === 'string') return value
-  if (typeof value === 'number' || typeof value === 'boolean') return String(value)
-  try {
-    return JSON.stringify(value)
-  } catch {
-    return String(value)
-  }
-}
-
-function formatStructuredText(data: unknown) {
-  if (typeof data === 'string') return data
-  try {
-    return JSON.stringify(data, null, 2)
-  } catch {
-    return String(data)
-  }
-}
-
 function formatOfficialQuotaResult(data: any) {
-  const summary = data?.summary && typeof data.summary === 'object' ? data.summary : {}
-  const signals = Array.isArray(data?.signals) ? data.signals : []
+  const quota = data?.official_quota && typeof data.official_quota === 'object' ? data.official_quota : {}
   const lines: string[] = []
-  const summaryLabels: Record<string, string> = {
-    account_id: '账号 ID',
-    account_structure: '账号结构',
-    subscription_plan: '套餐',
-    has_active_subscription: '订阅激活',
-    expires_at: '到期时间',
-    will_renew: '自动续费',
-    purchase_origin_platform: '购买来源',
-    has_previously_paid_subscription: '历史付费',
-    plan_type: 'Plan Type',
+  lines.push(`套餐: ${String(quota.subscription_plan || '未识别')}`)
+  lines.push(`官方剩余: ${String(quota.remaining_display || '未返回')}`)
+  lines.push(`账号结构: ${String(quota.account_structure || '-')}`)
+  if (quota.remaining_path) {
+    lines.push(`解析字段: ${String(quota.remaining_path)}`)
   }
-
-  if (data?.query_url) {
-    lines.push(`查询地址: ${data.query_url}`)
-  }
-  if (data?.used_proxy) {
-    lines.push(`实际代理: ${data.used_proxy}`)
-  }
-  if (data?.response_status_code) {
-    lines.push(`响应状态: HTTP ${data.response_status_code}`)
-  }
-
-  const summaryEntries = Object.entries(summary)
-  if (summaryEntries.length > 0) {
-    lines.push('')
-    lines.push('关键信息:')
-    for (const [key, value] of summaryEntries) {
-      lines.push(`${summaryLabels[key] || key}: ${formatQuotaValue(value)}`)
-    }
-  }
-
-  if (signals.length > 0) {
-    lines.push('')
-    lines.push('配额相关字段:')
-    for (const item of signals) {
-      if (!item || typeof item !== 'object') continue
-      lines.push(`${formatQuotaValue(item.path)}: ${formatQuotaValue(item.value)}`)
-    }
-  } else {
-    lines.push('')
-    lines.push('配额相关字段: 官方响应里暂未识别到常见 remaining/quota/limit/cap 字段')
-  }
-
-  if (data?.data !== undefined) {
-    lines.push('')
-    lines.push('原始响应:')
-    lines.push(formatStructuredText(data.data))
+  if (quota.fetched_at) {
+    lines.push(`更新时间: ${formatSyncTime(String(quota.fetched_at))}`)
   }
 
   return lines.join('\n').trim()
@@ -448,15 +401,6 @@ export default function Accounts() {
   const copyText = (text: string) => {
     navigator.clipboard.writeText(text)
     message.success('已复制')
-  }
-
-  const getRefreshToken = (record: any): string => {
-    try {
-      const extra = JSON.parse(record.extra_json || '{}')
-      return extra.refresh_token || ''
-    } catch {
-      return ''
-    }
   }
 
   const exportCsv = () => {
@@ -775,46 +719,10 @@ export default function Accounts() {
       ),
     },
     {
-      title: 'RT',
-      key: 'refresh_token',
-      render: (_: any, record: any) => {
-        const rt = getRefreshToken(record)
-        if (!rt) return <span style={{ color: '#ccc' }}>-</span>
-        return (
-          <Space>
-            <Text style={{ fontFamily: 'monospace', fontSize: 11, filter: 'blur(4px)', maxWidth: 80, overflow: 'hidden', display: 'inline-block', verticalAlign: 'middle' }}>
-              {rt.slice(0, 16)}
-            </Text>
-            <Button type="text" size="small" icon={<CopyOutlined />} onClick={() => copyText(rt)} />
-          </Space>
-        )
-      },
-    },
-    {
       title: '状态',
       dataIndex: 'status',
       key: 'status',
       render: (status: string) => <Tag color={STATUS_COLORS[status] || 'default'}>{status}</Tag>,
-    },
-    {
-      title: '地区',
-      dataIndex: 'region',
-      key: 'region',
-      render: (text: string) => text || '-',
-    },
-    {
-      title: '试用链接',
-      dataIndex: 'cashier_url',
-      key: 'cashier_url',
-      render: (url: string) =>
-        url ? (
-          <Space>
-            <Button type="text" size="small" icon={<CopyOutlined />} onClick={() => copyText(url)} />
-            <Button type="text" size="small" icon={<LinkOutlined />} onClick={() => window.open(url, '_blank')} />
-          </Space>
-        ) : (
-          '-'
-        ),
     },
     {
       title: '注册时间',
@@ -882,6 +790,30 @@ export default function Accounts() {
             {sync.last_message ? (
               <Text type="secondary" ellipsis={{ tooltip: sync.last_message }} style={{ maxWidth: 220, fontSize: 12 }}>
                 {sync.last_message}
+              </Text>
+            ) : null}
+          </div>
+        )
+      },
+    })
+    columns.splice(5, 0, {
+      title: '官方额度',
+      key: 'official_quota',
+      render: (_: any, record: any) => {
+        const quota = record.officialQuota as OfficialQuotaSnapshot | null
+        if (!quota) {
+          return <Text type="secondary">未查询</Text>
+        }
+
+        const remaining = String(quota.remaining_display || '未返回')
+        const plan = String(quota.subscription_plan || '未识别')
+        return (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4, minWidth: 150 }}>
+            <Tag color={remaining === '未返回' ? 'default' : 'processing'}>{plan}</Tag>
+            <Text>{remaining}</Text>
+            {quota.fetched_at ? (
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                {formatSyncTime(quota.fetched_at)}
               </Text>
             ) : null}
           </div>
@@ -1060,9 +992,6 @@ export default function Accounts() {
           <Form.Item name="token" label="Token">
             <Input />
           </Form.Item>
-          <Form.Item name="cashier_url" label="试用链接">
-            <Input />
-          </Form.Item>
           <Form.Item name="status" label="状态" initialValue="registered">
             <Select
               options={[
@@ -1084,7 +1013,7 @@ export default function Accounts() {
         maskClosable={false}
       >
         <p style={{ marginBottom: 8, fontSize: 12, color: '#7a8ba3' }}>
-          每行格式: <code style={{ background: 'rgba(255,255,255,0.1)', padding: '2px 4px', borderRadius: 4 }}>email password [cashier_url]</code>
+          每行格式: <code style={{ background: 'rgba(255,255,255,0.1)', padding: '2px 4px', borderRadius: 4 }}>email password [extra_json]</code>
         </p>
         <Input.TextArea
           value={importText}
@@ -1102,41 +1031,22 @@ export default function Accounts() {
         maskClosable={false}
       >
         {currentAccount && (
-          <>
-            <Form form={detailForm} layout="vertical" initialValues={currentAccount}>
-              <Form.Item name="status" label="状态">
-                <Select
-                  options={[
-                    { value: 'registered', label: '已注册' },
-                    { value: 'trial', label: '试用中' },
-                    { value: 'subscribed', label: '已订阅' },
-                    { value: 'expired', label: '已过期' },
-                    { value: 'invalid', label: '已失效' },
-                  ]}
-                />
-              </Form.Item>
-              <Form.Item name="token" label="Access Token">
-                <Input.TextArea rows={2} style={{ fontFamily: 'monospace' }} />
-              </Form.Item>
-            </Form>
-            {(() => {
-              const rt = getRefreshToken(currentAccount)
-              if (!rt) return null
-              return (
-                <div style={{ marginTop: 8 }}>
-                  <div style={{ marginBottom: 4, fontWeight: 500, fontSize: 13 }}>Refresh Token</div>
-                  <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, background: 'rgba(0,0,0,0.03)', border: '1px solid #e5e7eb', borderRadius: 6, padding: '6px 10px' }}>
-                    <Text
-                      style={{ fontFamily: 'monospace', fontSize: 11, wordBreak: 'break-all', flex: 1, userSelect: 'text' }}
-                      copyable={{ text: rt, tooltips: ['复制 RT', '已复制'] }}
-                    >
-                      {rt}
-                    </Text>
-                  </div>
-                </div>
-              )
-            })()}
-          </>
+          <Form form={detailForm} layout="vertical" initialValues={currentAccount}>
+            <Form.Item name="status" label="状态">
+              <Select
+                options={[
+                  { value: 'registered', label: '已注册' },
+                  { value: 'trial', label: '试用中' },
+                  { value: 'subscribed', label: '已订阅' },
+                  { value: 'expired', label: '已过期' },
+                  { value: 'invalid', label: '已失效' },
+                ]}
+              />
+            </Form.Item>
+            <Form.Item name="token" label="Access Token">
+              <Input.TextArea rows={2} style={{ fontFamily: 'monospace' }} />
+            </Form.Item>
+          </Form>
         )}
       </Modal>
 

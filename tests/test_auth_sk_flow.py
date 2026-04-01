@@ -157,6 +157,7 @@ class AuthAndSkFlowTests(unittest.TestCase):
         create_key_payload = create_key_resp.json()
         secret_key = create_key_payload["secret_key"]
         sk_headers = {"Authorization": f"Bearer {secret_key}"}
+        self.assertAlmostEqual(create_key_payload["item"]["usd_limit"], 0.00006, places=6)
 
         authorize_resp = self.client.post("/api/sk/authorize", headers=sk_headers)
         self.assertEqual(authorize_resp.status_code, 200, authorize_resp.text)
@@ -241,6 +242,8 @@ class AuthAndSkFlowTests(unittest.TestCase):
         self.assertEqual(usage_payload["summary"]["total_tokens_used"], 18)
         self.assertEqual(usage_payload["summary"]["remaining_tokens"], 12)
         self.assertEqual(usage_payload["summary"]["request_count"], 3)
+        self.assertAlmostEqual(usage_payload["summary"]["usd_used"], 0.000036, places=6)
+        self.assertAlmostEqual(usage_payload["summary"]["usd_remaining"], 0.000024, places=6)
         self.assertEqual(len(usage_payload["items"]), 3)
         self.assertEqual(usage_payload["items"][0]["proxy_url"], "http://proxy.local:7890")
 
@@ -254,7 +257,7 @@ class AuthAndSkFlowTests(unittest.TestCase):
             },
         )
         self.assertEqual(over_limit_resp.status_code, 429, over_limit_resp.text)
-        self.assertIn("Token 配额不足", over_limit_resp.text)
+        self.assertIn("额度不足", over_limit_resp.text)
 
     def test_sk_key_defaults_to_chatgpt_official_mode_for_models_and_completion(self):
         _, admin_headers = self._bootstrap_admin()

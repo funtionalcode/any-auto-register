@@ -4,7 +4,7 @@ import json
 import logging
 from datetime import datetime, timezone
 from types import SimpleNamespace
-from typing import Iterator, Optional
+from typing import Any, Iterator, Optional
 from urllib.parse import urlsplit, urlunsplit
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
@@ -98,6 +98,78 @@ def _parse_account_extra(extra_json: str) -> dict:
     except (TypeError, ValueError, json.JSONDecodeError):
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+def _is_missing_quota_value(value: Any) -> bool:
+    return value in (None, "", [], {})
+
+
+def _format_quota_display_value(value: Any) -> str:
+    if _is_missing_quota_value(value):
+        return "未返回"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, float):
+        return f"{value:.6f}".rstrip("0").rstrip(".") or "0"
+    return str(value)
+
+
+def _extract_quota_remaining(signals: list[dict[str, Any]]) -> tuple[Any, str]:
+    ranked: list[tuple[int, int, str, Any]] = []
+    skip_keywords = (
+        "expires_at",
+        "renews_at",
+        "will_renew",
+        "no_auto_renewal",
+        "is_most_recent_expired_subscription_gratis",
+    )
+    priority_keywords = (
+        "remaining",
+        "balance",
+        "credit_grant",
+        "credit",
+        "quota",
+        "limit",
+        "cap",
+    )
+
+    for item in signals or []:
+        if not isinstance(item, dict):
+            continue
+        path = str(item.get("path") or "").strip()
+        value = item.get("value")
+        if not path or _is_missing_quota_value(value) or isinstance(value, bool):
+            continue
+        normalized_path = path.lower()
+        if any(keyword in normalized_path for keyword in skip_keywords):
+            continue
+
+        priority = len(priority_keywords)
+        for index, keyword in enumerate(priority_keywords):
+            if keyword in normalized_path:
+                priority = index
+                break
+        ranked.append((priority, len(path), path, value))
+
+    if not ranked:
+        return None, ""
+    _, _, path, value = sorted(ranked, key=lambda item: (item[0], item[1], item[2]))[0]
+    return value, path
+
+
+def _build_chatgpt_official_quota_snapshot(summary: dict[str, Any], signals: list[dict[str, Any]], response_status_code: int) -> dict[str, Any]:
+    remaining_value, remaining_path = _extract_quota_remaining(signals)
+    return {
+        "account_id": str(summary.get("account_id") or "").strip(),
+        "account_structure": str(summary.get("account_structure") or "").strip(),
+        "subscription_plan": str(summary.get("subscription_plan") or summary.get("plan_type") or "").strip(),
+        "has_active_subscription": summary.get("has_active_subscription"),
+        "remaining_value": remaining_value,
+        "remaining_display": _format_quota_display_value(remaining_value),
+        "remaining_path": remaining_path,
+        "response_status_code": int(response_status_code or 0),
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
+    }
 
 
 def _exception_message(exc: Exception, fallback: str) -> str:
@@ -1055,15 +1127,23 @@ def chatgpt_quota(
     if not result.ok:
         raise HTTPException(401 if result.invalid else 400, result.message)
 
+    session.refresh(acc)
+    extra = _parse_account_extra(acc.extra_json)
+    snapshot = _build_chatgpt_official_quota_snapshot(
+        result.summary if isinstance(result.summary, dict) else {},
+        result.signals if isinstance(result.signals, list) else [],
+        result.response_status_code,
+    )
+    extra["official_quota"] = snapshot
+    acc.extra_json = json.dumps(extra, ensure_ascii=False)
+    acc.updated_at = datetime.now(timezone.utc)
+    session.add(acc)
+    session.commit()
+
     return {
         "ok": True,
         "message": result.message,
-        "used_proxy": result.used_proxy or proxy,
-        "query_url": result.query_url,
-        "summary": result.summary,
-        "signals": result.signals,
-        "data": result.data,
-        "response_status_code": result.response_status_code,
+        "official_quota": snapshot,
     }
 
 

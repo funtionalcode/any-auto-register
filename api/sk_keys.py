@@ -4,6 +4,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any, Optional
@@ -33,6 +34,9 @@ DEFAULT_CHATGPT_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 AVAILABLE_CHATGPT_ACCOUNT_STATUSES = ("registered", "trial", "subscribed")
 _chatgpt_account_rr_lock = threading.Lock()
 _chatgpt_account_rr_index = 0
+USD_PER_1M_TOKENS = Decimal("2")
+TOKENS_PER_USD = Decimal("500000")
+USD_PRECISION = Decimal("0.000001")
 
 
 def _utcnow() -> datetime:
@@ -47,6 +51,32 @@ def _normalize_non_negative_int(value: Any, *, field_name: str) -> int:
     if normalized < 0:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"{field_name} 不能小于 0")
     return normalized
+
+
+def _normalize_non_negative_decimal(value: Any, *, field_name: str) -> Decimal:
+    try:
+        normalized = Decimal(str(value or 0))
+    except (InvalidOperation, ValueError, TypeError):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"{field_name} 必须是数字")
+    if normalized < 0:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"{field_name} 不能小于 0")
+    return normalized
+
+
+def _usd_to_token_limit(value: Any, *, field_name: str = "usd_limit") -> int:
+    usd_value = _normalize_non_negative_decimal(value, field_name=field_name)
+    if usd_value <= 0:
+        return 0
+    return int((usd_value * TOKENS_PER_USD).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+
+
+def _tokens_to_usd(value: Any) -> float:
+    tokens = max(0, int(value or 0))
+    usd_value = (Decimal(tokens) * USD_PER_1M_TOKENS / Decimal("1000000")).quantize(
+        USD_PRECISION,
+        rounding=ROUND_HALF_UP,
+    )
+    return float(usd_value)
 
 
 def _estimate_text_tokens(value: Any) -> int:
@@ -444,6 +474,9 @@ def _remaining_tokens(item: SKApiKeyModel) -> Optional[int]:
 
 def _serialize_key(item: SKApiKeyModel, *, owner: UserModel | None = None, proxy: ProxyModel | None = None) -> dict:
     resolved_proxy = proxy.url if proxy else str(item.proxy_url or "").strip()
+    total_tokens_used = int(item.total_tokens_used or 0)
+    token_limit = int(item.token_limit or 0)
+    remaining_tokens = _remaining_tokens(item)
     return {
         "id": int(item.id or 0),
         "user_id": int(item.user_id or 0),
@@ -458,11 +491,15 @@ def _serialize_key(item: SKApiKeyModel, *, owner: UserModel | None = None, proxy
         "proxy_url": str(item.proxy_url or "").strip(),
         "resolved_proxy_url": resolved_proxy,
         "proxy": _serialize_proxy(proxy),
-        "token_limit": int(item.token_limit or 0),
+        "token_limit": token_limit,
+        "usd_limit": _tokens_to_usd(token_limit) if token_limit > 0 else None,
         "prompt_tokens_used": int(item.prompt_tokens_used or 0),
         "completion_tokens_used": int(item.completion_tokens_used or 0),
-        "total_tokens_used": int(item.total_tokens_used or 0),
-        "remaining_tokens": _remaining_tokens(item),
+        "total_tokens_used": total_tokens_used,
+        "usd_used": _tokens_to_usd(total_tokens_used),
+        "remaining_tokens": remaining_tokens,
+        "usd_remaining": _tokens_to_usd(remaining_tokens) if remaining_tokens is not None else None,
+        "usd_rate_per_1m_tokens": float(USD_PER_1M_TOKENS),
         "request_count": int(item.request_count or 0),
         "is_active": item.is_active,
         "last_used_at": item.last_used_at,
@@ -585,9 +622,10 @@ def _ensure_quota(item: SKApiKeyModel, planned_tokens: int) -> None:
         return
     if int(item.total_tokens_used or 0) + max(0, int(planned_tokens or 0)) > limit:
         remaining = _remaining_tokens(item) or 0
+        remaining_usd = _tokens_to_usd(remaining)
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail=f"Token 配额不足，剩余 {remaining}",
+            detail=f"额度不足，剩余 ${remaining_usd:.6f}（约 {remaining} tokens）",
         )
 
 
@@ -811,6 +849,7 @@ class SKApiKeyCreateRequest(BaseModel):
     proxy_id: Optional[int] = None
     proxy_url: Optional[str] = None
     token_limit: int = 0
+    usd_limit: Optional[float] = None
     is_active: bool = True
 
 
@@ -823,6 +862,7 @@ class SKApiKeyUpdateRequest(BaseModel):
     proxy_id: Optional[int] = None
     proxy_url: Optional[str] = None
     token_limit: Optional[int] = None
+    usd_limit: Optional[float] = None
     is_active: Optional[bool] = None
 
 
@@ -885,7 +925,11 @@ def create_sk_key(
         upstream_api_key=str(body.upstream_api_key or "").strip(),
         proxy_id=proxy_id,
         proxy_url=proxy_url,
-        token_limit=_normalize_non_negative_int(body.token_limit, field_name="token_limit"),
+        token_limit=(
+            _usd_to_token_limit(body.usd_limit)
+            if body.usd_limit is not None
+            else _normalize_non_negative_int(body.token_limit, field_name="token_limit")
+        ),
         is_active=bool(body.is_active),
         created_at=_utcnow(),
         updated_at=_utcnow(),
@@ -943,7 +987,9 @@ def update_sk_key(
         item.target_url = _normalize_chat_url(body.target_url)
     if body.upstream_api_key is not None:
         item.upstream_api_key = str(body.upstream_api_key or "").strip()
-    if body.token_limit is not None:
+    if body.usd_limit is not None:
+        item.token_limit = _usd_to_token_limit(body.usd_limit)
+    elif body.token_limit is not None:
         item.token_limit = _normalize_non_negative_int(body.token_limit, field_name="token_limit")
     if body.is_active is not None:
         item.is_active = bool(body.is_active)

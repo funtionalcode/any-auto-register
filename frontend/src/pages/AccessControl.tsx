@@ -29,6 +29,23 @@ import { apiFetch } from '@/lib/utils'
 import { useAuth } from '@/components/AuthProvider'
 
 const { Title, Paragraph, Text } = Typography
+const USD_PER_1M_TOKENS = 2
+
+function tokensToUsd(tokens: number) {
+  return (Number(tokens || 0) / 1_000_000) * USD_PER_1M_TOKENS
+}
+
+function formatUsd(value?: number | null) {
+  if (value == null || Number.isNaN(Number(value))) return '-'
+  const numeric = Number(value)
+  if (numeric === 0) return '0'
+  const precision = numeric >= 1 ? 4 : 6
+  return numeric.toFixed(precision).replace(/0+$/, '').replace(/\.$/, '')
+}
+
+function formatTokenCount(value?: number | null) {
+  return new Intl.NumberFormat('zh-CN').format(Number(value || 0))
+}
 
 interface ProxyItem {
   id: number
@@ -60,10 +77,14 @@ interface SKKeyItem {
   proxy_url?: string
   resolved_proxy_url?: string
   token_limit: number
+  usd_limit?: number | null
   prompt_tokens_used: number
   completion_tokens_used: number
   total_tokens_used: number
+  usd_used: number
   remaining_tokens?: number | null
+  usd_remaining?: number | null
+  usd_rate_per_1m_tokens?: number
   request_count: number
   is_active: boolean
   last_used_at?: string | null
@@ -165,7 +186,7 @@ export default function AccessControl() {
       upstream_api_key: '',
       proxy_id: undefined,
       proxy_url: '',
-      token_limit: 0,
+      usd_limit: 0,
       is_active: true,
     })
     setKeyModalOpen(true)
@@ -181,7 +202,7 @@ export default function AccessControl() {
       upstream_api_key: '',
       proxy_id: item.proxy_id || undefined,
       proxy_url: item.proxy_id ? '' : item.proxy_url || '',
-      token_limit: item.token_limit,
+      usd_limit: item.usd_limit ?? 0,
       is_active: item.is_active,
     })
     setKeyModalOpen(true)
@@ -199,6 +220,7 @@ export default function AccessControl() {
       const body = {
         ...values,
         proxy_url: String(values.proxy_url || '').trim() || null,
+        usd_limit: Number(values.usd_limit || 0),
       }
       const data = editingKey
         ? await apiFetch(`/sk-keys/${editingKey.id}`, {
@@ -338,7 +360,7 @@ export default function AccessControl() {
                 访问控制
               </Title>
               <Paragraph style={{ margin: '8px 0 0', color: '#7a8ba3' }}>
-                管理用户/角色、SK Key、绑定代理、Token 配额，以及对外 OpenAI 协议接口。
+                管理用户/角色、SK Key、绑定代理、美元额度控制，以及对外 OpenAI 协议接口。
               </Paragraph>
             </div>
             <Button icon={<ReloadOutlined />} onClick={loadData} loading={loading}>
@@ -401,21 +423,26 @@ export default function AccessControl() {
                 <Card
                   title="SK Key 列表"
                   extra={
-                    <Button type="primary" icon={<PlusOutlined />} onClick={openCreateKeyModal}>
-                      新建 SK Key
-                    </Button>
+                    <Space size={12}>
+                      <Text type="secondary">1M Tokens = $2</Text>
+                      <Button type="primary" icon={<PlusOutlined />} onClick={openCreateKeyModal}>
+                        新建 SK Key
+                      </Button>
+                    </Space>
                   }
                 >
                   <Table
                     rowKey="id"
                     loading={loading}
                     dataSource={keys}
-                    scroll={{ x: 1200 }}
+                    tableLayout="fixed"
+                    scroll={{ x: 1480 }}
                     pagination={{ pageSize: 10, showSizeChanger: false }}
                     columns={[
                       {
                         title: '名称',
                         dataIndex: 'name',
+                        width: 180,
                         render: (_, item: SKKeyItem) => (
                           <Space direction="vertical" size={4}>
                             <Text strong>{item.name}</Text>
@@ -426,6 +453,7 @@ export default function AccessControl() {
                       {
                         title: '所有者',
                         dataIndex: 'owner_username',
+                        width: 150,
                         render: (_, item: SKKeyItem) => (
                           <Space size={8}>
                             <Text>{item.owner_username || `#${item.user_id}`}</Text>
@@ -436,8 +464,9 @@ export default function AccessControl() {
                       {
                         title: '目标接口',
                         dataIndex: 'target_url',
+                        width: 300,
                         render: (value: string) => (
-                          <Text style={{ maxWidth: 320 }} ellipsis={{ tooltip: value }}>
+                          <Text style={{ display: 'block', width: '100%' }} ellipsis={{ tooltip: value }}>
                             {value || '-'}
                           </Text>
                         ),
@@ -445,9 +474,13 @@ export default function AccessControl() {
                       {
                         title: '代理',
                         dataIndex: 'resolved_proxy_url',
+                        width: 280,
                         render: (value: string) =>
                           value ? (
-                            <Text style={{ maxWidth: 240 }} ellipsis={{ tooltip: value }}>
+                            <Text
+                              style={{ display: 'block', width: '100%', fontFamily: 'monospace', fontSize: 12 }}
+                              ellipsis={{ tooltip: value }}
+                            >
                               {value}
                             </Text>
                           ) : (
@@ -456,19 +489,23 @@ export default function AccessControl() {
                       },
                       {
                         title: '用量',
+                        width: 220,
                         render: (_, item: SKKeyItem) => (
                           <Space direction="vertical" size={4}>
-                            <Text>{item.total_tokens_used} tokens</Text>
+                            <Text strong>${formatUsd(item.usd_used)}</Text>
                             <Text type="secondary">
-                              limit: {item.token_limit > 0 ? item.token_limit : '∞'} / remain:{' '}
-                              {item.remaining_tokens == null ? '∞' : item.remaining_tokens}
+                              limit: {item.usd_limit == null ? '∞' : `$${formatUsd(item.usd_limit)}`} / remain:{' '}
+                              {item.usd_remaining == null ? '∞' : `$${formatUsd(item.usd_remaining)}`}
                             </Text>
-                            <Text type="secondary">req: {item.request_count}</Text>
+                            <Text type="secondary">
+                              {formatTokenCount(item.total_tokens_used)} tokens / req: {item.request_count}
+                            </Text>
                           </Space>
                         ),
                       },
                       {
                         title: '状态',
+                        width: 130,
                         render: (_, item: SKKeyItem) => (
                           <Space direction="vertical" size={4}>
                             <Tag color={item.is_active ? 'success' : 'default'}>
@@ -481,6 +518,7 @@ export default function AccessControl() {
                       {
                         title: '操作',
                         fixed: 'right',
+                        width: 220,
                         render: (_, item: SKKeyItem) => (
                           <Space wrap>
                             <Button size="small" onClick={() => showUsage(item)}>
@@ -627,8 +665,13 @@ export default function AccessControl() {
             </Form.Item>
           </Space>
           <Space size={12} style={{ width: '100%' }} align="start">
-            <Form.Item name="token_limit" label="Token 限额" style={{ flex: 1 }}>
-              <InputNumber min={0} style={{ width: '100%' }} placeholder="0 表示不限制" />
+            <Form.Item
+              name="usd_limit"
+              label="额度上限 (USD)"
+              extra="按 1M Tokens = $2 换算，0 表示不限制。"
+              style={{ flex: 1 }}
+            >
+              <InputNumber min={0} precision={2} step={0.1} style={{ width: '100%' }} placeholder="例如 5 / 10 / 20" />
             </Form.Item>
             <Form.Item name="is_active" label="启用" valuePropName="checked" style={{ minWidth: 120 }}>
               <Switch checkedChildren="启用" unCheckedChildren="停用" />
@@ -687,7 +730,14 @@ export default function AccessControl() {
               <Descriptions.Item label="目标地址">{usageData.summary.target_url || '-'}</Descriptions.Item>
               <Descriptions.Item label="代理">{usageData.summary.resolved_proxy_url || '直连'}</Descriptions.Item>
               <Descriptions.Item label="请求数">{usageData.summary.request_count}</Descriptions.Item>
-              <Descriptions.Item label="Token 总量">{usageData.summary.total_tokens_used}</Descriptions.Item>
+              <Descriptions.Item label="已用额度">${formatUsd(usageData.summary.usd_used)}</Descriptions.Item>
+              <Descriptions.Item label="额度上限">
+                {usageData.summary.usd_limit == null ? '∞' : `$${formatUsd(usageData.summary.usd_limit)}`}
+              </Descriptions.Item>
+              <Descriptions.Item label="剩余额度">
+                {usageData.summary.usd_remaining == null ? '∞' : `$${formatUsd(usageData.summary.usd_remaining)}`}
+              </Descriptions.Item>
+              <Descriptions.Item label="Token 总量">{formatTokenCount(usageData.summary.total_tokens_used)}</Descriptions.Item>
               <Descriptions.Item label="Prompt">{usageData.summary.prompt_tokens_used}</Descriptions.Item>
               <Descriptions.Item label="Completion">{usageData.summary.completion_tokens_used}</Descriptions.Item>
             </Descriptions>
@@ -710,6 +760,12 @@ export default function AccessControl() {
                 { title: 'Prompt', dataIndex: 'prompt_tokens', width: 100 },
                 { title: 'Completion', dataIndex: 'completion_tokens', width: 120 },
                 { title: 'Total', dataIndex: 'total_tokens', width: 100 },
+                {
+                  title: '估算费用',
+                  key: 'usd_cost',
+                  width: 110,
+                  render: (_: unknown, record: UsageItem) => `$${formatUsd(tokensToUsd(record.total_tokens))}`,
+                },
                 {
                   title: '代理',
                   dataIndex: 'proxy_url',
