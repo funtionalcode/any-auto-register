@@ -1,11 +1,19 @@
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
-from fastapi.responses import StreamingResponse
-from sqlmodel import Session, select, func
-from pydantic import BaseModel
-from core.db import AccountModel, get_session
-from typing import Optional
+import csv
+import io
+import json
+import logging
 from datetime import datetime, timezone
-import io, csv, json, logging
+from typing import Optional
+
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
+from sqlmodel import Session, func, select
+
+from core.base_platform import Account, AccountStatus, RegisterConfig
+from core.config_store import config_store
+from core.db import AccountModel, get_session
+from core.registry import get, load_all
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +42,75 @@ class ImportRequest(BaseModel):
 
 class BatchDeleteRequest(BaseModel):
     ids: list[int]
+
+
+class BatchCheckRequest(BaseModel):
+    ids: list[int]
+
+
+def _normalize_account_ids(ids: list[int], *, max_size: int = 200) -> list[int]:
+    normalized: list[int] = []
+    seen: set[int] = set()
+
+    for raw_id in ids or []:
+        try:
+            account_id = int(raw_id)
+        except (TypeError, ValueError):
+            continue
+        if account_id <= 0 or account_id in seen:
+            continue
+        seen.add(account_id)
+        normalized.append(account_id)
+
+    if not normalized:
+        raise HTTPException(400, "账号 ID 列表不能为空")
+    if len(normalized) > max_size:
+        raise HTTPException(400, f"单次最多检测 {max_size} 个账号")
+    return normalized
+
+
+def _parse_account_extra(extra_json: str) -> dict:
+    try:
+        parsed = json.loads(extra_json or "{}")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _coerce_account_status(status: str) -> AccountStatus:
+    try:
+        return AccountStatus(status)
+    except ValueError:
+        return AccountStatus.REGISTERED
+
+
+def _build_runtime_account(acc: AccountModel) -> Account:
+    return Account(
+        platform=acc.platform,
+        email=acc.email,
+        password=acc.password,
+        user_id=acc.user_id,
+        region=acc.region,
+        token=acc.token,
+        status=_coerce_account_status(acc.status),
+        trial_end_time=acc.trial_end_time,
+        extra=_parse_account_extra(acc.extra_json),
+        created_at=int((acc.created_at or datetime.now(timezone.utc)).timestamp()),
+    )
+
+
+def _check_account_validity(acc: AccountModel, *, config: RegisterConfig | None = None) -> dict:
+    PlatformCls = get(acc.platform)
+    plugin = PlatformCls(config=config or RegisterConfig(extra=config_store.get_all()))
+    valid = bool(plugin.check_valid(_build_runtime_account(acc)))
+    return {
+        "id": acc.id,
+        "platform": acc.platform,
+        "email": acc.email,
+        "valid": valid,
+        "status": "valid" if valid else "invalid",
+        "message": "账号有效" if valid else "检测未通过",
+    }
 
 
 @router.get("")
@@ -187,6 +264,71 @@ def batch_delete_accounts(
         raise HTTPException(500, f"批量删除失败: {str(e)}")
 
 
+@router.post("/batch-check")
+def batch_check_accounts(
+    body: BatchCheckRequest,
+    session: Session = Depends(get_session),
+):
+    account_ids = _normalize_account_ids(body.ids)
+    load_all()
+
+    rows = session.exec(
+        select(AccountModel).where(AccountModel.id.in_(account_ids))
+    ).all()
+    row_map = {int(row.id): row for row in rows if row.id is not None}
+
+    shared_config = RegisterConfig(extra=config_store.get_all())
+    results: list[dict] = []
+    invalid_ids: list[int] = []
+    error_ids: list[int] = []
+    not_found: list[int] = []
+    dirty_rows: list[AccountModel] = []
+
+    for account_id in account_ids:
+        acc = row_map.get(account_id)
+        if not acc:
+            not_found.append(account_id)
+            continue
+
+        try:
+            result = _check_account_validity(acc, config=shared_config)
+            results.append(result)
+
+            acc.updated_at = datetime.now(timezone.utc)
+            if not result["valid"]:
+                acc.status = AccountStatus.INVALID.value
+                invalid_ids.append(account_id)
+            dirty_rows.append(acc)
+        except Exception as e:
+            logger.exception("检测账号 %s 时出错", account_id)
+            error_ids.append(account_id)
+            results.append({
+                "id": acc.id,
+                "platform": acc.platform,
+                "email": acc.email,
+                "valid": False,
+                "status": "error",
+                "message": str(e) or "检测异常",
+            })
+
+    if dirty_rows:
+        for row in dirty_rows:
+            session.add(row)
+        session.commit()
+
+    return {
+        "total_requested": len(account_ids),
+        "tested": len(results),
+        "valid": sum(1 for item in results if item["status"] == "valid"),
+        "invalid": len(invalid_ids),
+        "error": len(error_ids),
+        "invalid_ids": invalid_ids,
+        "error_ids": error_ids,
+        "not_found": not_found,
+        "items": results,
+    }
+
+
 @router.post("/check-all")
 def check_all_accounts(platform: Optional[str] = None,
                        background_tasks: BackgroundTasks = None):
@@ -248,20 +390,12 @@ def _do_check(account_id: int):
     with Session(engine) as s:
         acc = s.get(AccountModel, account_id)
     if acc:
-        from core.base_platform import Account, RegisterConfig
-        from core.registry import get
         try:
-            PlatformCls = get(acc.platform)
-            plugin = PlatformCls(config=RegisterConfig())
-            obj = Account(platform=acc.platform, email=acc.email,
-                         password=acc.password, user_id=acc.user_id,
-                         region=acc.region, token=acc.token,
-                         extra=json.loads(acc.extra_json or "{}"))
-            valid = plugin.check_valid(obj)
+            result = _check_account_validity(acc)
             with Session(engine) as s:
                 a = s.get(AccountModel, account_id)
                 if a:
-                    a.status = a.status if valid else "invalid"
+                    a.status = a.status if result["valid"] else AccountStatus.INVALID.value
                     a.updated_at = datetime.now(timezone.utc)
                     s.add(a)
                     s.commit()

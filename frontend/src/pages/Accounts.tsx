@@ -26,6 +26,7 @@ import {
   UploadOutlined,
   MoreOutlined,
   DeleteOutlined,
+  SafetyOutlined,
 } from '@ant-design/icons'
 import { apiFetch } from '@/lib/utils'
 import { normalizeExecutorForPlatform } from '@/lib/registerOptions'
@@ -44,6 +45,33 @@ const STATUS_COLORS: Record<string, string> = {
 const DEFAULT_ACCOUNT_PAGE_SIZE = 20
 const ACCOUNT_PAGE_SIZE_OPTIONS = [20, 50, 100, 200]
 const ACCOUNT_PAGE_SIZE_STORAGE_PREFIX = 'accounts.pageSize.'
+
+interface AccountCheckItem {
+  id: number
+  platform: string
+  email: string
+  valid: boolean
+  status: 'valid' | 'invalid' | 'error'
+  message: string
+}
+
+interface AccountBatchCheckResponse {
+  total_requested: number
+  tested: number
+  valid: number
+  invalid: number
+  error: number
+  invalid_ids: number[]
+  error_ids: number[]
+  not_found: number[]
+  items: AccountCheckItem[]
+}
+
+function getCheckStatusMeta(status: AccountCheckItem['status']) {
+  if (status === 'valid') return { color: 'success', label: '通过' }
+  if (status === 'invalid') return { color: 'error', label: '失败' }
+  return { color: 'warning', label: '异常' }
+}
 
 function readPersistedAccountPageSize(platform: string) {
   if (typeof window === 'undefined') return DEFAULT_ACCOUNT_PAGE_SIZE
@@ -246,6 +274,17 @@ export default function Accounts() {
   const [importLoading, setImportLoading] = useState(false)
   const [registerLoading, setRegisterLoading] = useState(false)
   const [cpaSyncLoading, setCpaSyncLoading] = useState<'pending' | 'selected' | ''>('')
+  const [testing, setTesting] = useState<'page' | 'selected' | number | null>(null)
+  const [testDeleting, setTestDeleting] = useState(false)
+  const [testResult, setTestResult] = useState<{
+    open: boolean
+    title: string
+    data: AccountBatchCheckResponse | null
+  }>({
+    open: false,
+    title: '',
+    data: null,
+  })
 
   useEffect(() => {
     if (platform) setCurrentPlatform(platform)
@@ -520,6 +559,72 @@ export default function Accounts() {
     }
   }
 
+  const runBatchCheck = async (
+    ids: React.Key[],
+    scope: 'page' | 'selected' | number,
+    title: string,
+  ) => {
+    const normalizedIds = Array.from(new Set(
+      ids
+        .map((value) => Number(value))
+        .filter((value) => Number.isInteger(value) && value > 0),
+    ))
+
+    if (normalizedIds.length === 0) {
+      message.warning('没有可测试的账号')
+      return
+    }
+
+    setTesting(scope)
+    try {
+      const result = await apiFetch('/accounts/batch-check', {
+        method: 'POST',
+        body: JSON.stringify({ ids: normalizedIds }),
+      }) as AccountBatchCheckResponse
+
+      if (result.invalid === 0 && result.error === 0) {
+        message.success(`测试完成：${result.valid} 个通过`)
+      } else if (result.error === 0) {
+        message.warning(`测试完成：通过 ${result.valid}，失败 ${result.invalid}`)
+      } else {
+        message.warning(`测试完成：通过 ${result.valid}，失败 ${result.invalid}，异常 ${result.error}`)
+      }
+
+      setTestResult({
+        open: true,
+        title,
+        data: result,
+      })
+      await load()
+    } catch (e: any) {
+      message.error(`测试失败: ${e?.message || e || '未知错误'}`)
+    } finally {
+      setTesting(null)
+    }
+  }
+
+  const handleDeleteInvalidFromTest = async () => {
+    const invalidIds = testResult.data?.invalid_ids || []
+    if (invalidIds.length === 0) return
+
+    setTestDeleting(true)
+    try {
+      const result = await apiFetch('/accounts/batch-delete', {
+        method: 'POST',
+        body: JSON.stringify({ ids: invalidIds }),
+      }) as { deleted: number }
+
+      message.success(`已删除 ${result.deleted} 个测试失败账号`)
+      setSelectedRowKeys((current) => current.filter((key) => !invalidIds.includes(Number(key))))
+      setTestResult({ open: false, title: '', data: null })
+      await load()
+    } catch (e: any) {
+      message.error(`删除失败账号失败: ${e?.message || e || '未知错误'}`)
+    } finally {
+      setTestDeleting(false)
+    }
+  }
+
   const columns: any[] = [
     {
       title: '邮箱',
@@ -595,6 +700,14 @@ export default function Accounts() {
       key: 'action',
       render: (_: any, record: any) => (
         <Space>
+          <Button
+            type="link"
+            size="small"
+            loading={testing === record.id}
+            onClick={() => runBatchCheck([record.id], record.id, `${record.email} 测试结果`)}
+          >
+            测试
+          </Button>
           <Button type="link" size="small" onClick={() => { setCurrentAccount(record); setDetailModalOpen(true); }}>
             详情
           </Button>
@@ -675,6 +788,23 @@ export default function Accounts() {
           )}
         </Space>
         <Space>
+          {selectedRowKeys.length > 0 && (
+            <Button
+              icon={<SafetyOutlined />}
+              loading={testing === 'selected'}
+              onClick={() => runBatchCheck(selectedRowKeys, 'selected', '所选账号测试结果')}
+            >
+              测试所选
+            </Button>
+          )}
+          <Button
+            icon={<SafetyOutlined />}
+            loading={testing === 'page'}
+            onClick={() => runBatchCheck(accounts.map((item) => item.id), 'page', `${currentPlatform} 当前页测试结果`)}
+            disabled={accounts.length === 0}
+          >
+            测试当前页
+          </Button>
           {currentPlatform === 'chatgpt' && selectedRowKeys.length > 0 && (
             <Popconfirm
               title={`确认上传选中的 ${selectedRowKeys.length} 个账号到 CPA？`}
@@ -871,6 +1001,96 @@ export default function Accounts() {
             })()}
           </>
         )}
+      </Modal>
+
+      <Modal
+        open={testResult.open}
+        title={testResult.title || '账号测试结果'}
+        onCancel={() => setTestResult({ open: false, title: '', data: null })}
+        width={760}
+        footer={[
+          testResult.data && testResult.data.invalid_ids.length > 0 ? (
+            <Popconfirm
+              key="delete-invalid"
+              title={`确认删除 ${testResult.data.invalid_ids.length} 个测试失败账号？`}
+              onConfirm={handleDeleteInvalidFromTest}
+            >
+              <Button danger loading={testDeleting} icon={<DeleteOutlined />}>
+                一键删除失败账号
+              </Button>
+            </Popconfirm>
+          ) : null,
+          <Button
+            key="close"
+            type="primary"
+            onClick={() => setTestResult({ open: false, title: '', data: null })}
+          >
+            关闭
+          </Button>,
+        ].filter(Boolean)}
+        maskClosable={false}
+      >
+        {testResult.data ? (
+          <Space direction="vertical" size={12} style={{ width: '100%' }}>
+            <Alert
+              type={testResult.data.invalid > 0 || testResult.data.error > 0 ? 'warning' : 'success'}
+              showIcon
+              message={
+                testResult.data.invalid > 0 || testResult.data.error > 0
+                  ? `测试完成：通过 ${testResult.data.valid}，失败 ${testResult.data.invalid}，异常 ${testResult.data.error}`
+                  : `测试完成：${testResult.data.valid} 个账号全部通过`
+              }
+              description={
+                testResult.data.invalid_ids.length > 0
+                  ? '“一键删除失败账号”仅删除已判定无效的账号，不会删除检测异常的账号。'
+                  : undefined
+              }
+            />
+
+            <Space size={8} wrap>
+              <Tag color="success">通过 {testResult.data.valid}</Tag>
+              <Tag color="error">失败 {testResult.data.invalid}</Tag>
+              <Tag color="warning">异常 {testResult.data.error}</Tag>
+              {testResult.data.not_found.length > 0 ? (
+                <Tag>未找到 {testResult.data.not_found.length}</Tag>
+              ) : null}
+            </Space>
+
+            <div
+              style={{
+                maxHeight: 360,
+                overflow: 'auto',
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 8,
+                paddingRight: 4,
+              }}
+            >
+              {testResult.data.items.map((item) => {
+                const meta = getCheckStatusMeta(item.status)
+                return (
+                  <div
+                    key={`${item.id}-${item.status}`}
+                    style={{
+                      border: '1px solid rgba(127,127,127,0.15)',
+                      borderRadius: 10,
+                      padding: 12,
+                    }}
+                  >
+                    <Space direction="vertical" size={6} style={{ width: '100%' }}>
+                      <Space size={8} wrap>
+                        <Tag color={meta.color}>{meta.label}</Tag>
+                        <Text style={{ fontFamily: 'monospace' }}>{item.email}</Text>
+                        <Text type="secondary">#{item.id}</Text>
+                      </Space>
+                      <Text type="secondary">{item.message || '-'}</Text>
+                    </Space>
+                  </div>
+                )
+              })}
+            </div>
+          </Space>
+        ) : null}
       </Modal>
     </div>
   )
