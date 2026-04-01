@@ -1,7 +1,19 @@
-import { clearAuthToken, getAuthToken } from './auth'
+import { clearAuthToken, getAuthToken, setAuthToken } from './auth'
 
 export const API = '/api'
 export const API_BASE = '/api'
+
+export function getToken(): string {
+  return getAuthToken()
+}
+
+export function setToken(token: string): void {
+  setAuthToken(token)
+}
+
+export function clearToken(): void {
+  clearAuthToken()
+}
 
 export async function apiFetch(path: string, opts?: RequestInit) {
   const headers = new Headers(opts?.headers || {})

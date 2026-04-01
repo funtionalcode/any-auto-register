@@ -1213,7 +1213,8 @@ def _do_check(account_id: int):
             with Session(engine) as s:
                 a = s.get(AccountModel, account_id)
                 if a:
-                    a.status = a.status if result["valid"] else AccountStatus.INVALID.value
+                    if a.platform != "chatgpt":
+                        a.status = a.status if result["valid"] else AccountStatus.INVALID.value
                     a.updated_at = datetime.now(timezone.utc)
                     s.add(a)
                     s.commit()
