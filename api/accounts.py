@@ -100,6 +100,16 @@ def _parse_account_extra(extra_json: str) -> dict:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def _exception_message(exc: Exception, fallback: str) -> str:
+    text = str(exc or "").strip()
+    if text:
+        return text
+    exc_type = type(exc).__name__.strip()
+    if exc_type and exc_type != "Exception":
+        return f"{fallback}: {exc_type}"
+    return fallback
+
+
 def _coerce_account_status(status: str) -> AccountStatus:
     try:
         return AccountStatus(status)
@@ -960,7 +970,7 @@ def chatgpt_chat_stream(
                 {
                     "ok": False,
                     "invalid": False,
-                    "message": str(e) or "对话发送失败",
+                    "message": _exception_message(e, "对话发送失败"),
                     "used_proxy": proxy,
                 },
             )

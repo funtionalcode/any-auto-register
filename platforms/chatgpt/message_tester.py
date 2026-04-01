@@ -4,6 +4,7 @@ import json
 import logging
 import re
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from http.cookies import SimpleCookie
 from typing import Any, Iterator
@@ -109,6 +110,63 @@ def _exception_message(exc: Exception, fallback: str) -> str:
     if exc_type and exc_type != "Exception":
         return f"{fallback}: {exc_type}"
     return fallback
+
+
+@contextmanager
+def _open_streaming_response(session: Any, method: str, url: str, **kwargs: Any):
+    stream_method = getattr(session, "stream", None)
+    if callable(stream_method):
+        with stream_method(method, url, **kwargs) as response:
+            yield response
+        return
+
+    request_method = getattr(session, str(method or "POST").lower(), None)
+    if not callable(request_method):
+        raise RuntimeError(f"session missing method: {method}")
+
+    response = request_method(url, stream=True, **kwargs)
+    try:
+        yield response
+    finally:
+        try:
+            response.close()
+        except Exception:
+            pass
+
+
+def _iter_stream_lines(response: Any) -> Iterator[str]:
+    try:
+        for raw_line in response.iter_lines(decode_unicode=True):
+            if isinstance(raw_line, bytes):
+                yield raw_line.decode("utf-8", errors="ignore")
+            else:
+                yield str(raw_line)
+        return
+    except NotImplementedError:
+        pass
+
+    try:
+        buffer = ""
+        for chunk in response.iter_content():
+            if isinstance(chunk, bytes):
+                text = chunk.decode("utf-8", errors="ignore")
+            else:
+                text = str(chunk or "")
+            if not text:
+                continue
+            buffer += text
+            while "\n" in buffer:
+                line, buffer = buffer.split("\n", 1)
+                yield line.rstrip("\r")
+        if buffer:
+            yield buffer.rstrip("\r")
+        return
+    except NotImplementedError:
+        pass
+
+    text = str(getattr(response, "text", "") or "")
+    for line in text.splitlines():
+        yield line
 
 
 def _response_header_snapshot(response: Any) -> dict[str, str]:
@@ -1337,15 +1395,16 @@ def stream_chat_message(
             },
         }
 
-        response = client.session.post(
+        with _open_streaming_response(
+            client.session,
+            "POST",
             prepared.url,
             json=prepared.payload,
             headers=prepared.headers,
             timeout=180,
-            stream=True,
-        )
-        _log_http_response(chain_name, response, note="stream_opened")
-        try:
+        ) as stream_response:
+            response = stream_response
+            _log_http_response(chain_name, response, note="stream_opened")
             if response.status_code >= 400:
                 response_text = str(response.text or "")
                 response_headers = _response_header_snapshot(response)
@@ -1390,7 +1449,7 @@ def stream_chat_message(
             raw_line_samples: list[str] = []
             payload_samples: list[str] = []
 
-            for raw_line in response.iter_lines(decode_unicode=True):
+            for raw_line in _iter_stream_lines(response):
                 raw_line_text = str(raw_line or "")
                 if raw_line_text and len(raw_line_samples) < 8:
                     raw_line_samples.append(_truncate_text(raw_line_text, limit=240))
@@ -1481,12 +1540,6 @@ def stream_chat_message(
                     "shared_test_flow": True,
                 },
             }
-        finally:
-            try:
-                if response is not None:
-                    response.close()
-            except Exception:
-                pass
     except Exception as e:
         logger.exception(
             "[chatgpt-message] chain=%s note=exception proxy=%s",
