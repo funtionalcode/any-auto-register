@@ -291,6 +291,7 @@ class ChatGPTPlatform(BasePlatform):
             return {"ok": False, "error": result.error_message}
 
         if action_id == "upload_cpa":
+            from services.cpa_target import build_cpa_upload_request_url
             from platforms.chatgpt.cpa_upload import generate_token_json, upload_to_cpa
 
             token_data = generate_token_json(a)
@@ -299,7 +300,11 @@ class ChatGPTPlatform(BasePlatform):
                 api_url=params.get("api_url"),
                 api_key=params.get("api_key"),
             )
-            return {"ok": ok, "data": msg}
+            return {
+                "ok": ok,
+                "data": msg,
+                "request_url": build_cpa_upload_request_url(params.get("api_url")),
+            }
 
         if action_id == "upload_sub2api":
             from platforms.chatgpt.sub2api_upload import upload_to_sub2api

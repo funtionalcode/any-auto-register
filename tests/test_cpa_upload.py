@@ -20,19 +20,17 @@ class CpaUploadTests(unittest.TestCase):
     def test_upload_to_cpa_includes_request_url_in_http_error(self):
         token_data = {"email": "demo@example.com"}
 
-        with mock.patch("curl_cffi.CurlMime") as mime_cls:
-            mime_cls.return_value = mock.Mock()
-            with mock.patch.object(cpa_upload, "CurlMime", return_value=mock.Mock()) as curl_mime_mock:
-                with mock.patch.object(
-                    cpa_upload.cffi_requests,
-                    "post",
-                    return_value=_FakeResponse(500, payload={"message": "服务异常"}),
-                ):
-                    ok, msg = cpa_upload.upload_to_cpa(
-                        token_data,
-                        api_url="https://cpa.example.com",
-                        api_key="demo-key",
-                    )
+        with mock.patch.object(cpa_upload, "CurlMime", return_value=mock.Mock()) as curl_mime_mock:
+            with mock.patch.object(
+                cpa_upload.cffi_requests,
+                "post",
+                return_value=_FakeResponse(500, payload={"message": "服务异常"}),
+            ):
+                ok, msg = cpa_upload.upload_to_cpa(
+                    token_data,
+                    api_url="https://cpa.example.com",
+                    api_key="demo-key",
+                )
 
         self.assertFalse(ok)
         self.assertIn("服务异常", msg)

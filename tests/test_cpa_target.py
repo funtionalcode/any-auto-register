@@ -4,6 +4,18 @@ from services import cpa_target
 
 
 class CpaTargetTests(unittest.TestCase):
+    def test_build_cpa_upload_request_url_uses_resolved_base_url(self):
+        old_get_config_value = cpa_target._get_config_value
+        cpa_target._get_config_value = lambda key, default="": {
+            "cpa_api_url": "https://cpa.example.com/",
+        }.get(key, default)
+        try:
+            resolved = cpa_target.build_cpa_upload_request_url()
+        finally:
+            cpa_target._get_config_value = old_get_config_value
+
+        self.assertEqual(resolved, "https://cpa.example.com/v0/management/auth-files")
+
     def test_resolve_cpa_api_key_prefers_explicit_value(self):
         old_get_config_value = cpa_target._get_config_value
         cpa_target._get_config_value = lambda key, default="": {

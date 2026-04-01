@@ -257,8 +257,10 @@ def backfill_chatgpt_account_to_cpa(
 ) -> dict[str, Any]:
     from platforms.chatgpt.status_probe import probe_local_chatgpt_status
     from services.cliproxyapi_sync import sync_chatgpt_cliproxyapi_status
+    from services.cpa_target import build_cpa_upload_request_url
 
     api_url, api_key = _resolve_cliproxy_target(api_url=api_url, api_key=api_key)
+    request_url = build_cpa_upload_request_url(api_url)
     results: list[dict[str, Any]] = []
     cached_sync = get_cliproxy_sync_state(account)
     initial_sync = cached_sync if cached_sync else {}
@@ -299,7 +301,7 @@ def backfill_chatgpt_account_to_cpa(
         return {"ok": False, "uploaded": False, "skipped": False, "message": msg, "results": results}
 
     ok, msg = upload_account_model_to_cpa(account, session=session, api_url=api_url, api_key=api_key, commit=False)
-    results.append({"name": "CLIProxyAPI 上传", "ok": ok, "msg": msg})
+    results.append({"name": "CLIProxyAPI 上传", "ok": ok, "msg": msg, "request_url": request_url})
     if not ok:
         if session is not None and commit:
             session.commit()

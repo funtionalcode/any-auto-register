@@ -35,6 +35,13 @@ def resolve_cpa_api_url(api_url: str | None = None) -> str:
     return str(api_url or _get_config_value("cpa_api_url", "") or "").strip()
 
 
+def build_cpa_upload_request_url(api_url: str | None = None) -> str:
+    base_url = resolve_cpa_api_url(api_url)
+    if not base_url:
+        return ""
+    return f"{base_url.rstrip('/')}/v0/management/auth-files"
+
+
 def _is_local_cliproxyapi_target(api_url: str | None = None) -> bool:
     target = resolve_cpa_api_url(api_url)
     if not target:

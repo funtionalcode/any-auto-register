@@ -155,10 +155,11 @@ def upload_cpa(account_id: int, req: CpaUploadReq,
     acc = _get_account(account_id, session)
     codex_acc = _to_codex_account(acc)
 
+    from services.cpa_target import build_cpa_upload_request_url
     from platforms.chatgpt.cpa_upload import upload_to_cpa, generate_token_json
     token_data = generate_token_json(codex_acc)
     ok, msg = upload_to_cpa(token_data, api_url=req.api_url, api_key=req.api_key)
-    return {"ok": ok, "message": msg}
+    return {"ok": ok, "message": msg, "request_url": build_cpa_upload_request_url(req.api_url)}
 
 
 class Sub2ApiUploadReq(BaseModel):
