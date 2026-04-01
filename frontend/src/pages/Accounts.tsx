@@ -141,6 +141,47 @@ function formatOfficialQuotaResult(data: any) {
   return lines.join('\n').trim()
 }
 
+function formatActionErrorText(result: any) {
+  const data = result?.data
+  const candidates = [
+    result?.error,
+    result?.message,
+    typeof data === 'string' ? data : '',
+    data && typeof data === 'object' ? data.message : '',
+    data && typeof data === 'object' ? data.error : '',
+  ]
+
+  for (const candidate of candidates) {
+    const text = String(candidate || '').trim()
+    if (text) return text
+  }
+
+  if (data && typeof data === 'object') {
+    try {
+      return JSON.stringify(data, null, 2)
+    } catch {
+      return String(data)
+    }
+  }
+
+  return '操作失败'
+}
+
+function buildCpaFailureLines(result: any) {
+  return (result.items || [])
+    .flatMap((item: any) =>
+      (item.results || []).map((syncResult: any) => ({
+        email: item.email,
+        platform: item.platform,
+        ok: Boolean(syncResult.ok),
+        name: syncResult.name || 'CPA',
+        msg: syncResult.msg || '',
+      })),
+    )
+    .filter((item: any) => !item.ok)
+    .map((item: any) => `[${item.platform}] ${item.email || '-'} / ${item.name}: ${item.msg || '失败'}`)
+}
+
 function ActionMenu({ acc, onRefresh }: { acc: any; onRefresh: () => void }) {
   const [actions, setActions] = useState<any[]>([])
   const [resultOpen, setResultOpen] = useState(false)
@@ -182,7 +223,10 @@ function ActionMenu({ acc, onRefresh }: { acc: any; onRefresh: () => void }) {
         body: JSON.stringify({ params: {} }),
       })
       if (!r.ok) {
-        showResult(actionLabel, 'error', r.error || '操作失败')
+        const detail = formatActionErrorText(r)
+        message.error(detail)
+        showResult(actionLabel, 'error', detail)
+        onRefresh()
         return
       }
       const data = r.data || {}
@@ -530,24 +574,13 @@ export default function Accounts() {
   }
 
   const showCpaSyncResult = (title: string, result: any) => {
-    const lines = (result.items || [])
-      .flatMap((item: any) =>
-        (item.results || []).map((syncResult: any) => ({
-          email: item.email,
-          platform: item.platform,
-          ok: Boolean(syncResult.ok),
-          name: syncResult.name || 'CPA',
-          msg: syncResult.msg || '',
-        })),
-      )
-      .filter((item: any) => !item.ok)
-      .map((item: any) => `[${item.platform}] ${item.email || '-'} / ${item.name}: ${item.msg || '失败'}`)
-
+    const lines = buildCpaFailureLines(result)
     if (lines.length === 0) return
 
-    Modal.info({
+    Modal.error({
       title,
       width: 760,
+      okText: '关闭',
       content: (
         <pre
           style={{
@@ -598,6 +631,7 @@ export default function Accounts() {
         method: 'POST',
         body: JSON.stringify(body),
       })
+      const failureLines = buildCpaFailureLines(result)
 
       const actionLabel = mode === 'selected' ? '所选账号 CPA 上传' : '未上传账号 CPA 补传'
       if (!result.total) {
@@ -605,9 +639,9 @@ export default function Accounts() {
       } else if (!result.failed) {
         message.success(`${actionLabel}完成：成功 ${result.success} / ${result.total}`)
       } else if (!result.success) {
-        message.error(`${actionLabel}失败：成功 ${result.success} / ${result.total}`)
+        message.error(failureLines[0] || `${actionLabel}失败：成功 ${result.success} / ${result.total}`)
       } else {
-        message.warning(`${actionLabel}部分完成：成功 ${result.success} / ${result.total}`)
+        message.warning(failureLines[0] || `${actionLabel}部分完成：成功 ${result.success} / ${result.total}`)
       }
 
       showCpaSyncResult(`${actionLabel}结果`, result)
