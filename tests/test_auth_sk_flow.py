@@ -343,6 +343,50 @@ class AuthAndSkFlowTests(unittest.TestCase):
         self.assertEqual(usage_payload["summary"]["request_count"], 2)
         self.assertGreater(usage_payload["summary"]["total_tokens_used"], 0)
 
+    def test_sk_key_normalizes_chatgpt_models_path_back_to_official_conversation(self):
+        _, admin_headers = self._bootstrap_admin()
+
+        create_key_resp = self.client.post(
+            "/api/sk-keys",
+            headers=admin_headers,
+            json={
+                "name": "official-models-path-key",
+                "target_url": "https://chatgpt.com/backend-api/conversation/models",
+                "upstream_api_key": "chatgpt-access-token",
+            },
+        )
+        self.assertEqual(create_key_resp.status_code, 200, create_key_resp.text)
+        create_key_payload = create_key_resp.json()
+        self.assertEqual(
+            create_key_payload["item"]["target_url"],
+            "https://chatgpt.com/backend-api/conversation",
+        )
+
+        sk_headers = {"Authorization": f"Bearer {create_key_payload['secret_key']}"}
+        models_result = SimpleNamespace(
+            ok=True,
+            invalid=False,
+            message="已获取 1 个模型",
+            used_proxy="",
+            models_url="https://chatgpt.com/backend-api/models",
+            models=[{"id": "gpt-5", "title": "GPT-5", "description": "official"}],
+            data=None,
+            updated_access_token="",
+            updated_refresh_token="",
+            response_status_code=200,
+        )
+
+        with mock.patch("platforms.chatgpt.message_tester.fetch_available_models", return_value=models_result) as mock_models:
+            models_resp = self.client.get("/v1/models", headers=sk_headers)
+
+        self.assertEqual(models_resp.status_code, 200, models_resp.text)
+        self.assertEqual(models_resp.json()["data"][0]["id"], "gpt-5")
+        self.assertTrue(mock_models.called)
+        self.assertEqual(
+            mock_models.call_args.kwargs["target_url"],
+            "https://chatgpt.com/backend-api/conversation",
+        )
+
     def test_sk_key_wraps_chatgpt_official_stream_as_openai_sse(self):
         _, admin_headers = self._bootstrap_admin()
 

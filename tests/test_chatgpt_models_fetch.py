@@ -83,6 +83,24 @@ class _FakeClient:
 
 
 class ChatGPTModelsFetchTests(unittest.TestCase):
+    def test_normalize_conversation_url_recovers_from_models_paths(self):
+        client = SimpleNamespace(BASE="https://chatgpt.com")
+
+        self.assertEqual(
+            message_tester._normalize_official_conversation_url(
+                client,
+                "https://chatgpt.com/backend-api/models",
+            ),
+            "https://chatgpt.com/backend-api/conversation",
+        )
+        self.assertEqual(
+            message_tester._normalize_official_conversation_url(
+                client,
+                "https://chatgpt.com/backend-api/conversation/models",
+            ),
+            "https://chatgpt.com/backend-api/conversation",
+        )
+
     def test_normalize_models_url_reuses_conversation_origin(self):
         client = SimpleNamespace(BASE="https://chatgpt.com")
 
@@ -99,6 +117,13 @@ class ChatGPTModelsFetchTests(unittest.TestCase):
                 "https://example.com/custom/conversation",
             ),
             "https://example.com/custom/models",
+        )
+        self.assertEqual(
+            message_tester._normalize_official_models_url(
+                client,
+                "https://chatgpt.com/backend-api/conversation/models",
+            ),
+            "https://chatgpt.com/backend-api/models",
         )
         self.assertEqual(
             message_tester._normalize_official_models_url(client, ""),

@@ -94,12 +94,7 @@ def _normalize_chat_url(target_url: str) -> str:
     path = str(parts.path or "").rstrip("/")
     host = str(parts.netloc or "").lower()
     if host.endswith("chatgpt.com"):
-        if not path or path == "/":
-            path = "/backend-api/conversation"
-        elif path.endswith("/backend-api"):
-            path = f"{path}/conversation"
-        elif path.endswith("/backend-api/conversation"):
-            pass
+        path = _normalize_official_chatgpt_path(path, endpoint="conversation")
         return urlunsplit(parts._replace(path=path))
 
     if path.endswith("/chat/completions"):
@@ -109,11 +104,42 @@ def _normalize_chat_url(target_url: str) -> str:
     return urlunsplit(parts._replace(path=next_path))
 
 
+def _normalize_official_chatgpt_path(path: str, *, endpoint: str) -> str:
+    normalized = str(path or "").rstrip("/")
+    if not normalized or normalized == "/":
+        return f"/backend-api/{endpoint}"
+    if normalized.endswith("/backend-api"):
+        return f"{normalized}/{endpoint}"
+
+    if endpoint == "conversation":
+        if normalized.endswith("/backend-api/conversation"):
+            return normalized
+        if normalized.endswith("/backend-api/conversation/models"):
+            return normalized[:-len("/models")]
+        if normalized.endswith("/backend-api/models"):
+            prefix = normalized[:-len("/backend-api/models")]
+            return f"{prefix}/backend-api/conversation" if prefix else "/backend-api/conversation"
+        return normalized
+
+    if normalized.endswith("/backend-api/models"):
+        return normalized
+    if normalized.endswith("/backend-api/conversation/models"):
+        prefix = normalized[:-len("/backend-api/conversation/models")]
+        return f"{prefix}/backend-api/models" if prefix else "/backend-api/models"
+    if normalized.endswith("/backend-api/conversation"):
+        prefix = normalized[:-len("/backend-api/conversation")]
+        return f"{prefix}/backend-api/models" if prefix else "/backend-api/models"
+    return normalized
+
+
 def _derive_models_url(target_url: str) -> str:
     normalized = _normalize_chat_url(target_url)
     parts = urlsplit(normalized)
     path = str(parts.path or "")
-    if path.endswith("/backend-api/conversation"):
+    host = str(parts.netloc or "").lower()
+    if host.endswith("chatgpt.com"):
+        path = _normalize_official_chatgpt_path(path, endpoint="models")
+    elif path.endswith("/backend-api/conversation"):
         path = f"{path[:-len('/backend-api/conversation')]}/backend-api/models" if path != "/backend-api/conversation" else "/backend-api/models"
     elif path.endswith("/chat/completions"):
         path = f"{path[:-len('/chat/completions')]}/models"

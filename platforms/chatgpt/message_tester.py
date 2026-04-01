@@ -478,11 +478,7 @@ def _normalize_official_conversation_url(client: ChatGPTClient, target_url: str 
     if not parts.scheme or not parts.netloc:
         return f"{client.BASE}/backend-api/conversation"
 
-    path = str(parts.path or "").rstrip("/")
-    if not path:
-        path = "/backend-api/conversation"
-    elif path.endswith("/backend-api"):
-        path = f"{path}/conversation"
+    path = _normalize_official_backend_path(str(parts.path or ""), endpoint="conversation")
 
     return urlunsplit(parts._replace(path=path))
 
@@ -500,19 +496,33 @@ def _normalize_official_models_url(client: ChatGPTClient, target_url: str = "") 
     if not parts.scheme or not parts.netloc:
         return f"{client.BASE}/backend-api/models"
 
-    path = str(parts.path or "").rstrip("/")
-    if not path:
-        path = "/backend-api/models"
-    elif path.endswith("/models"):
-        pass
-    elif path.endswith("/conversation"):
-        path = f"{path.rsplit('/', 1)[0]}/models"
-    elif path.endswith("/backend-api"):
-        path = f"{path}/models"
-    else:
-        path = "/backend-api/models"
+    path = _normalize_official_backend_path(str(parts.path or ""), endpoint="models")
 
     return urlunsplit(parts._replace(path=path))
+
+
+def _normalize_official_backend_path(path: str, *, endpoint: str) -> str:
+    normalized = str(path or "").rstrip("/")
+    if not normalized:
+        return f"/backend-api/{endpoint}"
+    if normalized.endswith("/backend-api"):
+        return f"{normalized}/{endpoint}"
+
+    if endpoint == "conversation":
+        if normalized.endswith("/conversation/models"):
+            return normalized[:-len("/models")]
+        if normalized.endswith("/models"):
+            return f"{normalized.rsplit('/', 1)[0]}/conversation"
+        return normalized
+
+    if normalized.endswith("/conversation/models"):
+        prefix = normalized[:-len("/conversation/models")]
+        return f"{prefix}/models" if prefix else "/models"
+    if normalized.endswith("/models"):
+        return normalized
+    if normalized.endswith("/conversation"):
+        return f"{normalized.rsplit('/', 1)[0]}/models"
+    return "/backend-api/models"
 
 
 def _official_target_origin(target_url: str, fallback: str) -> str:
