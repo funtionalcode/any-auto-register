@@ -536,6 +536,22 @@ http://localhost:8889/
 
 ---
 
+## 控制台密码本地重置
+
+控制台当前没有“忘记密码”自助找回流程。
+
+- 已有管理员可登录时：进入 `用户 / 角色`，编辑目标用户并填写新密码。
+- 唯一管理员无法登录时：在项目根目录本地执行重置脚本，直接改写当前 `DATABASE_URL` 对应数据库中的密码。
+
+```bash
+python3 scripts/reset_console_password.py --list
+python3 scripts/reset_console_password.py --username admin --role admin --enable --create
+```
+
+脚本默认会在终端安全输入新密码；也可以通过 `--password <new-password>` 直接传入。
+
+---
+
 ## 项目结构
 
 ```text

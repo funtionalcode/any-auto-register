@@ -52,6 +52,12 @@ export default function AuthPortal() {
             type={bootstrapped ? 'info' : 'warning'}
             showIcon
             message={bootstrapped ? '登录后可管理用户、SK Key、代理绑定与配额。' : '初始化完成后会自动进入后台。'}
+            description={bootstrapped ? (
+              <>
+                忘记密码请联系管理员在“用户 / 角色”中重置；若唯一管理员无法登录，可在本地执行{' '}
+                <Text code>python3 scripts/reset_console_password.py --username admin --role admin --enable --create</Text>
+              </>
+            ) : undefined}
           />
 
           <Form layout="vertical" onFinish={handleFinish} autoComplete="off">
