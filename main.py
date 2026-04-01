@@ -1,4 +1,5 @@
 """account_manager - 多平台账号管理后台"""
+import logging
 import os
 import sys
 from contextlib import asynccontextmanager
@@ -18,10 +19,13 @@ from api.actions import router as actions_router
 from api.integrations import router as integrations_router
 from api.auth import router as auth_router
 from api.sk_keys import router as sk_keys_router, openai_router, anthropic_apps_router
+from core.log_utils import configure_app_logging, read_app_log
 from core.runtime_timezone import configure_timezone
 
 EXPECTED_CONDA_ENV = os.getenv("APP_CONDA_ENV", "any-auto-register")
+APP_LOG_PATH = configure_app_logging()
 configure_timezone()
+logger = logging.getLogger(__name__)
 
 
 def _detect_conda_env() -> str:
@@ -39,19 +43,20 @@ def _detect_conda_env() -> str:
 
 def _print_runtime_info() -> None:
     current_env = _detect_conda_env()
-    print(f"[Runtime] Python: {sys.executable}")
-    print(f"[Runtime] Conda Env: {current_env or '未检测到'}")
+    logger.info("[Runtime] Python: %s", sys.executable)
+    logger.info("[Runtime] Conda Env: %s", current_env or "未检测到")
     if EXPECTED_CONDA_ENV == "docker":
         return
     if current_env and current_env != EXPECTED_CONDA_ENV:
-        print(
-            f"[WARN] 当前环境为 '{current_env}'，推荐使用 '{EXPECTED_CONDA_ENV}' 启动，"
-            "否则 Turnstile Solver 可能因依赖缺失而无法启动。"
+        logger.warning(
+            "当前环境为 '%s'，推荐使用 '%s' 启动，否则 Turnstile Solver 可能因依赖缺失而无法启动。",
+            current_env,
+            EXPECTED_CONDA_ENV,
         )
     elif not current_env:
-        print(
-            f"[WARN] 未检测到 conda 环境，推荐使用 '{EXPECTED_CONDA_ENV}' 启动，"
-            "否则 Turnstile Solver 可能因依赖缺失而无法启动。"
+        logger.warning(
+            "未检测到 conda 环境，推荐使用 '%s' 启动，否则 Turnstile Solver 可能因依赖缺失而无法启动。",
+            EXPECTED_CONDA_ENV,
         )
 
 
@@ -63,9 +68,9 @@ async def lifespan(app: FastAPI):
 
     ensure_managed_services_async()
     load_all()
-    print("[OK] 数据库初始化完成")
+    logger.info("[OK] 数据库初始化完成")
     from core.registry import list_platforms
-    print(f"[OK] 已加载平台: {[p['name'] for p in list_platforms()]}")
+    logger.info("[OK] 已加载平台: %s", [p["name"] for p in list_platforms()])
     from core.scheduler import scheduler
     scheduler.start()
     from services.solver_manager import start_async
@@ -121,6 +126,14 @@ def solver_restart():
     restart_async()
     data = status()
     data["message"] = "重启中"
+    return data
+
+
+@app.get("/api/runtime/logs")
+def runtime_logs(lines: int = 400):
+    data = read_app_log(max_lines=max(50, min(int(lines or 400), 2000)))
+    data["label"] = "后端应用日志"
+    data["path"] = str(APP_LOG_PATH)
     return data
 
 

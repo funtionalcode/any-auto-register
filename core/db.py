@@ -114,6 +114,29 @@ class SKApiKeyUsageLog(SQLModel, table=True):
     created_at: datetime = Field(default_factory=_utcnow)
 
 
+class ApiAccessLog(SQLModel, table=True):
+    __tablename__ = "api_access_logs"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    actor_type: str = Field(default="anonymous", index=True)
+    user_id: Optional[int] = Field(default=None, foreign_key="users.id", index=True)
+    username: str = Field(default="", index=True)
+    api_key_id: Optional[int] = Field(default=None, foreign_key="sk_api_keys.id", index=True)
+    api_key_name: str = ""
+    api_key_prefix: str = Field(default="", index=True)
+    method: str = Field(default="", index=True)
+    path: str = Field(default="", index=True)
+    status_code: int = Field(default=200, index=True)
+    success: bool = Field(default=True, index=True)
+    client_ip: str = ""
+    user_agent: str = ""
+    target_url: str = ""
+    model: str = ""
+    error: str = ""
+    duration_ms: int = 0
+    created_at: datetime = Field(default_factory=_utcnow, index=True)
+
+
 def save_account(account) -> 'AccountModel':
     """从 base_platform.Account 存入数据库（同平台同邮箱则更新）"""
     with Session(engine) as session:

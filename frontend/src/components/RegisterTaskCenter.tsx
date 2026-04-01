@@ -36,7 +36,7 @@ import {
   ReloadOutlined,
   ShrinkOutlined,
 } from '@ant-design/icons'
-import { apiFetch } from '@/lib/utils'
+import { API_BASE, apiFetch } from '@/lib/utils'
 
 const { Text, Paragraph } = Typography
 
@@ -69,6 +69,11 @@ interface ServerRegisterTask {
   errors?: string[]
   error?: string
   cashier_urls?: string[]
+  created_at?: number
+  updated_at?: number
+  finished_at?: number | null
+  log_count?: number
+  latest_log?: string
 }
 
 interface ManagedRegisterTask extends ServerRegisterTask {
@@ -370,6 +375,7 @@ export function RegisterTaskCenterProvider({ children }: { children: ReactNode }
   const [collapsedPlatforms, setCollapsedPlatforms] = useState<string[]>(() => readStoredCollapsedPlatforms())
   const tasksRef = useRef<ManagedRegisterTask[]>([])
   const activeTaskIdRef = useRef<string | null>(null)
+  const streamRefs = useRef<Map<string, EventSource>>(new Map())
 
   useEffect(() => {
     tasksRef.current = tasks
@@ -517,12 +523,115 @@ export function RegisterTaskCenterProvider({ children }: { children: ReactNode }
         .forEach((item) => {
           refreshTask(item.id).catch(() => {})
         })
-    }, 2000)
+    }, 5000)
 
     return () => {
       window.clearInterval(timer)
     }
   }, [refreshTask, tasks.length])
+
+  useEffect(() => {
+    const streams = streamRefs.current
+    const activeTaskIds = new Set(
+      tasks
+        .filter((item) => !isTerminal(item.status))
+        .map((item) => item.id),
+    )
+
+    tasks
+      .filter((item) => !isTerminal(item.status))
+      .forEach((item) => {
+        if (streams.has(item.id)) return
+
+        const stream = new EventSource(
+          `${API_BASE}/tasks/${encodeURIComponent(item.id)}/logs/stream?since=${Math.max(0, (item.logs || []).length)}`,
+        )
+
+        stream.onmessage = (event) => {
+          let payload: Record<string, unknown> = {}
+          try {
+            payload = JSON.parse(event.data || '{}')
+          } catch {
+            return
+          }
+
+          if (typeof payload.line === 'string') {
+            const line = payload.line
+            const index = typeof payload.index === 'number' ? payload.index : null
+            setTasks((current) => current.map((task) => {
+              if (task.id !== item.id) return task
+
+              const previousLogs = Array.isArray(task.logs) ? task.logs : []
+              const nextLogs = [...previousLogs]
+              if (index !== null && index >= 0) {
+                nextLogs[index] = line
+              } else {
+                nextLogs.push(line)
+              }
+
+              const compactLogs = nextLogs.filter((value): value is string => typeof value === 'string')
+              const newLogCount = Math.max(0, compactLogs.length - previousLogs.length)
+              const hidden = task.minimized || activeTaskIdRef.current !== task.id
+
+              return {
+                ...task,
+                logs: compactLogs,
+                unseenLogs: hidden ? (task.unseenLogs || 0) + newLogCount : 0,
+              }
+            }))
+          }
+
+          if (payload.snapshot && typeof payload.snapshot === 'object') {
+            const snapshot = payload.snapshot as ServerRegisterTask
+            setTasks((current) => current.map((task) => {
+              if (task.id !== item.id) return task
+              const previousLogsLength = Array.isArray(task.logs) ? task.logs.length : 0
+              const snapshotLogsLength = Array.isArray(snapshot.logs) ? snapshot.logs.length : previousLogsLength
+              const newLogCount = Math.max(0, snapshotLogsLength - previousLogsLength)
+              const hidden = task.minimized || activeTaskIdRef.current !== task.id
+              return createManagedTask(snapshot, task, {
+                minimized: task.minimized,
+                unseenLogs: hidden ? (task.unseenLogs || 0) + newLogCount : 0,
+              })
+            }))
+          }
+
+          if (payload.done) {
+            stream.close()
+            streams.delete(item.id)
+            refreshTask(item.id).catch(() => {})
+          }
+        }
+
+        stream.onerror = () => {
+          if (isTerminal(tasksRef.current.find((task) => task.id === item.id)?.status)) {
+            stream.close()
+            streams.delete(item.id)
+          }
+        }
+
+        streams.set(item.id, stream)
+      })
+
+    streams.forEach((stream, taskId) => {
+      if (activeTaskIds.has(taskId)) return
+      stream.close()
+      streams.delete(taskId)
+    })
+
+    return () => {
+      if (tasks.length > 0) return
+      streams.forEach((stream) => stream.close())
+      streams.clear()
+    }
+  }, [refreshTask, tasks])
+
+  useEffect(() => (
+    () => {
+      streamRefs.current.forEach((stream) => stream.close())
+      streamRefs.current.clear()
+    }
+  ), [])
 
   const activeTask = tasks.find((item) => item.id === activeTaskId) || null
   const minimizedTasks = tasks.filter((item) => item.minimized)

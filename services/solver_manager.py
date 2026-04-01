@@ -1,6 +1,5 @@
 """Turnstile Solver 进程管理 - 后端启动时自动拉起"""
 import os
-import re
 import signal
 import subprocess
 import sys
@@ -10,13 +9,12 @@ from pathlib import Path
 from typing import Any
 
 import requests
+from core.log_utils import read_log_tail
 
 _proc: subprocess.Popen | None = None
 _log_file = None
 _last_error = ""
 _lock = threading.Lock()
-_ANSI_ESCAPE_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
-_ORPHAN_ANSI_CODE_RE = re.compile(r"\[(?:\d{1,3}(?:;\d{1,3})*)m")
 
 
 def _log_path() -> Path:
@@ -77,62 +75,8 @@ def status() -> dict[str, Any]:
     }
 
 
-def _clean_log_text(text: str) -> str:
-    if not text:
-        return ""
-    cleaned = str(text).replace("\r\n", "\n").replace("\r", "\n")
-    cleaned = _ANSI_ESCAPE_RE.sub("", cleaned)
-    cleaned = _ORPHAN_ANSI_CODE_RE.sub("", cleaned)
-    return cleaned
-
-
 def read_log(max_lines: int = 400, max_bytes: int = 128 * 1024) -> dict[str, Any]:
-    path = _log_path()
-    if not path.exists():
-        return {
-            "log_path": str(path),
-            "exists": False,
-            "content": "",
-            "truncated": False,
-            "updated_at": 0.0,
-        }
-
-    try:
-        with open(path, "rb") as f:
-            f.seek(0, os.SEEK_END)
-            size = f.tell()
-            start = max(0, size - max(1, int(max_bytes or 1)))
-            f.seek(start)
-            raw = f.read()
-
-        truncated = start > 0
-        text = _clean_log_text(raw.decode("utf-8", errors="ignore"))
-        if truncated:
-            newline_index = text.find("\n")
-            if newline_index >= 0:
-                text = text[newline_index + 1 :]
-
-        lines = text.splitlines()
-        if len(lines) > max_lines:
-            lines = lines[-max_lines:]
-            truncated = True
-
-        return {
-            "log_path": str(path),
-            "exists": True,
-            "content": "\n".join(lines),
-            "truncated": truncated,
-            "updated_at": path.stat().st_mtime,
-        }
-    except Exception as e:
-        return {
-            "log_path": str(path),
-            "exists": True,
-            "content": "",
-            "truncated": False,
-            "updated_at": 0.0,
-            "error": str(e),
-        }
+    return read_log_tail(_log_path(), max_lines=max_lines, max_bytes=max_bytes)
 
 
 def _close_log_file() -> None:

@@ -14,11 +14,12 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
-from sqlmodel import Session, select
+from sqlmodel import Session, func, select
 
-from core.db import AccountModel, ProxyModel, SKApiKeyModel, SKApiKeyUsageLog, UserModel, engine, get_session
+from core.db import ApiAccessLog, AccountModel, ProxyModel, SKApiKeyModel, SKApiKeyUsageLog, UserModel, engine, get_session
 from core.proxy_utils import build_requests_proxy_config, normalize_proxy_url
 from core.security import (
+    decode_access_token,
     generate_sk_api_key,
     get_current_user,
     hash_sk_api_key,
@@ -662,6 +663,161 @@ def _record_usage_by_key_id(
         )
 
 
+def _should_record_api_access(path: str) -> bool:
+    normalized = str(path or "").strip()
+    if not normalized:
+        return False
+    return (
+        normalized.startswith("/v1/")
+        or normalized.startswith("/apps/anthropic/")
+        or normalized.startswith("/api/sk/")
+    )
+
+
+def _extract_request_client_ip(request: Request) -> str:
+    forwarded_for = str(request.headers.get("x-forwarded-for") or "").strip()
+    if forwarded_for:
+        return forwarded_for.split(",")[0].strip()
+    real_ip = str(request.headers.get("x-real-ip") or "").strip()
+    if real_ip:
+        return real_ip
+    client = getattr(request, "client", None)
+    host = getattr(client, "host", "") if client else ""
+    return str(host or "").strip()
+
+
+def _serialize_access_log(item: ApiAccessLog) -> dict[str, Any]:
+    return {
+        "id": int(item.id or 0),
+        "actor_type": item.actor_type,
+        "user_id": item.user_id,
+        "username": item.username,
+        "api_key_id": item.api_key_id,
+        "api_key_name": item.api_key_name,
+        "api_key_prefix": item.api_key_prefix,
+        "method": item.method,
+        "path": item.path,
+        "status_code": int(item.status_code or 0),
+        "success": bool(item.success),
+        "client_ip": item.client_ip,
+        "user_agent": item.user_agent,
+        "target_url": item.target_url,
+        "model": item.model,
+        "error": item.error,
+        "duration_ms": int(item.duration_ms or 0),
+        "created_at": item.created_at,
+    }
+
+
+def _record_api_access(
+    *,
+    request: Request,
+    status_code: int,
+    auth: SKAuthContext | None = None,
+    current_user: UserModel | None = None,
+    model: str = "",
+    target_url: str = "",
+    error: str = "",
+    duration_ms: int = 0,
+) -> None:
+    path = str(request.url.path or "").strip()
+    if not _should_record_api_access(path):
+        return
+
+    actor_type = "anonymous"
+    user_id: int | None = None
+    username = ""
+    api_key_id: int | None = None
+    api_key_name = ""
+    api_key_prefix = ""
+
+    if auth:
+        actor_type = "sk_key"
+        user_id = int(auth.owner.id or 0) or None
+        username = str(auth.owner.username or "").strip()
+        api_key_id = int(auth.api_key.id or 0) or None
+        api_key_name = str(auth.api_key.name or "").strip()
+        api_key_prefix = str(auth.api_key.key_prefix or "").strip()
+        if not target_url:
+            target_url = str(auth.api_key.target_url or "").strip()
+    elif current_user:
+        actor_type = "user"
+        user_id = int(current_user.id or 0) or None
+        username = str(current_user.username or "").strip()
+    else:
+        auth_header = str(request.headers.get("authorization") or "").strip()
+        if auth_header.lower().startswith("bearer "):
+            raw_token = auth_header[7:].strip()
+            if raw_token.startswith("sk-"):
+                with Session(engine) as session:
+                    try:
+                        auth_context = _resolve_sk_auth_context_from_raw_key(raw_token, session)
+                    except HTTPException:
+                        auth_context = None
+                if auth_context:
+                    actor_type = "sk_key"
+                    user_id = int(auth_context.owner.id or 0) or None
+                    username = str(auth_context.owner.username or "").strip()
+                    api_key_id = int(auth_context.api_key.id or 0) or None
+                    api_key_name = str(auth_context.api_key.name or "").strip()
+                    api_key_prefix = str(auth_context.api_key.key_prefix or "").strip()
+                    if not target_url:
+                        target_url = str(auth_context.api_key.target_url or "").strip()
+            else:
+                try:
+                    payload = decode_access_token(raw_token)
+                except HTTPException:
+                    payload = {}
+                resolved_user_id = int(payload.get("uid") or 0)
+                if resolved_user_id > 0:
+                    with Session(engine) as session:
+                        user = session.get(UserModel, resolved_user_id)
+                    if user and user.is_active:
+                        actor_type = "user"
+                        user_id = int(user.id or 0) or None
+                        username = str(user.username or "").strip()
+        else:
+            raw_key = str(request.headers.get("x-api-key") or request.headers.get("anthropic-api-key") or "").strip()
+            if raw_key:
+                with Session(engine) as session:
+                    try:
+                        auth_context = _resolve_sk_auth_context_from_raw_key(raw_key, session)
+                    except HTTPException:
+                        auth_context = None
+                if auth_context:
+                    actor_type = "sk_key"
+                    user_id = int(auth_context.owner.id or 0) or None
+                    username = str(auth_context.owner.username or "").strip()
+                    api_key_id = int(auth_context.api_key.id or 0) or None
+                    api_key_name = str(auth_context.api_key.name or "").strip()
+                    api_key_prefix = str(auth_context.api_key.key_prefix or "").strip()
+                    if not target_url:
+                        target_url = str(auth_context.api_key.target_url or "").strip()
+
+    with Session(engine) as session:
+        session.add(
+            ApiAccessLog(
+                actor_type=actor_type,
+                user_id=user_id,
+                username=username,
+                api_key_id=api_key_id,
+                api_key_name=api_key_name,
+                api_key_prefix=api_key_prefix,
+                method=str(request.method or "").upper(),
+                path=path,
+                status_code=int(status_code or 0),
+                success=int(status_code or 0) < 400,
+                client_ip=_extract_request_client_ip(request),
+                user_agent=str(request.headers.get("user-agent") or "").strip(),
+                target_url=str(target_url or "").strip(),
+                model=str(model or "").strip(),
+                error=str(error or "").strip()[:500],
+                duration_ms=max(0, int(duration_ms or 0)),
+            )
+        )
+        session.commit()
+
+
 def _ensure_quota(item: SKApiKeyModel, planned_tokens: int) -> None:
     limit = int(item.token_limit or 0)
     if limit <= 0:
@@ -1134,9 +1290,61 @@ def get_sk_key_usage(
     }
 
 
-@router.post("/sk/authorize")
-def authorize_sk_key(auth: SKAuthContext = Depends(get_sk_auth_context)):
+@router.get("/access-logs")
+def list_access_logs(
+    page: int = 1,
+    page_size: int = 20,
+    api_key_id: Optional[int] = None,
+    user_id: Optional[int] = None,
+    path: str = "",
+    success: Optional[bool] = None,
+    current_user: UserModel = Depends(get_current_user),
+    session: Session = Depends(get_session),
+):
+    current_page = max(1, int(page or 1))
+    size = max(1, min(int(page_size or 20), 100))
+    conditions = []
+
+    if current_user.role != "admin":
+        conditions.append(ApiAccessLog.user_id == int(current_user.id or 0))
+    elif user_id:
+        conditions.append(ApiAccessLog.user_id == int(user_id))
+
+    if api_key_id:
+        conditions.append(ApiAccessLog.api_key_id == int(api_key_id))
+    if str(path or "").strip():
+        conditions.append(ApiAccessLog.path.contains(str(path).strip()))
+    if success is not None:
+        conditions.append(ApiAccessLog.success == bool(success))
+
+    list_statement = select(ApiAccessLog)
+    count_statement = select(func.count()).select_from(ApiAccessLog)
+    for condition in conditions:
+        list_statement = list_statement.where(condition)
+        count_statement = count_statement.where(condition)
+
+    total = int(session.exec(count_statement).one() or 0)
+    rows = session.exec(
+        list_statement
+        .order_by(ApiAccessLog.id.desc())
+        .offset((current_page - 1) * size)
+        .limit(size)
+    ).all()
+
     return {
+        "page": current_page,
+        "page_size": size,
+        "total": total,
+        "items": [_serialize_access_log(item) for item in rows],
+    }
+
+
+@router.post("/sk/authorize")
+def authorize_sk_key(
+    request: Request,
+    auth: SKAuthContext = Depends(get_sk_auth_context),
+):
+    response_payload = {
         "ok": True,
         "user": {
             "id": int(auth.owner.id or 0),
@@ -1145,6 +1353,13 @@ def authorize_sk_key(auth: SKAuthContext = Depends(get_sk_auth_context)):
         },
         "api_key": _serialize_key(auth.api_key, owner=auth.owner, proxy=auth.proxy),
     }
+    _record_api_access(
+        request=request,
+        status_code=status.HTTP_200_OK,
+        auth=auth,
+        target_url=str(auth.api_key.target_url or "").strip(),
+    )
+    return response_payload
 
 
 def _build_upstream_headers(auth: SKAuthContext) -> dict[str, str]:
@@ -2404,44 +2619,75 @@ def _handle_official_chatgpt_stream_completion(
 
 @router.get("/sk/models")
 @openai_router.get("/models")
-def list_openai_models(auth: SKAuthContext = Depends(get_sk_auth_context)):
+def list_openai_models(
+    request: Request,
+    auth: SKAuthContext = Depends(get_sk_auth_context),
+):
+    started_at = time.monotonic()
     target_url = _normalize_chat_url(auth.api_key.target_url)
-    if _is_official_chatgpt_target(target_url):
-        return _handle_official_chatgpt_models(auth, target_url)
+    try:
+        if _is_official_chatgpt_target(target_url):
+            response = _handle_official_chatgpt_models(auth, target_url)
+        else:
+            import requests
 
-    import requests
+            models_url = _derive_models_url(target_url)
+            upstream_response = requests.get(
+                models_url,
+                headers=_build_upstream_headers(auth),
+                proxies=build_requests_proxy_config(auth.proxy_url),
+                timeout=60,
+            )
+            success = upstream_response.status_code < 400
+            error_text = "" if success else str(upstream_response.text or "")[:500]
+            _record_usage_by_key_id(
+                int(auth.api_key.id or 0),
+                model="models",
+                target_url=models_url,
+                proxy_url=auth.proxy_url,
+                prompt_tokens=0,
+                completion_tokens=0,
+                success=success,
+                error=error_text,
+            )
 
-    models_url = _derive_models_url(target_url)
-    response = requests.get(
-        models_url,
-        headers=_build_upstream_headers(auth),
-        proxies=build_requests_proxy_config(auth.proxy_url),
-        timeout=60,
-    )
-    success = response.status_code < 400
-    error_text = "" if success else str(response.text or "")[:500]
-    _record_usage_by_key_id(
-        int(auth.api_key.id or 0),
-        model="models",
-        target_url=models_url,
-        proxy_url=auth.proxy_url,
-        prompt_tokens=0,
-        completion_tokens=0,
-        success=success,
-        error=error_text,
-    )
+            response_content_type = str(upstream_response.headers.get("Content-Type", "") or "")
+            if "json" in response_content_type.lower():
+                try:
+                    response = JSONResponse(content=upstream_response.json(), status_code=upstream_response.status_code)
+                except ValueError:
+                    response = Response(
+                        content=str(upstream_response.text or ""),
+                        status_code=upstream_response.status_code,
+                        media_type=response_content_type or "text/plain",
+                    )
+            else:
+                response = Response(
+                    content=str(upstream_response.text or ""),
+                    status_code=upstream_response.status_code,
+                    media_type=response_content_type or "text/plain",
+                )
 
-    response_content_type = str(response.headers.get("Content-Type", "") or "")
-    if "json" in response_content_type.lower():
-        try:
-            return JSONResponse(content=response.json(), status_code=response.status_code)
-        except ValueError:
-            pass
-    return Response(
-        content=str(response.text or ""),
-        status_code=response.status_code,
-        media_type=response_content_type or "text/plain",
-    )
+        _record_api_access(
+            request=request,
+            status_code=int(response.status_code or status.HTTP_200_OK),
+            auth=auth,
+            model="models",
+            target_url=target_url,
+            duration_ms=int((time.monotonic() - started_at) * 1000),
+        )
+        return response
+    except HTTPException as exc:
+        _record_api_access(
+            request=request,
+            status_code=int(exc.status_code or status.HTTP_400_BAD_REQUEST),
+            auth=auth,
+            model="models",
+            target_url=target_url,
+            error=str(exc.detail or ""),
+            duration_ms=int((time.monotonic() - started_at) * 1000),
+        )
+        raise
 
 
 def _handle_openai_chat_completions_payload(
@@ -2624,12 +2870,36 @@ async def sk_chat_completions(
     request: Request,
     auth: SKAuthContext = Depends(get_sk_auth_context),
 ):
+    started_at = time.monotonic()
     try:
         payload = await request.json()
     except Exception as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="请求体必须是 JSON") from exc
 
-    return _handle_openai_chat_completions_payload(auth=auth, payload=payload)
+    model = str(payload.get("model") or "").strip()
+    target_url = _normalize_chat_url(payload.get("target_url") or auth.api_key.target_url or "")
+    try:
+        response = _handle_openai_chat_completions_payload(auth=auth, payload=payload)
+        _record_api_access(
+            request=request,
+            status_code=int(response.status_code or status.HTTP_200_OK),
+            auth=auth,
+            model=model,
+            target_url=target_url,
+            duration_ms=int((time.monotonic() - started_at) * 1000),
+        )
+        return response
+    except HTTPException as exc:
+        _record_api_access(
+            request=request,
+            status_code=int(exc.status_code or status.HTTP_400_BAD_REQUEST),
+            auth=auth,
+            model=model,
+            target_url=target_url,
+            error=str(exc.detail or ""),
+            duration_ms=int((time.monotonic() - started_at) * 1000),
+        )
+        raise
 
 
 @router.post("/sk/anthropic/messages")

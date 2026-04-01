@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -16,6 +15,7 @@ from urllib.parse import urlsplit
 
 import requests
 import yaml
+from core.log_utils import read_log_tail
 
 _ROOT = Path(__file__).resolve().parents[2]
 _EXT_ROOT = _ROOT / "_ext_targets"
@@ -69,9 +69,6 @@ _LOG_FILES: dict[str, Any] = {}
 _LAST_ERROR: dict[str, str] = {}
 _STARTING: set[str] = set()
 _LOCK = threading.Lock()
-_ANSI_ESCAPE_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
-_ORPHAN_ANSI_CODE_RE = re.compile(r"\[(?:\d{1,3}(?:;\d{1,3})*)m")
-_CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
 _MANAGED_SERVICE_NAMES = ("cliproxyapi", "grok2api")
 _MANAGED_SERVICE_DEFAULTS = {
     "cliproxyapi": {"installed": True, "started": True},
@@ -237,16 +234,6 @@ def _repo_path(name: str) -> Path:
 
 def _log_path(name: str) -> Path:
     return _LOG_ROOT / f"{name}.log"
-
-
-def _clean_log_text(text: str) -> str:
-    if not text:
-        return ""
-    cleaned = str(text).replace("\r\n", "\n").replace("\r", "\n")
-    cleaned = _ANSI_ESCAPE_RE.sub("", cleaned)
-    cleaned = _ORPHAN_ANSI_CODE_RE.sub("", cleaned)
-    cleaned = _CONTROL_CHAR_RE.sub("", cleaned)
-    return cleaned
 
 
 def _close_log(name: str):
@@ -485,55 +472,13 @@ def read_log(name: str, max_lines: int = 400, max_bytes: int = 128 * 1024) -> di
     if name not in _SERVICE_META:
         raise KeyError(name)
 
-    path = _log_path(name)
-    if not path.exists():
-        return {
-            "name": name,
-            "log_path": str(path),
-            "exists": False,
-            "content": "",
-            "truncated": False,
-            "updated_at": 0.0,
-        }
-
-    try:
-        with open(path, "rb") as f:
-            f.seek(0, os.SEEK_END)
-            size = f.tell()
-            start = max(0, size - max(1, int(max_bytes or 1)))
-            f.seek(start)
-            raw = f.read()
-
-        truncated = start > 0
-        text = _clean_log_text(raw.decode("utf-8", errors="ignore"))
-        if truncated:
-            newline_index = text.find("\n")
-            if newline_index >= 0:
-                text = text[newline_index + 1 :]
-
-        lines = text.splitlines()
-        if len(lines) > max_lines:
-            lines = lines[-max_lines:]
-            truncated = True
-
-        return {
-            "name": name,
-            "log_path": str(path),
-            "exists": True,
-            "content": "\n".join(lines),
-            "truncated": truncated,
-            "updated_at": path.stat().st_mtime,
-        }
-    except Exception as e:
-        return {
-            "name": name,
-            "log_path": str(path),
-            "exists": True,
-            "content": "",
-            "truncated": False,
-            "updated_at": 0.0,
-            "error": str(e),
-        }
+    return read_log_tail(
+        _log_path(name),
+        max_lines=max_lines,
+        max_bytes=max_bytes,
+        strip_control_chars=True,
+        extra={"name": name},
+    )
 
 
 def _find_go() -> str | None:

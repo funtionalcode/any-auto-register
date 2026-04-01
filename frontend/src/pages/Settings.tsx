@@ -1151,6 +1151,161 @@ function SolverStatus() {
   )
 }
 
+function ApplicationLogPanel() {
+  type LogViewMode = 'live' | 'static'
+  const [logViewMode, setLogViewMode] = useState<LogViewMode>('live')
+  const [logModal, setLogModal] = useState({
+    open: false,
+    path: '',
+    content: '',
+    loading: false,
+    truncated: false,
+    exists: false,
+  })
+  const logContainerRef = useRef<HTMLPreElement>(null)
+
+  const loadLog = async (options?: { silent?: boolean }) => {
+    const silent = Boolean(options?.silent)
+    if (!silent) {
+      setLogModal((current) => ({ ...current, loading: true }))
+    }
+    try {
+      const data = await apiFetch('/runtime/logs?lines=400')
+      setLogModal((current) => ({
+        ...current,
+        path: data.path || data.log_path || current.path,
+        content: data.content || '',
+        loading: false,
+        truncated: Boolean(data.truncated),
+        exists: data.exists !== false,
+      }))
+    } catch (e: any) {
+      setLogModal((current) => ({
+        ...current,
+        loading: false,
+        content: e?.message || '读取后端应用日志失败',
+        truncated: false,
+        exists: false,
+      }))
+    }
+  }
+
+  const openLogModal = async () => {
+    setLogModal({
+      open: true,
+      path: '',
+      content: '',
+      loading: true,
+      truncated: false,
+      exists: true,
+    })
+    await loadLog()
+  }
+
+  const copyLogContent = async () => {
+    try {
+      await navigator.clipboard.writeText(logModal.content)
+      message.success('日志已复制')
+    } catch {
+      message.error('复制失败')
+    }
+  }
+
+  useEffect(() => {
+    if (!logModal.open || logViewMode !== 'live') return
+    const timer = window.setInterval(() => {
+      void loadLog({ silent: true })
+    }, 1000)
+    return () => window.clearInterval(timer)
+  }, [logModal.open, logViewMode])
+
+  useEffect(() => {
+    if (!logModal.open || logViewMode !== 'live') return
+    const node = logContainerRef.current
+    if (node) {
+      node.scrollTop = node.scrollHeight
+    }
+  }, [logModal.content, logModal.open, logViewMode])
+
+  return (
+    <>
+      <Modal
+        open={logModal.open}
+        title="后端应用日志"
+        onCancel={() => setLogModal((current) => ({ ...current, open: false }))}
+        onOk={() => setLogModal((current) => ({ ...current, open: false }))}
+        width={900}
+        okText="关闭"
+        cancelButtonProps={{ style: { display: 'none' } }}
+      >
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8, gap: 12, flexWrap: 'wrap' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+            <div style={{ fontSize: 12, color: '#7a8ba3' }}>
+              {logModal.path || '暂无日志文件路径'}
+              {logModal.truncated ? ' · 已截取最近日志' : ''}
+            </div>
+            <Segmented<LogViewMode>
+              size="small"
+              value={logViewMode}
+              onChange={(value) => setLogViewMode(value)}
+              options={[
+                { label: '实时日志', value: 'live' },
+                { label: '静态日志', value: 'static' },
+              ]}
+            />
+          </div>
+          <Space>
+            <Button size="small" onClick={() => loadLog()} loading={logModal.loading}>
+              刷新日志
+            </Button>
+            <Button size="small" onClick={copyLogContent} disabled={!logModal.content}>
+              复制日志
+            </Button>
+          </Space>
+        </div>
+        <pre
+          ref={logContainerRef}
+          style={{
+            margin: 0,
+            maxHeight: 520,
+            overflow: 'auto',
+            padding: 12,
+            borderRadius: 8,
+            background: 'rgba(127,127,127,0.08)',
+            fontSize: 12,
+            lineHeight: 1.5,
+            whiteSpace: 'pre-wrap',
+            wordBreak: 'break-word',
+          }}
+        >
+          {logModal.loading && !logModal.content
+            ? '日志加载中...'
+            : logModal.content || (logModal.exists ? '日志文件暂无内容。' : '日志文件尚未生成。')}
+        </pre>
+        <div style={{ marginTop: 8, fontSize: 12, color: '#7a8ba3' }}>
+          {logViewMode === 'live' ? '实时日志模式：每秒自动刷新一次。' : '静态日志模式：仅在点击“刷新日志”时更新。'}
+        </div>
+      </Modal>
+
+      <Card
+        title="后端应用日志"
+        extra={<span style={{ fontSize: 12, color: '#7a8ba3' }}>记录任务执行、接口异常和运行时信息</span>}
+        style={{ marginBottom: 16 }}
+      >
+        <Space direction="vertical" style={{ width: '100%' }}>
+          <div>范围：当前 FastAPI 后端进程日志</div>
+          <div>模式：自动滚动文件，支持实时预览</div>
+          <Space wrap>
+            <Button onClick={openLogModal}>
+              查看日志
+            </Button>
+          </Space>
+        </Space>
+      </Card>
+    </>
+  )
+}
+
 function IntegrationsPanel() {
   type LogViewMode = 'live' | 'static'
   const [items, setItems] = useState<any[]>([])
@@ -1654,7 +1809,12 @@ export default function Settings() {
             </Form>
           ) : (
             <Form form={form} layout="vertical">
-              {activeTab === 'captcha' ? <SolverStatus /> : null}
+              {activeTab === 'captcha' ? (
+                <>
+                  <ApplicationLogPanel />
+                  <SolverStatus />
+                </>
+              ) : null}
               {currentTab.sections.map((section) => (
                 <ConfigSection key={section.key || section.title} section={section} />
               ))}

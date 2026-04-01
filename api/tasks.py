@@ -1,11 +1,18 @@
+import asyncio
+import json
+import logging
+import threading
+import time
+from copy import deepcopy
+from typing import Any, Optional
+
 from fastapi import APIRouter, BackgroundTasks, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-from sqlmodel import Session, select
-from typing import Optional
-from copy import deepcopy
+from sqlalchemy import or_
+from sqlmodel import Session, func, select
+
 from core.db import TaskLog, engine
-import time, json, asyncio, threading, logging
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
 logger = logging.getLogger(__name__)
@@ -80,6 +87,7 @@ def _prepare_register_request(req: RegisterTaskRequest) -> RegisterTaskRequest:
 def _create_task_record(
     task_id: str, req: RegisterTaskRequest, source: str, meta: dict | None = None
 ):
+    now = time.time()
     with _tasks_lock:
         _tasks[task_id] = {
             "id": task_id,
@@ -89,6 +97,11 @@ def _create_task_record(
             "meta": meta or {},
             "progress": f"0/{req.count}",
             "logs": [],
+            "created_at": now,
+            "updated_at": now,
+            "finished_at": None,
+            "log_count": 0,
+            "latest_log": "",
         }
 
 
@@ -133,8 +146,72 @@ def _log(task_id: str, msg: str):
     entry = f"[{ts}] {msg}"
     with _tasks_lock:
         if task_id in _tasks:
-            _tasks[task_id].setdefault("logs", []).append(entry)
-    print(entry)
+            task = _tasks[task_id]
+            task.setdefault("logs", []).append(entry)
+            task["updated_at"] = time.time()
+            task["log_count"] = len(task.get("logs", []))
+            task["latest_log"] = entry
+    logger.info("[Task %s] %s", task_id, msg)
+
+
+def _parse_task_log_detail(raw: str | dict | None) -> dict[str, Any]:
+    if isinstance(raw, dict):
+        return dict(raw)
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _normalize_positive_int(value: Any) -> int | None:
+    try:
+        normalized = int(value)
+    except (TypeError, ValueError):
+        return None
+    return normalized if normalized > 0 else None
+
+
+def _build_task_log_summary(detail: dict[str, Any] | None) -> dict[str, Any]:
+    payload = detail or {}
+    logs = payload.get("logs") if isinstance(payload.get("logs"), list) else []
+    attempt_no = _normalize_positive_int(payload.get("attempt_no"))
+    total_count = _normalize_positive_int(payload.get("total_count"))
+    log_count = _normalize_positive_int(payload.get("log_count")) or len(logs)
+    duration_ms = _normalize_positive_int(payload.get("duration_ms")) or 0
+
+    return {
+        "task_id": str(payload.get("task_id") or "").strip(),
+        "attempt_no": attempt_no,
+        "total_count": total_count,
+        "source": str(payload.get("source") or "").strip(),
+        "proxy": str(payload.get("proxy") or "").strip(),
+        "has_logs": bool(logs),
+        "log_count": log_count,
+        "latest_log": str(logs[-1] or "").strip() if logs else "",
+        "started_at": payload.get("started_at"),
+        "finished_at": payload.get("finished_at"),
+        "duration_ms": duration_ms,
+    }
+
+
+def _serialize_task_log(item: TaskLog, *, include_detail: bool = False) -> dict[str, Any]:
+    detail = _parse_task_log_detail(item.detail_json)
+    payload = {
+        "id": item.id,
+        "platform": item.platform,
+        "email": item.email,
+        "status": item.status,
+        "error": item.error,
+        "detail_json": item.detail_json,
+        "detail_summary": _build_task_log_summary(detail),
+        "created_at": item.created_at,
+    }
+    if include_detail:
+        payload["detail"] = detail
+    return payload
 
 
 def _build_task_log_detail(
@@ -146,18 +223,31 @@ def _build_task_log_detail(
     source: str = "manual",
     meta: dict | None = None,
     proxy: str | None = None,
+    started_at: float | None = None,
+    finished_at: float | None = None,
+    request: dict[str, Any] | None = None,
 ) -> dict:
+    normalized_logs = list(logs or [])
     detail: dict[str, object] = {
         "task_id": task_id,
         "attempt_no": attempt_no,
         "total_count": total_count,
         "source": source,
-        "logs": list(logs or []),
+        "logs": normalized_logs,
+        "log_count": len(normalized_logs),
     }
     if meta:
         detail["meta"] = meta
     if proxy:
         detail["proxy"] = proxy
+    if request:
+        detail["request"] = request
+    if started_at is not None:
+        detail["started_at"] = float(started_at)
+    if finished_at is not None:
+        detail["finished_at"] = float(finished_at)
+    if started_at is not None and finished_at is not None:
+        detail["duration_ms"] = max(0, int((finished_at - started_at) * 1000))
     return detail
 
 
@@ -201,12 +291,22 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
 
     with _tasks_lock:
         _tasks[task_id]["status"] = "running"
+        _tasks[task_id]["updated_at"] = time.time()
         task_source = str(_tasks[task_id].get("source") or "manual")
         task_meta = deepcopy(_tasks[task_id].get("meta") or {})
     success = 0
     errors = []
     start_gate_lock = threading.Lock()
     next_start_time = time.time()
+    task_request_summary = {
+        "platform": req.platform,
+        "count": req.count,
+        "concurrency": req.concurrency,
+        "register_delay_seconds": req.register_delay_seconds,
+        "executor_type": req.executor_type,
+        "captcha_solver": req.captcha_solver,
+        "has_proxy": bool(str(req.proxy or "").strip()),
+    }
 
     try:
         PlatformCls = get(req.platform)
@@ -228,6 +328,7 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
             nonlocal next_start_time
             attempt_logs: list[str] = []
             _proxy = None
+            attempt_started_at = time.time()
 
             def _attempt_log(msg: str):
                 ts = time.strftime("%H:%M:%S")
@@ -333,6 +434,9 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
                         source=task_source,
                         meta=task_meta,
                         proxy=_proxy,
+                        started_at=attempt_started_at,
+                        finished_at=time.time(),
+                        request=task_request_summary,
                     ),
                 )
                 return True
@@ -353,6 +457,9 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
                         source=task_source,
                         meta=task_meta,
                         proxy=_proxy,
+                        started_at=attempt_started_at,
+                        finished_at=time.time(),
+                        request=task_request_summary,
                     ),
                 )
                 return str(e)
@@ -378,12 +485,16 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
         with _tasks_lock:
             _tasks[task_id]["status"] = "failed"
             _tasks[task_id]["error"] = str(e)
+            _tasks[task_id]["updated_at"] = time.time()
+            _tasks[task_id]["finished_at"] = time.time()
         return
 
     with _tasks_lock:
         _tasks[task_id]["status"] = "done"
         _tasks[task_id]["success"] = success
         _tasks[task_id]["errors"] = errors
+        _tasks[task_id]["updated_at"] = time.time()
+        _tasks[task_id]["finished_at"] = time.time()
     _log(task_id, f"完成: 成功 {success} 个, 失败 {len(errors)} 个")
     _cleanup_old_tasks()
 
@@ -398,15 +509,81 @@ def create_register_task(
 
 
 @router.get("/logs")
-def get_logs(platform: str = None, page: int = 1, page_size: int = 50):
+def get_logs(
+    platform: str = "",
+    status: str = "",
+    source: str = "",
+    email: str = "",
+    keyword: str = "",
+    task_id: str = "",
+    page: int = 1,
+    page_size: int = 50,
+    include_detail: bool = False,
+):
+    current_page = max(1, int(page or 1))
+    size = max(1, min(int(page_size or 50), 100))
+    conditions = []
+
+    platform = str(platform or "").strip()
+    status = str(status or "").strip()
+    source = str(source or "").strip()
+    email = str(email or "").strip()
+    keyword = str(keyword or "").strip()
+    task_id = str(task_id or "").strip()
+
+    if platform:
+        conditions.append(TaskLog.platform == platform)
+    if status:
+        conditions.append(TaskLog.status == status)
+    if email:
+        conditions.append(TaskLog.email.contains(email))
+    if source:
+        conditions.append(TaskLog.detail_json.contains(f'"source": "{source}"'))
+    if task_id:
+        conditions.append(TaskLog.detail_json.contains(f'"task_id": "{task_id}"'))
+    if keyword:
+        conditions.append(
+            or_(
+                TaskLog.platform.contains(keyword),
+                TaskLog.email.contains(keyword),
+                TaskLog.error.contains(keyword),
+                TaskLog.detail_json.contains(keyword),
+            )
+        )
+
     with Session(engine) as s:
-        q = select(TaskLog)
-        if platform:
-            q = q.where(TaskLog.platform == platform)
-        q = q.order_by(TaskLog.id.desc())
-        total = len(s.exec(q).all())
-        items = s.exec(q.offset((page - 1) * page_size).limit(page_size)).all()
-    return {"total": total, "items": items}
+        list_statement = select(TaskLog)
+        count_statement = select(func.count()).select_from(TaskLog)
+        for condition in conditions:
+            list_statement = list_statement.where(condition)
+            count_statement = count_statement.where(condition)
+
+        total = int(s.exec(count_statement).one() or 0)
+        rows = s.exec(
+            list_statement
+            .order_by(TaskLog.id.desc())
+            .offset((current_page - 1) * size)
+            .limit(size)
+        ).all()
+
+    return {
+        "page": current_page,
+        "page_size": size,
+        "total": total,
+        "items": [
+            _serialize_task_log(item, include_detail=include_detail)
+            for item in rows
+        ],
+    }
+
+
+@router.get("/logs/{log_id}")
+def get_log_detail(log_id: int):
+    with Session(engine) as s:
+        item = s.get(TaskLog, log_id)
+        if not item:
+            raise HTTPException(404, "任务历史不存在")
+        return _serialize_task_log(item, include_detail=True)
 
 
 @router.post("/logs/batch-delete")
@@ -450,16 +627,27 @@ async def stream_logs(task_id: str, since: int = 0):
             raise HTTPException(404, "任务不存在")
 
     async def event_generator():
-        sent = since
+        sent = max(0, int(since or 0))
+        initial_snapshot_sent = False
         while True:
             with _tasks_lock:
-                logs = list(_tasks.get(task_id, {}).get("logs", []))
-                status = _tasks.get(task_id, {}).get("status", "")
+                task = deepcopy(_tasks.get(task_id, {}))
+                logs = list(task.get("logs", []))
+                status = str(task.get("status", "") or "")
+            if not initial_snapshot_sent:
+                payload = {
+                    "snapshot": task,
+                    "since": len(logs),
+                }
+                yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                initial_snapshot_sent = True
             while sent < len(logs):
-                yield f"data: {json.dumps({'line': logs[sent]})}\n\n"
+                yield f"data: {json.dumps({'line': logs[sent], 'index': sent}, ensure_ascii=False)}\n\n"
                 sent += 1
             if status in ("done", "failed"):
-                yield f"data: {json.dumps({'done': True, 'status': status})}\n\n"
+                yield (
+                    f"data: {json.dumps({'done': True, 'status': status, 'task': task}, ensure_ascii=False)}\n\n"
+                )
                 break
             await asyncio.sleep(0.5)
 
