@@ -405,6 +405,10 @@ export default function AccessControl() {
                     外部客户端直接调用 <Text code>{`${apiBase}/v1/chat/completions`}</Text>，
                     Header 使用 <Text code>Authorization: Bearer sk-...</Text>。
                   </Paragraph>
+                  <Paragraph style={{ marginBottom: 12 }}>
+                    Anthropic Messages 兼容入口：<Text code>{`${apiBase}/v1/messages`}</Text>，
+                    Header 可使用 <Text code>x-api-key: sk-...</Text>。
+                  </Paragraph>
                   <Paragraph copyable={{ text: `curl ${apiBase}/v1/models -H "Authorization: Bearer sk-xxxx"` }}>
                     <Text code>{`curl ${apiBase}/v1/models -H "Authorization: Bearer sk-xxxx"`}</Text>
                   </Paragraph>
@@ -416,6 +420,16 @@ export default function AccessControl() {
                   >
                     <Text code style={{ whiteSpace: 'pre-wrap' }}>
                       {`curl ${apiBase}/v1/chat/completions -H "Authorization: Bearer sk-xxxx" -H "Content-Type: application/json" -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hello"}]}'`}
+                    </Text>
+                  </Paragraph>
+                  <Paragraph
+                    copyable={{
+                      text: `curl ${apiBase}/v1/messages -H "x-api-key: sk-xxxx" -H "anthropic-version: 2023-06-01" -H "Content-Type: application/json" -d '{"model":"claude-sonnet-4-20250514","max_tokens":256,"messages":[{"role":"user","content":"hello"}]}'`,
+                    }}
+                    style={{ marginBottom: 0 }}
+                  >
+                    <Text code style={{ whiteSpace: 'pre-wrap' }}>
+                      {`curl ${apiBase}/v1/messages -H "x-api-key: sk-xxxx" -H "anthropic-version: 2023-06-01" -H "Content-Type: application/json" -d '{"model":"claude-sonnet-4-20250514","max_tokens":256,"messages":[{"role":"user","content":"hello"}]}'`}
                     </Text>
                   </Paragraph>
                 </Card>

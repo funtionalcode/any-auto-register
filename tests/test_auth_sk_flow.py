@@ -55,6 +55,8 @@ class AuthAndSkFlowTests(unittest.TestCase):
         SQLModel.metadata.create_all(self.engine)
         self.original_sk_engine = sk_keys_module.engine
         sk_keys_module.engine = self.engine
+        with sk_keys_module._responses_store_lock:
+            sk_keys_module._responses_store.clear()
 
         app = FastAPI()
         app.include_router(auth_router, prefix="/api")
@@ -71,6 +73,8 @@ class AuthAndSkFlowTests(unittest.TestCase):
     def tearDown(self):
         self.client.close()
         sk_keys_module.engine = self.original_sk_engine
+        with sk_keys_module._responses_store_lock:
+            sk_keys_module._responses_store.clear()
         self.temp_dir.cleanup()
 
     def _bootstrap_admin(self) -> tuple[dict, dict]:
@@ -501,6 +505,309 @@ class AuthAndSkFlowTests(unittest.TestCase):
         usage_payload = usage_resp.json()
         self.assertEqual(usage_payload["summary"]["request_count"], 1)
         self.assertGreater(usage_payload["summary"]["total_tokens_used"], 0)
+
+    def test_sk_key_supports_anthropic_messages_protocol(self):
+        _, admin_headers = self._bootstrap_admin()
+
+        create_key_resp = self.client.post(
+            "/api/sk-keys",
+            headers=admin_headers,
+            json={
+                "name": "anthropic-key",
+                "upstream_api_key": "chatgpt-access-token",
+            },
+        )
+        self.assertEqual(create_key_resp.status_code, 200, create_key_resp.text)
+        create_key_payload = create_key_resp.json()
+        headers = {
+            "x-api-key": create_key_payload["secret_key"],
+            "anthropic-version": "2023-06-01",
+        }
+
+        completion_result = SimpleNamespace(
+            ok=True,
+            invalid=False,
+            message="ok",
+            response_excerpt="pong",
+            response_text="pong",
+            model="claude-sonnet-4-20250514",
+            conversation_id="conv_anthropic",
+            response_message_id="msg_anthropic",
+            used_proxy="",
+            updated_access_token="",
+            updated_refresh_token="",
+        )
+
+        with mock.patch("platforms.chatgpt.message_tester.send_chat_message", return_value=completion_result) as mock_send:
+            response = self.client.post(
+                "/v1/messages",
+                headers=headers,
+                json={
+                    "model": "claude-sonnet-4-20250514",
+                    "system": "You are helpful",
+                    "max_tokens": 128,
+                    "messages": [{"role": "user", "content": "hello"}],
+                },
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(payload["type"], "message")
+        self.assertEqual(payload["role"], "assistant")
+        self.assertEqual(payload["content"][0]["text"], "pong")
+        self.assertEqual(payload["usage"]["output_tokens"], 1)
+        self.assertEqual(payload["stop_reason"], "end_turn")
+        self.assertTrue(mock_send.called)
+        self.assertEqual(mock_send.call_args.kwargs["target_url"], "https://chatgpt.com/backend-api/conversation")
+        self.assertIn("You are helpful", mock_send.call_args.kwargs["prompt"])
+        self.assertIn("hello", mock_send.call_args.kwargs["prompt"])
+
+    def test_sk_key_wraps_chatgpt_stream_as_anthropic_sse(self):
+        _, admin_headers = self._bootstrap_admin()
+
+        create_key_resp = self.client.post(
+            "/api/sk-keys",
+            headers=admin_headers,
+            json={
+                "name": "anthropic-stream-key",
+                "upstream_api_key": "chatgpt-access-token",
+            },
+        )
+        self.assertEqual(create_key_resp.status_code, 200, create_key_resp.text)
+        create_key_payload = create_key_resp.json()
+        headers = {
+            "x-api-key": create_key_payload["secret_key"],
+            "anthropic-version": "2023-06-01",
+        }
+
+        def fake_stream(*args, **kwargs):
+            yield {"event": "meta", "data": {"target_url": "https://chatgpt.com/backend-api/conversation"}}
+            yield {"event": "delta", "data": {"delta": "po"}}
+            yield {"event": "delta", "data": {"delta": "ng"}}
+            yield {"event": "done", "data": {"response_text": "pong"}}
+
+        with mock.patch("platforms.chatgpt.message_tester.stream_chat_message", side_effect=fake_stream):
+            response = self.client.post(
+                "/v1/messages",
+                headers=headers,
+                json={
+                    "model": "claude-sonnet-4-20250514",
+                    "max_tokens": 128,
+                    "stream": True,
+                    "messages": [{"role": "user", "content": "hello"}],
+                },
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertIn("event: message_start", response.text)
+        self.assertIn("event: content_block_start", response.text)
+        self.assertIn("event: content_block_delta", response.text)
+        self.assertIn('"text": "po"', response.text)
+        self.assertIn('"text": "ng"', response.text)
+        self.assertIn("event: message_stop", response.text)
+
+    def test_sk_key_supports_openai_responses_protocol(self):
+        _, admin_headers = self._bootstrap_admin()
+
+        create_key_resp = self.client.post(
+            "/api/sk-keys",
+            headers=admin_headers,
+            json={
+                "name": "responses-key",
+                "upstream_api_key": "chatgpt-access-token",
+            },
+        )
+        self.assertEqual(create_key_resp.status_code, 200, create_key_resp.text)
+        create_key_payload = create_key_resp.json()
+        headers = {"Authorization": f"Bearer {create_key_payload['secret_key']}"}
+
+        completion_result = SimpleNamespace(
+            ok=True,
+            invalid=False,
+            message="ok",
+            response_excerpt="pong",
+            response_text="pong",
+            model="gpt-5",
+            conversation_id="conv_resp",
+            response_message_id="msg_resp",
+            used_proxy="",
+            updated_access_token="",
+            updated_refresh_token="",
+        )
+
+        with mock.patch("platforms.chatgpt.message_tester.send_chat_message", return_value=completion_result) as mock_send:
+            response = self.client.post(
+                "/v1/responses",
+                headers=headers,
+                json={
+                    "model": "gpt-5",
+                    "instructions": "You are helpful",
+                    "input": "hello",
+                    "max_output_tokens": 128,
+                    "metadata": {"scene": "test"},
+                },
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(payload["object"], "response")
+        self.assertEqual(payload["status"], "completed")
+        self.assertEqual(payload["output"][0]["type"], "message")
+        self.assertEqual(payload["output"][0]["content"][0]["type"], "output_text")
+        self.assertEqual(payload["output"][0]["content"][0]["text"], "pong")
+        self.assertEqual(payload["output_text"], "pong")
+        self.assertEqual(payload["usage"]["output_tokens"], 1)
+        self.assertEqual(payload["metadata"]["scene"], "test")
+        self.assertTrue(mock_send.called)
+        self.assertIn("You are helpful", mock_send.call_args.kwargs["prompt"])
+        self.assertIn("hello", mock_send.call_args.kwargs["prompt"])
+
+        response_id = payload["id"]
+        get_resp = self.client.get(f"/v1/responses/{response_id}", headers=headers)
+        self.assertEqual(get_resp.status_code, 200, get_resp.text)
+        self.assertEqual(get_resp.json()["id"], response_id)
+
+        items_resp = self.client.get(f"/v1/responses/{response_id}/input_items", headers=headers)
+        self.assertEqual(items_resp.status_code, 200, items_resp.text)
+        items_payload = items_resp.json()
+        self.assertEqual(items_payload["object"], "list")
+        self.assertEqual(items_payload["data"][0]["role"], "user")
+        self.assertEqual(items_payload["data"][0]["content"][0]["type"], "input_text")
+        self.assertEqual(items_payload["data"][0]["content"][0]["text"], "hello")
+
+        token_resp = self.client.post(
+            "/v1/responses/input_tokens",
+            headers=headers,
+            json={
+                "model": "gpt-5",
+                "instructions": "You are helpful",
+                "input": "hello",
+            },
+        )
+        self.assertEqual(token_resp.status_code, 200, token_resp.text)
+        self.assertGreater(token_resp.json()["input_tokens"], 0)
+
+        delete_resp = self.client.delete(f"/v1/responses/{response_id}", headers=headers)
+        self.assertEqual(delete_resp.status_code, 200, delete_resp.text)
+        self.assertTrue(delete_resp.json()["deleted"])
+
+    def test_sk_key_responses_previous_response_id_reuses_history(self):
+        _, admin_headers = self._bootstrap_admin()
+
+        create_key_resp = self.client.post(
+            "/api/sk-keys",
+            headers=admin_headers,
+            json={
+                "name": "responses-history-key",
+                "upstream_api_key": "chatgpt-access-token",
+            },
+        )
+        self.assertEqual(create_key_resp.status_code, 200, create_key_resp.text)
+        create_key_payload = create_key_resp.json()
+        headers = {"Authorization": f"Bearer {create_key_payload['secret_key']}"}
+
+        completion_results = [
+            SimpleNamespace(
+                ok=True,
+                invalid=False,
+                message="ok",
+                response_excerpt="pong one",
+                response_text="pong one",
+                model="gpt-5",
+                conversation_id="conv_hist_1",
+                response_message_id="msg_hist_1",
+                used_proxy="",
+                updated_access_token="",
+                updated_refresh_token="",
+            ),
+            SimpleNamespace(
+                ok=True,
+                invalid=False,
+                message="ok",
+                response_excerpt="pong two",
+                response_text="pong two",
+                model="gpt-5",
+                conversation_id="conv_hist_2",
+                response_message_id="msg_hist_2",
+                used_proxy="",
+                updated_access_token="",
+                updated_refresh_token="",
+            ),
+        ]
+
+        with mock.patch("platforms.chatgpt.message_tester.send_chat_message", side_effect=completion_results) as mock_send:
+            first_resp = self.client.post(
+                "/v1/responses",
+                headers=headers,
+                json={
+                    "model": "gpt-5",
+                    "input": "hello one",
+                },
+            )
+            self.assertEqual(first_resp.status_code, 200, first_resp.text)
+            first_id = first_resp.json()["id"]
+
+            second_resp = self.client.post(
+                "/v1/responses",
+                headers=headers,
+                json={
+                    "model": "gpt-5",
+                    "previous_response_id": first_id,
+                    "input": "hello two",
+                },
+            )
+
+        self.assertEqual(second_resp.status_code, 200, second_resp.text)
+        self.assertEqual(mock_send.call_count, 2)
+        second_prompt = mock_send.call_args_list[1].kwargs["prompt"]
+        self.assertIn("hello one", second_prompt)
+        self.assertIn("pong one", second_prompt)
+        self.assertIn("hello two", second_prompt)
+
+    def test_sk_key_wraps_chatgpt_stream_as_responses_sse(self):
+        _, admin_headers = self._bootstrap_admin()
+
+        create_key_resp = self.client.post(
+            "/api/sk-keys",
+            headers=admin_headers,
+            json={
+                "name": "responses-stream-key",
+                "upstream_api_key": "chatgpt-access-token",
+            },
+        )
+        self.assertEqual(create_key_resp.status_code, 200, create_key_resp.text)
+        create_key_payload = create_key_resp.json()
+        headers = {"Authorization": f"Bearer {create_key_payload['secret_key']}"}
+
+        def fake_stream(*args, **kwargs):
+            yield {"event": "meta", "data": {"target_url": "https://chatgpt.com/backend-api/conversation"}}
+            yield {"event": "delta", "data": {"delta": "po"}}
+            yield {"event": "delta", "data": {"delta": "ng"}}
+            yield {
+                "event": "done",
+                "data": {
+                    "response_text": "pong",
+                },
+            }
+
+        with mock.patch("platforms.chatgpt.message_tester.stream_chat_message", side_effect=fake_stream):
+            response = self.client.post(
+                "/v1/responses",
+                headers=headers,
+                json={
+                    "model": "gpt-5",
+                    "stream": True,
+                    "input": "hello",
+                },
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertIn("event: response.created", response.text)
+        self.assertIn("event: response.output_item.added", response.text)
+        self.assertIn("event: response.output_text.delta", response.text)
+        self.assertIn('"delta": "po"', response.text)
+        self.assertIn('"delta": "ng"', response.text)
+        self.assertIn("event: response.completed", response.text)
 
     def test_sk_key_official_mode_round_robins_local_chatgpt_accounts_when_no_upstream_token(self):
         _, admin_headers = self._bootstrap_admin()

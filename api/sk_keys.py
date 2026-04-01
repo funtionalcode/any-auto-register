@@ -34,6 +34,8 @@ DEFAULT_CHATGPT_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 AVAILABLE_CHATGPT_ACCOUNT_STATUSES = ("registered", "trial", "subscribed")
 _chatgpt_account_rr_lock = threading.Lock()
 _chatgpt_account_rr_index = 0
+_responses_store_lock = threading.Lock()
+_responses_store: dict[str, dict[str, Any]] = {}
 USD_PER_1M_TOKENS = Decimal("2")
 TOKENS_PER_USD = Decimal("500000")
 USD_PRECISION = Decimal("0.000001")
@@ -378,6 +380,30 @@ def _build_openai_chat_completion_response(
     return payload
 
 
+def _build_anthropic_error_response(message: str, *, status_code: int, error_type: str | None = None) -> JSONResponse:
+    if not error_type:
+        if status_code == 401:
+            error_type = "authentication_error"
+        elif status_code == 403:
+            error_type = "permission_error"
+        elif status_code == 429:
+            error_type = "rate_limit_error"
+        elif status_code >= 500:
+            error_type = "api_error"
+        else:
+            error_type = "invalid_request_error"
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "type": "error",
+            "error": {
+                "type": error_type,
+                "message": str(message or "").strip() or "request failed",
+            },
+        },
+    )
+
+
 def _build_openai_stream_chunk(
     *,
     completion_id: str,
@@ -464,6 +490,25 @@ def _serialize_proxy(proxy: ProxyModel | None) -> Optional[dict]:
         "region": proxy.region,
         "is_active": proxy.is_active,
     }
+
+
+def _resolve_sk_auth_context_from_raw_key(raw_key: str, session: Session) -> "SKAuthContext":
+    normalized_key = str(raw_key or "").strip()
+    if not normalized_key:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="缺少 SK Bearer 令牌")
+    if not normalized_key.startswith("sk-"):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="SK Bearer 令牌格式无效")
+
+    item = session.exec(select(SKApiKeyModel).where(SKApiKeyModel.key_hash == hash_sk_api_key(normalized_key))).first()
+    if not item or not item.is_active:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="SK Bearer 令牌无效或已停用")
+
+    owner = session.get(UserModel, item.user_id)
+    if not owner or not owner.is_active:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="SK Key 所属用户不存在或已禁用")
+
+    proxy_url, proxy = _resolve_proxy_binding(item, session)
+    return SKAuthContext(api_key=item, owner=owner, proxy_url=proxy_url, proxy=proxy)
 
 
 def _remaining_tokens(item: SKApiKeyModel) -> Optional[int]:
@@ -652,21 +697,24 @@ def get_sk_auth_context(
 ) -> SKAuthContext:
     if not credentials or str(credentials.scheme or "").lower() != "bearer":
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="缺少 SK Bearer 令牌")
+    return _resolve_sk_auth_context_from_raw_key(str(credentials.credentials or "").strip(), session)
 
-    raw_key = str(credentials.credentials or "").strip()
-    if not raw_key.startswith("sk-"):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="SK Bearer 令牌格式无效")
 
-    item = session.exec(select(SKApiKeyModel).where(SKApiKeyModel.key_hash == hash_sk_api_key(raw_key))).first()
-    if not item or not item.is_active:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="SK Bearer 令牌无效或已停用")
+def get_sk_auth_context_from_request(
+    request: Request,
+    session: Session = Depends(get_session),
+) -> SKAuthContext:
+    auth_header = str(request.headers.get("authorization") or "").strip()
+    if auth_header.lower().startswith("bearer "):
+        raw_key = auth_header[7:].strip()
+    else:
+        raw_key = str(
+            request.headers.get("x-api-key")
+            or request.headers.get("anthropic-api-key")
+            or ""
+        ).strip()
 
-    owner = session.get(UserModel, item.user_id)
-    if not owner or not owner.is_active:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="SK Key 所属用户不存在或已禁用")
-
-    proxy_url, proxy = _resolve_proxy_binding(item, session)
-    return SKAuthContext(api_key=item, owner=owner, proxy_url=proxy_url, proxy=proxy)
+    return _resolve_sk_auth_context_from_raw_key(raw_key, session)
 
 
 def _parse_account_extra_json(raw: str) -> dict[str, Any]:
@@ -1115,6 +1163,952 @@ def _build_upstream_payload(payload: dict[str, Any], model: str, messages: list[
     return request_payload
 
 
+def _normalize_anthropic_content(value: Any) -> Any:
+    if value in (None, ""):
+        return ""
+    if isinstance(value, str):
+        return value
+    if not isinstance(value, list):
+        return str(value)
+
+    normalized_blocks: list[dict[str, Any]] = []
+    for item in value:
+        if isinstance(item, str):
+            text = item.strip()
+            if text:
+                normalized_blocks.append({"type": "text", "text": text})
+            continue
+        if not isinstance(item, dict):
+            text = str(item).strip()
+            if text:
+                normalized_blocks.append({"type": "text", "text": text})
+            continue
+
+        item_type = str(item.get("type") or "").strip().lower()
+        if item_type == "text":
+            text = str(item.get("text") or "").strip()
+            if text:
+                normalized_blocks.append({"type": "text", "text": text})
+            continue
+
+        if item_type == "image":
+            source = item.get("source")
+            image_url = ""
+            if isinstance(source, dict):
+                source_type = str(source.get("type") or "").strip().lower()
+                if source_type == "url":
+                    image_url = str(source.get("url") or "").strip()
+                elif source_type == "base64":
+                    media_type = str(source.get("media_type") or "application/octet-stream").strip()
+                    data = str(source.get("data") or "").strip()
+                    if data:
+                        image_url = f"data:{media_type};base64,{data}"
+            if image_url:
+                normalized_blocks.append({"type": "image_url", "image_url": {"url": image_url}})
+            continue
+
+        text = str(item.get("text") or "").strip()
+        if text:
+            normalized_blocks.append({"type": "text", "text": text})
+            continue
+
+        try:
+            serialized = json.dumps(item, ensure_ascii=False, separators=(",", ":"))
+        except (TypeError, ValueError):
+            serialized = str(item)
+        if serialized:
+            normalized_blocks.append({"type": "text", "text": serialized})
+
+    if not normalized_blocks:
+        return ""
+    if len(normalized_blocks) == 1 and normalized_blocks[0].get("type") == "text":
+        return normalized_blocks[0].get("text") or ""
+    return normalized_blocks
+
+
+def _anthropic_to_openai_messages(
+    messages: Any,
+    *,
+    system: Any = None,
+) -> list[dict[str, Any]]:
+    openai_messages: list[dict[str, Any]] = []
+
+    system_content = _normalize_anthropic_content(system)
+    if system_content not in (None, ""):
+        openai_messages.append({"role": "system", "content": system_content})
+
+    for item in messages or []:
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role") or "").strip().lower()
+        if role not in {"user", "assistant", "system"}:
+            continue
+        content = _normalize_anthropic_content(item.get("content"))
+        if content in (None, ""):
+            continue
+        openai_messages.append({"role": role, "content": content})
+
+    return openai_messages
+
+
+def _anthropic_stop_reason_from_openai(finish_reason: str | None) -> str:
+    normalized = str(finish_reason or "").strip().lower()
+    if normalized == "length":
+        return "max_tokens"
+    if normalized == "tool_calls":
+        return "tool_use"
+    return "end_turn"
+
+
+def _build_anthropic_message_response(
+    *,
+    message_id: str,
+    model: str,
+    text: str,
+    input_tokens: int,
+    output_tokens: int,
+    stop_reason: str,
+) -> dict[str, Any]:
+    return {
+        "id": message_id,
+        "type": "message",
+        "role": "assistant",
+        "model": model,
+        "content": [
+            {
+                "type": "text",
+                "text": text,
+            }
+        ],
+        "stop_reason": stop_reason,
+        "stop_sequence": None,
+        "usage": {
+            "input_tokens": max(0, int(input_tokens or 0)),
+            "output_tokens": max(0, int(output_tokens or 0)),
+        },
+    }
+
+
+def _parse_openai_response_json(response: Response) -> dict[str, Any] | None:
+    body = getattr(response, "body", b"")
+    if isinstance(body, bytes):
+        body_text = body.decode("utf-8", errors="ignore")
+    else:
+        body_text = str(body or "")
+    if not body_text:
+        return None
+    try:
+        parsed = json.loads(body_text)
+    except ValueError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _convert_openai_response_to_anthropic(response: Response, *, requested_model: str) -> Response:
+    response_json = _parse_openai_response_json(response)
+    if not response_json:
+        return _build_anthropic_error_response(
+            "上游响应不是有效 JSON",
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            error_type="api_error",
+        )
+
+    if response.status_code >= 400 or response_json.get("error"):
+        error_payload = response_json.get("error")
+        error_payload = error_payload if isinstance(error_payload, dict) else {}
+        return _build_anthropic_error_response(
+            str(error_payload.get("message") or "请求失败"),
+            status_code=int(response.status_code or status.HTTP_502_BAD_GATEWAY),
+        )
+
+    choices = response_json.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return _build_anthropic_error_response(
+            "上游未返回有效 choices",
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            error_type="api_error",
+        )
+
+    first_choice = choices[0] if isinstance(choices[0], dict) else {}
+    message_payload = first_choice.get("message")
+    message_payload = message_payload if isinstance(message_payload, dict) else {}
+    content_text = _extract_message_text_content(message_payload.get("content"))
+    usage = response_json.get("usage")
+    usage = usage if isinstance(usage, dict) else {}
+    finish_reason = str(first_choice.get("finish_reason") or "").strip() or "stop"
+    message_id = str(response_json.get("id") or f"msg_{uuid.uuid4().hex}")
+    model = str(response_json.get("model") or requested_model or "")
+
+    return JSONResponse(
+        status_code=int(response.status_code or status.HTTP_200_OK),
+        content=_build_anthropic_message_response(
+            message_id=message_id,
+            model=model,
+            text=content_text,
+            input_tokens=_normalize_non_negative_int(usage.get("prompt_tokens", 0), field_name="prompt_tokens"),
+            output_tokens=_normalize_non_negative_int(usage.get("completion_tokens", 0), field_name="completion_tokens"),
+            stop_reason=_anthropic_stop_reason_from_openai(finish_reason),
+        ),
+    )
+
+
+def _iter_sse_payloads(chunks: Any):
+    buffer = ""
+    data_lines: list[str] = []
+
+    for raw_chunk in chunks:
+        text = raw_chunk.decode("utf-8", errors="ignore") if isinstance(raw_chunk, bytes) else str(raw_chunk)
+        if not text:
+            continue
+        buffer += text
+        while "\n" in buffer:
+            line, buffer = buffer.split("\n", 1)
+            line = line.rstrip("\r")
+            if not line:
+                if data_lines:
+                    yield "\n".join(data_lines)
+                    data_lines = []
+                continue
+            if line.startswith("data:"):
+                data_lines.append(line[5:].strip())
+
+    if data_lines:
+        yield "\n".join(data_lines)
+
+
+def _wrap_openai_stream_as_anthropic(response: StreamingResponse, *, requested_model: str) -> StreamingResponse:
+    def anthropic_stream():
+        message_id = f"msg_{uuid.uuid4().hex}"
+        model = requested_model
+        input_tokens = 0
+        output_tokens = 0
+        stop_reason = "end_turn"
+        started = False
+        block_started = False
+        content_sent = False
+
+        for payload_text in _iter_sse_payloads(response.body_iterator):
+            if not payload_text:
+                continue
+            if payload_text == "[DONE]":
+                break
+
+            try:
+                chunk = json.loads(payload_text)
+            except ValueError:
+                continue
+            if not isinstance(chunk, dict):
+                continue
+
+            error_payload = chunk.get("error")
+            if isinstance(error_payload, dict):
+                message = str(error_payload.get("message") or "请求失败")
+                yield f"event: error\ndata: {json.dumps({'type': 'error', 'error': {'type': 'api_error', 'message': message}}, ensure_ascii=False)}\n\n"
+                return
+
+            if not started:
+                started = True
+                chunk_model = str(chunk.get("model") or requested_model or "").strip()
+                if chunk_model:
+                    model = chunk_model
+                usage = chunk.get("usage")
+                if isinstance(usage, dict):
+                    input_tokens = _normalize_non_negative_int(usage.get("prompt_tokens", 0), field_name="prompt_tokens")
+                    output_tokens = _normalize_non_negative_int(usage.get("completion_tokens", 0), field_name="completion_tokens")
+                yield (
+                    "event: message_start\n"
+                    f"data: {json.dumps({'type': 'message_start', 'message': _build_anthropic_message_response(message_id=message_id, model=model, text='', input_tokens=input_tokens, output_tokens=0, stop_reason=None)}, ensure_ascii=False)}\n\n"
+                )
+
+            choices = chunk.get("choices")
+            choices = choices if isinstance(choices, list) else []
+            first_choice = choices[0] if choices and isinstance(choices[0], dict) else {}
+            delta = first_choice.get("delta")
+            delta = delta if isinstance(delta, dict) else {}
+            finish_reason = str(first_choice.get("finish_reason") or "").strip()
+            delta_text = _extract_message_text_content(delta.get("content"))
+            usage = chunk.get("usage")
+            if isinstance(usage, dict):
+                input_tokens = _normalize_non_negative_int(usage.get("prompt_tokens", input_tokens), field_name="prompt_tokens")
+                output_tokens = _normalize_non_negative_int(usage.get("completion_tokens", output_tokens), field_name="completion_tokens")
+
+            if delta_text:
+                if not block_started:
+                    block_started = True
+                    yield "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n"
+                content_sent = True
+                yield (
+                    "event: content_block_delta\n"
+                    f"data: {json.dumps({'type': 'content_block_delta', 'index': 0, 'delta': {'type': 'text_delta', 'text': delta_text}}, ensure_ascii=False)}\n\n"
+                )
+
+            if finish_reason:
+                stop_reason = _anthropic_stop_reason_from_openai(finish_reason)
+
+        if not started:
+            yield f"event: error\ndata: {json.dumps({'type': 'error', 'error': {'type': 'api_error', 'message': '上游流式响应为空'}}, ensure_ascii=False)}\n\n"
+            return
+
+        if not block_started:
+            block_started = True
+            yield "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n"
+        if block_started or content_sent:
+            yield "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n"
+        yield (
+            "event: message_delta\n"
+            f"data: {json.dumps({'type': 'message_delta', 'delta': {'stop_reason': stop_reason, 'stop_sequence': None}, 'usage': {'output_tokens': output_tokens}}, ensure_ascii=False)}\n\n"
+        )
+        yield "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+
+    return StreamingResponse(
+        anthropic_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+def _json_deep_copy(value: Any) -> Any:
+    try:
+        return json.loads(json.dumps(value, ensure_ascii=False))
+    except (TypeError, ValueError):
+        return value
+
+
+def _build_responses_usage(input_tokens: int, output_tokens: int) -> dict[str, Any]:
+    input_tokens = max(0, int(input_tokens or 0))
+    output_tokens = max(0, int(output_tokens or 0))
+    return {
+        "input_tokens": input_tokens,
+        "input_tokens_details": {
+            "cached_tokens": 0,
+        },
+        "output_tokens": output_tokens,
+        "output_tokens_details": {
+            "reasoning_tokens": 0,
+        },
+        "total_tokens": input_tokens + output_tokens,
+    }
+
+
+def _build_responses_output_message(
+    *,
+    item_id: str,
+    text: str,
+    status_text: str = "completed",
+) -> dict[str, Any]:
+    return {
+        "id": item_id,
+        "type": "message",
+        "status": status_text,
+        "role": "assistant",
+        "content": [
+            {
+                "type": "output_text",
+                "text": str(text or ""),
+                "annotations": [],
+            }
+        ],
+    }
+
+
+def _build_responses_response_payload(
+    *,
+    response_id: str,
+    model: str,
+    instructions: str | None,
+    previous_response_id: str | None,
+    metadata: dict[str, Any] | None,
+    store: bool,
+    temperature: Any,
+    top_p: Any,
+    max_output_tokens: Any,
+    tools: Any,
+    tool_choice: Any,
+    created_at: int,
+    status_text: str,
+    output_item_id: str = "",
+    output_text: str = "",
+    prompt_tokens: int = 0,
+    completion_tokens: int = 0,
+    include_output: bool = True,
+) -> dict[str, Any]:
+    payload = {
+        "id": response_id,
+        "object": "response",
+        "created_at": int(created_at or time.time()),
+        "status": status_text,
+        "error": None,
+        "incomplete_details": None,
+        "instructions": instructions,
+        "max_output_tokens": max_output_tokens,
+        "model": str(model or "").strip(),
+        "metadata": metadata if isinstance(metadata, dict) else {},
+        "output": [],
+        "parallel_tool_calls": False,
+        "previous_response_id": previous_response_id,
+        "reasoning": {
+            "effort": None,
+            "summary": None,
+        },
+        "store": bool(store),
+        "temperature": temperature if temperature is not None else 1,
+        "text": {
+            "format": {
+                "type": "text",
+            }
+        },
+        "tool_choice": tool_choice if tool_choice is not None else "auto",
+        "tools": tools if isinstance(tools, list) else [],
+        "top_p": top_p if top_p is not None else 1,
+        "truncation": "disabled",
+        "usage": _build_responses_usage(prompt_tokens, completion_tokens),
+        "user": None,
+        "output_text": str(output_text or ""),
+    }
+    if include_output:
+        payload["output"] = [
+            _build_responses_output_message(
+                item_id=output_item_id or f"msg_{uuid.uuid4().hex}",
+                text=output_text,
+                status_text="completed" if status_text == "completed" else status_text,
+            )
+        ]
+    return payload
+
+
+def _store_response_record(record: dict[str, Any]) -> None:
+    response_id = str(record.get("id") or "").strip()
+    if not response_id:
+        return
+    with _responses_store_lock:
+        _responses_store[response_id] = _json_deep_copy(record)
+
+
+def _get_response_record(response_id: str, *, api_key_id: int | None = None) -> dict[str, Any] | None:
+    normalized_id = str(response_id or "").strip()
+    if not normalized_id:
+        return None
+    with _responses_store_lock:
+        record = _responses_store.get(normalized_id)
+    if not isinstance(record, dict):
+        return None
+    if api_key_id is not None and int(record.get("api_key_id") or 0) != int(api_key_id or 0):
+        return None
+    return _json_deep_copy(record)
+
+
+def _delete_response_record(response_id: str, *, api_key_id: int | None = None) -> dict[str, Any] | None:
+    normalized_id = str(response_id or "").strip()
+    if not normalized_id:
+        return None
+    with _responses_store_lock:
+        record = _responses_store.get(normalized_id)
+        if not isinstance(record, dict):
+            return None
+        if api_key_id is not None and int(record.get("api_key_id") or 0) != int(api_key_id or 0):
+            return None
+        removed = _responses_store.pop(normalized_id, None)
+    return _json_deep_copy(removed) if isinstance(removed, dict) else None
+
+
+def _normalize_responses_content_parts(content: Any) -> tuple[list[dict[str, Any]], Any]:
+    response_parts: list[dict[str, Any]] = []
+    openai_parts: list[dict[str, Any]] = []
+    text_parts: list[str] = []
+    has_non_text = False
+
+    def add_text(text: Any) -> None:
+        normalized_text = str(text or "").strip()
+        if not normalized_text:
+            return
+        response_parts.append({"type": "input_text", "text": normalized_text})
+        openai_parts.append({"type": "text", "text": normalized_text})
+        text_parts.append(normalized_text)
+
+    def add_image(url: Any, detail: Any = None) -> None:
+        nonlocal has_non_text
+        normalized_url = str(url or "").strip()
+        if not normalized_url:
+            return
+        has_non_text = True
+        response_part: dict[str, Any] = {
+            "type": "input_image",
+            "image_url": normalized_url,
+        }
+        if detail not in (None, ""):
+            response_part["detail"] = str(detail)
+        response_parts.append(response_part)
+        openai_parts.append(
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": normalized_url,
+                },
+            }
+        )
+
+    if content in (None, ""):
+        return [], ""
+
+    if isinstance(content, str):
+        add_text(content)
+    elif isinstance(content, list):
+        for item in content:
+            if isinstance(item, str):
+                add_text(item)
+                continue
+            if not isinstance(item, dict):
+                add_text(item)
+                continue
+
+            item_type = str(item.get("type") or "").strip().lower()
+            if item_type in {"input_text", "text", "output_text"}:
+                add_text(item.get("text"))
+                continue
+
+            if item_type in {"input_image", "image_url", "image"}:
+                image_value = item.get("image_url")
+                if isinstance(image_value, dict):
+                    image_value = image_value.get("url")
+                if item_type == "image":
+                    image_value = image_value or item.get("url")
+                add_image(image_value or item.get("url"), item.get("detail"))
+                continue
+
+            if item.get("text") not in (None, ""):
+                add_text(item.get("text"))
+                continue
+
+            serialized = json.dumps(item, ensure_ascii=False, separators=(",", ":"))
+            add_text(serialized)
+    elif isinstance(content, dict):
+        item_type = str(content.get("type") or "").strip().lower()
+        if item_type in {"input_text", "text", "output_text"}:
+            add_text(content.get("text"))
+        elif item_type in {"input_image", "image_url", "image"}:
+            image_value = content.get("image_url")
+            if isinstance(image_value, dict):
+                image_value = image_value.get("url")
+            add_image(image_value or content.get("url"), content.get("detail"))
+        elif "text" in content:
+            add_text(content.get("text"))
+        else:
+            serialized = json.dumps(content, ensure_ascii=False, separators=(",", ":"))
+            add_text(serialized)
+    else:
+        add_text(content)
+
+    if not response_parts:
+        return [], ""
+    if not has_non_text:
+        return response_parts, "\n".join(text_parts)
+    return response_parts, openai_parts
+
+
+def _normalize_responses_message_item(item: Any, *, default_role: str = "user") -> tuple[dict[str, Any], dict[str, Any]] | None:
+    role = default_role
+    content = item
+
+    if isinstance(item, dict):
+        item_type = str(item.get("type") or "").strip().lower()
+        if item_type in {"input_text", "text", "output_text", "input_image", "image_url", "image"} and "content" not in item and "role" not in item:
+            content = [item]
+        else:
+            role = str(item.get("role") or default_role).strip().lower() or default_role
+            content = item.get("content")
+
+    if role not in {"user", "assistant", "system", "developer"}:
+        role = default_role
+
+    response_content, openai_content = _normalize_responses_content_parts(content)
+    if not response_content:
+        return None
+
+    response_item = {
+        "type": "message",
+        "role": role,
+        "content": response_content,
+    }
+    openai_role = "system" if role == "developer" else role
+    openai_message = {
+        "role": openai_role,
+        "content": openai_content,
+    }
+    return response_item, openai_message
+
+
+def _responses_input_to_openai_messages(input_value: Any) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    if input_value in (None, ""):
+        return [], []
+
+    input_items: list[dict[str, Any]] = []
+    openai_messages: list[dict[str, Any]] = []
+
+    def append_message(value: Any, *, default_role: str = "user") -> None:
+        normalized = _normalize_responses_message_item(value, default_role=default_role)
+        if not normalized:
+            return
+        response_item, openai_message = normalized
+        input_items.append(response_item)
+        openai_messages.append(openai_message)
+
+    if isinstance(input_value, list):
+        is_message_list = bool(input_value) and all(
+            isinstance(item, dict) and (
+                "role" in item or str(item.get("type") or "").strip().lower() == "message"
+            )
+            for item in input_value
+        )
+        if is_message_list:
+            for item in input_value:
+                append_message(item)
+        else:
+            append_message({"role": "user", "content": input_value})
+        return input_items, openai_messages
+
+    if isinstance(input_value, dict):
+        item_type = str(input_value.get("type") or "").strip().lower()
+        if "role" in input_value or item_type == "message":
+            append_message(input_value)
+        else:
+            append_message({"role": "user", "content": [input_value]})
+        return input_items, openai_messages
+
+    append_message({"role": "user", "content": str(input_value)})
+    return input_items, openai_messages
+
+
+def _build_openai_error_from_exception(exc: HTTPException, *, code: str) -> JSONResponse:
+    detail = exc.detail
+    if isinstance(detail, dict):
+        message = str(detail.get("message") or detail.get("detail") or "request failed")
+    else:
+        message = str(detail or "request failed")
+    return _build_openai_error_response(
+        message,
+        status_code=int(exc.status_code or status.HTTP_400_BAD_REQUEST),
+        code=code,
+    )
+
+
+def _prepare_responses_request(
+    *,
+    auth: SKAuthContext,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="请求体必须是 JSON 对象")
+
+    model = str(payload.get("model") or "").strip()
+    if not model:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="model 不能为空")
+
+    previous_response_id = str(payload.get("previous_response_id") or "").strip() or None
+    previous_record = None
+    history_messages: list[dict[str, Any]] = []
+    if previous_response_id:
+        previous_record = _get_response_record(previous_response_id, api_key_id=int(auth.api_key.id or 0))
+        if not previous_record:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="previous_response_id 不存在")
+        history_messages = previous_record.get("conversation_messages") or []
+        history_messages = history_messages if isinstance(history_messages, list) else []
+
+    input_items, input_messages = _responses_input_to_openai_messages(payload.get("input"))
+    instructions = str(payload.get("instructions") or "").strip() or None
+    conversation_messages = [_json_deep_copy(item) for item in history_messages]
+    conversation_messages.extend(_json_deep_copy(input_messages))
+
+    openai_messages: list[dict[str, Any]] = []
+    if instructions:
+        openai_messages.append({"role": "system", "content": instructions})
+    openai_messages.extend(_json_deep_copy(conversation_messages))
+
+    if not openai_messages:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="input 不能为空")
+
+    openai_payload: dict[str, Any] = {
+        "model": model,
+        "messages": openai_messages,
+        "stream": bool(payload.get("stream")),
+    }
+    if "max_output_tokens" in payload:
+        openai_payload["max_completion_tokens"] = payload.get("max_output_tokens")
+    elif "max_tokens" in payload:
+        openai_payload["max_tokens"] = payload.get("max_tokens")
+    if "temperature" in payload:
+        openai_payload["temperature"] = payload.get("temperature")
+    if "top_p" in payload:
+        openai_payload["top_p"] = payload.get("top_p")
+    if "target_url" in payload:
+        openai_payload["target_url"] = payload.get("target_url")
+    if "stop" in payload:
+        openai_payload["stop"] = payload.get("stop")
+
+    metadata = payload.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    return {
+        "requested_payload": payload,
+        "openai_payload": openai_payload,
+        "input_items": input_items,
+        "conversation_messages": conversation_messages,
+        "instructions": instructions,
+        "previous_response_id": previous_response_id,
+        "model": model,
+        "stream": bool(payload.get("stream")),
+        "metadata": metadata,
+        "store": bool(payload.get("store", True)),
+        "temperature": payload.get("temperature"),
+        "top_p": payload.get("top_p"),
+        "max_output_tokens": payload.get("max_output_tokens"),
+        "tools": payload.get("tools"),
+        "tool_choice": payload.get("tool_choice"),
+    }
+
+
+def _convert_openai_response_to_responses(
+    response: Response,
+    *,
+    auth: SKAuthContext,
+    request_context: dict[str, Any],
+) -> Response:
+    response_json = _parse_openai_response_json(response)
+    if not response_json:
+        return _build_openai_error_response(
+            "上游响应不是有效 JSON",
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            code="responses_invalid_json",
+        )
+
+    if response.status_code >= 400 or response_json.get("error"):
+        return JSONResponse(
+            status_code=int(response.status_code or status.HTTP_502_BAD_GATEWAY),
+            content=response_json,
+        )
+
+    choices = response_json.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return _build_openai_error_response(
+            "上游未返回有效 choices",
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            code="responses_invalid_choices",
+        )
+
+    first_choice = choices[0] if isinstance(choices[0], dict) else {}
+    message_payload = first_choice.get("message")
+    message_payload = message_payload if isinstance(message_payload, dict) else {}
+    output_text = _extract_message_text_content(message_payload.get("content"))
+    prompt_tokens, completion_tokens = _resolve_usage_from_json(
+        response_json,
+        prompt_tokens_estimate=_estimate_chat_tokens(request_context.get("openai_payload", {}).get("messages") or []),
+        completion_fallback=output_text,
+    )
+
+    response_id = f"resp_{uuid.uuid4().hex}"
+    output_item_id = str(response_json.get("response_message_id") or f"msg_{uuid.uuid4().hex}")
+    created_at = int(time.time())
+    model = str(response_json.get("model") or request_context.get("model") or "")
+    response_payload = _build_responses_response_payload(
+        response_id=response_id,
+        model=model,
+        instructions=request_context.get("instructions"),
+        previous_response_id=request_context.get("previous_response_id"),
+        metadata=request_context.get("metadata"),
+        store=bool(request_context.get("store")),
+        temperature=request_context.get("temperature"),
+        top_p=request_context.get("top_p"),
+        max_output_tokens=request_context.get("max_output_tokens"),
+        tools=request_context.get("tools"),
+        tool_choice=request_context.get("tool_choice"),
+        created_at=created_at,
+        status_text="completed",
+        output_item_id=output_item_id,
+        output_text=output_text,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+    )
+    record = {
+        "id": response_id,
+        "api_key_id": int(auth.api_key.id or 0),
+        "response": response_payload,
+        "input_items": request_context.get("input_items") or [],
+        "conversation_messages": [
+            *_json_deep_copy(request_context.get("conversation_messages") or []),
+            {"role": "assistant", "content": output_text},
+        ],
+        "created_at": created_at,
+    }
+    _store_response_record(record)
+    return JSONResponse(
+        status_code=int(response.status_code or status.HTTP_200_OK),
+        content=response_payload,
+    )
+
+
+def _wrap_openai_stream_as_responses(
+    response: StreamingResponse,
+    *,
+    auth: SKAuthContext,
+    request_context: dict[str, Any],
+) -> StreamingResponse:
+    response_id = f"resp_{uuid.uuid4().hex}"
+    output_item_id = f"msg_{uuid.uuid4().hex}"
+    created_at = int(time.time())
+    requested_model = str(request_context.get("model") or "")
+    metadata = request_context.get("metadata")
+    instructions = request_context.get("instructions")
+    previous_response_id = request_context.get("previous_response_id")
+    store = bool(request_context.get("store"))
+    temperature = request_context.get("temperature")
+    top_p = request_context.get("top_p")
+    max_output_tokens = request_context.get("max_output_tokens")
+    tools = request_context.get("tools")
+    tool_choice = request_context.get("tool_choice")
+
+    def responses_stream():
+        model = requested_model
+        accumulated_text = ""
+        prompt_tokens = _estimate_chat_tokens(request_context.get("openai_payload", {}).get("messages") or [])
+        completion_tokens = 0
+        created_payload = _build_responses_response_payload(
+            response_id=response_id,
+            model=model,
+            instructions=instructions,
+            previous_response_id=previous_response_id,
+            metadata=metadata,
+            store=store,
+            temperature=temperature,
+            top_p=top_p,
+            max_output_tokens=max_output_tokens,
+            tools=tools,
+            tool_choice=tool_choice,
+            created_at=created_at,
+            status_text="in_progress",
+            include_output=False,
+        )
+        yield f"event: response.created\ndata: {json.dumps({'type': 'response.created', 'response': created_payload}, ensure_ascii=False)}\n\n"
+        yield f"event: response.in_progress\ndata: {json.dumps({'type': 'response.in_progress', 'response': created_payload}, ensure_ascii=False)}\n\n"
+        yield (
+            "event: response.output_item.added\n"
+            f"data: {json.dumps({'type': 'response.output_item.added', 'response_id': response_id, 'output_index': 0, 'item': {'id': output_item_id, 'type': 'message', 'status': 'in_progress', 'role': 'assistant', 'content': []}}, ensure_ascii=False)}\n\n"
+        )
+        yield (
+            "event: response.content_part.added\n"
+            f"data: {json.dumps({'type': 'response.content_part.added', 'response_id': response_id, 'output_index': 0, 'item_id': output_item_id, 'content_index': 0, 'part': {'type': 'output_text', 'text': '', 'annotations': []}}, ensure_ascii=False)}\n\n"
+        )
+
+        for payload_text in _iter_sse_payloads(response.body_iterator):
+            if not payload_text:
+                continue
+            if payload_text == "[DONE]":
+                break
+
+            try:
+                chunk = json.loads(payload_text)
+            except ValueError:
+                continue
+            if not isinstance(chunk, dict):
+                continue
+
+            error_payload = chunk.get("error")
+            if isinstance(error_payload, dict):
+                error_message = str(error_payload.get("message") or "请求失败")
+                failed_payload = {
+                    **created_payload,
+                    "status": "failed",
+                    "error": {
+                        "message": error_message,
+                        "type": str(error_payload.get("type") or "api_error"),
+                        "code": error_payload.get("code"),
+                    },
+                }
+                yield f"event: response.failed\ndata: {json.dumps({'type': 'response.failed', 'response': failed_payload}, ensure_ascii=False)}\n\n"
+                return
+
+            chunk_model = str(chunk.get("model") or "").strip()
+            if chunk_model:
+                model = chunk_model
+            usage = chunk.get("usage")
+            if isinstance(usage, dict):
+                prompt_tokens = _normalize_non_negative_int(usage.get("prompt_tokens", prompt_tokens), field_name="prompt_tokens")
+                completion_tokens = _normalize_non_negative_int(usage.get("completion_tokens", completion_tokens), field_name="completion_tokens")
+
+            delta_text = _extract_chunk_text(chunk)
+            if delta_text:
+                accumulated_text += delta_text
+                yield (
+                    "event: response.output_text.delta\n"
+                    f"data: {json.dumps({'type': 'response.output_text.delta', 'response_id': response_id, 'output_index': 0, 'item_id': output_item_id, 'content_index': 0, 'delta': delta_text}, ensure_ascii=False)}\n\n"
+                )
+
+        if completion_tokens <= 0 and accumulated_text:
+            completion_tokens = _estimate_text_tokens(accumulated_text)
+
+        completed_item = _build_responses_output_message(
+            item_id=output_item_id,
+            text=accumulated_text,
+            status_text="completed",
+        )
+        response_payload = _build_responses_response_payload(
+            response_id=response_id,
+            model=model,
+            instructions=instructions,
+            previous_response_id=previous_response_id,
+            metadata=metadata,
+            store=store,
+            temperature=temperature,
+            top_p=top_p,
+            max_output_tokens=max_output_tokens,
+            tools=tools,
+            tool_choice=tool_choice,
+            created_at=created_at,
+            status_text="completed",
+            output_item_id=output_item_id,
+            output_text=accumulated_text,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+        )
+        _store_response_record(
+            {
+                "id": response_id,
+                "api_key_id": int(auth.api_key.id or 0),
+                "response": response_payload,
+                "input_items": request_context.get("input_items") or [],
+                "conversation_messages": [
+                    *_json_deep_copy(request_context.get("conversation_messages") or []),
+                    {"role": "assistant", "content": accumulated_text},
+                ],
+                "created_at": created_at,
+            }
+        )
+        yield (
+            "event: response.output_text.done\n"
+            f"data: {json.dumps({'type': 'response.output_text.done', 'response_id': response_id, 'output_index': 0, 'item_id': output_item_id, 'content_index': 0, 'text': accumulated_text}, ensure_ascii=False)}\n\n"
+        )
+        yield (
+            "event: response.content_part.done\n"
+            f"data: {json.dumps({'type': 'response.content_part.done', 'response_id': response_id, 'output_index': 0, 'item_id': output_item_id, 'content_index': 0, 'part': completed_item['content'][0]}, ensure_ascii=False)}\n\n"
+        )
+        yield (
+            "event: response.output_item.done\n"
+            f"data: {json.dumps({'type': 'response.output_item.done', 'response_id': response_id, 'output_index': 0, 'item': completed_item}, ensure_ascii=False)}\n\n"
+        )
+        yield f"event: response.completed\ndata: {json.dumps({'type': 'response.completed', 'response': response_payload}, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(
+        responses_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 def _handle_official_chatgpt_models(auth: SKAuthContext, target_url: str) -> Response:
     from platforms.chatgpt.message_tester import fetch_available_models
 
@@ -1449,17 +2443,11 @@ def list_openai_models(auth: SKAuthContext = Depends(get_sk_auth_context)):
     )
 
 
-@router.post("/sk/chat/completions")
-@openai_router.post("/chat/completions")
-async def sk_chat_completions(
-    request: Request,
-    auth: SKAuthContext = Depends(get_sk_auth_context),
-):
-    try:
-        payload = await request.json()
-    except Exception as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="请求体必须是 JSON") from exc
-
+def _handle_openai_chat_completions_payload(
+    *,
+    auth: SKAuthContext,
+    payload: dict[str, Any],
+) -> Response:
     if not isinstance(payload, dict):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="请求体必须是 JSON 对象")
 
@@ -1627,3 +2615,257 @@ async def sk_chat_completions(
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@router.post("/sk/chat/completions")
+@openai_router.post("/chat/completions")
+async def sk_chat_completions(
+    request: Request,
+    auth: SKAuthContext = Depends(get_sk_auth_context),
+):
+    try:
+        payload = await request.json()
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="请求体必须是 JSON") from exc
+
+    return _handle_openai_chat_completions_payload(auth=auth, payload=payload)
+
+
+@router.post("/sk/anthropic/messages")
+@openai_router.post("/messages")
+async def anthropic_messages(
+    request: Request,
+    session: Session = Depends(get_session),
+):
+    try:
+        auth = get_sk_auth_context_from_request(request, session)
+    except HTTPException as exc:
+        return _build_anthropic_error_response(
+            str(exc.detail or "鉴权失败"),
+            status_code=int(exc.status_code or status.HTTP_401_UNAUTHORIZED),
+        )
+
+    try:
+        payload = await request.json()
+    except Exception:
+        return _build_anthropic_error_response(
+            "请求体必须是 JSON",
+            status_code=status.HTTP_400_BAD_REQUEST,
+        )
+
+    if not isinstance(payload, dict):
+        return _build_anthropic_error_response(
+            "请求体必须是 JSON 对象",
+            status_code=status.HTTP_400_BAD_REQUEST,
+        )
+
+    model = str(payload.get("model") or "").strip()
+    if not model:
+        return _build_anthropic_error_response(
+            "model 不能为空",
+            status_code=status.HTTP_400_BAD_REQUEST,
+        )
+
+    openai_messages = _anthropic_to_openai_messages(
+        payload.get("messages") or [],
+        system=payload.get("system"),
+    )
+    if not openai_messages:
+        return _build_anthropic_error_response(
+            "messages 不能为空",
+            status_code=status.HTTP_400_BAD_REQUEST,
+        )
+
+    openai_payload: dict[str, Any] = {
+        "model": model,
+        "messages": openai_messages,
+        "stream": bool(payload.get("stream")),
+    }
+    if "max_tokens" in payload:
+        openai_payload["max_tokens"] = payload.get("max_tokens")
+    if "temperature" in payload:
+        openai_payload["temperature"] = payload.get("temperature")
+    if "top_p" in payload:
+        openai_payload["top_p"] = payload.get("top_p")
+    if "target_url" in payload:
+        openai_payload["target_url"] = payload.get("target_url")
+    if "stop_sequences" in payload:
+        openai_payload["stop"] = payload.get("stop_sequences")
+
+    try:
+        openai_response = _handle_openai_chat_completions_payload(auth=auth, payload=openai_payload)
+    except HTTPException as exc:
+        return _build_anthropic_error_response(
+            str(exc.detail or "请求失败"),
+            status_code=int(exc.status_code or status.HTTP_400_BAD_REQUEST),
+        )
+
+    if bool(payload.get("stream")):
+        if isinstance(openai_response, StreamingResponse):
+            return _wrap_openai_stream_as_anthropic(openai_response, requested_model=model)
+        return _convert_openai_response_to_anthropic(openai_response, requested_model=model)
+
+    return _convert_openai_response_to_anthropic(openai_response, requested_model=model)
+
+
+@openai_router.post("/responses")
+async def openai_responses(
+    request: Request,
+    session: Session = Depends(get_session),
+):
+    try:
+        auth = get_sk_auth_context_from_request(request, session)
+    except HTTPException as exc:
+        return _build_openai_error_from_exception(exc, code="responses_auth_error")
+
+    try:
+        payload = await request.json()
+    except Exception:
+        return _build_openai_error_response(
+            "请求体必须是 JSON",
+            status_code=status.HTTP_400_BAD_REQUEST,
+            code="responses_invalid_json",
+        )
+
+    try:
+        request_context = _prepare_responses_request(auth=auth, payload=payload)
+        openai_response = _handle_openai_chat_completions_payload(
+            auth=auth,
+            payload=request_context["openai_payload"],
+        )
+    except HTTPException as exc:
+        return _build_openai_error_from_exception(exc, code="responses_request_error")
+
+    if request_context.get("stream"):
+        if isinstance(openai_response, StreamingResponse):
+            return _wrap_openai_stream_as_responses(
+                openai_response,
+                auth=auth,
+                request_context=request_context,
+            )
+        return _convert_openai_response_to_responses(
+            openai_response,
+            auth=auth,
+            request_context=request_context,
+        )
+
+    return _convert_openai_response_to_responses(
+        openai_response,
+        auth=auth,
+        request_context=request_context,
+    )
+
+
+@openai_router.post("/responses/input_tokens")
+async def openai_responses_input_tokens(
+    request: Request,
+    session: Session = Depends(get_session),
+):
+    try:
+        auth = get_sk_auth_context_from_request(request, session)
+    except HTTPException as exc:
+        return _build_openai_error_from_exception(exc, code="responses_auth_error")
+
+    try:
+        payload = await request.json()
+    except Exception:
+        return _build_openai_error_response(
+            "请求体必须是 JSON",
+            status_code=status.HTTP_400_BAD_REQUEST,
+            code="responses_invalid_json",
+        )
+
+    try:
+        request_context = _prepare_responses_request(auth=auth, payload=payload)
+    except HTTPException as exc:
+        return _build_openai_error_from_exception(exc, code="responses_request_error")
+
+    input_tokens = _estimate_chat_tokens(request_context.get("openai_payload", {}).get("messages") or [])
+    return {
+        "object": "response.input_tokens",
+        "model": request_context.get("model"),
+        "input_tokens": input_tokens,
+        "input_tokens_details": {
+            "cached_tokens": 0,
+        },
+    }
+
+
+@openai_router.get("/responses/{response_id}/input_items")
+def openai_response_input_items(
+    response_id: str,
+    request: Request,
+    session: Session = Depends(get_session),
+):
+    try:
+        auth = get_sk_auth_context_from_request(request, session)
+    except HTTPException as exc:
+        return _build_openai_error_from_exception(exc, code="responses_auth_error")
+
+    record = _get_response_record(response_id, api_key_id=int(auth.api_key.id or 0))
+    if not record:
+        return _build_openai_error_response(
+            "response 不存在",
+            status_code=status.HTTP_404_NOT_FOUND,
+            code="response_not_found",
+        )
+
+    items = record.get("input_items") or []
+    items = items if isinstance(items, list) else []
+    return {
+        "object": "list",
+        "data": items,
+        "first_id": 0,
+        "last_id": max(0, len(items) - 1),
+        "has_more": False,
+    }
+
+
+@openai_router.get("/responses/{response_id}")
+def get_openai_response(
+    response_id: str,
+    request: Request,
+    session: Session = Depends(get_session),
+):
+    try:
+        auth = get_sk_auth_context_from_request(request, session)
+    except HTTPException as exc:
+        return _build_openai_error_from_exception(exc, code="responses_auth_error")
+
+    record = _get_response_record(response_id, api_key_id=int(auth.api_key.id or 0))
+    if not record:
+        return _build_openai_error_response(
+            "response 不存在",
+            status_code=status.HTTP_404_NOT_FOUND,
+            code="response_not_found",
+        )
+
+    response_payload = record.get("response")
+    response_payload = response_payload if isinstance(response_payload, dict) else {}
+    return JSONResponse(content=response_payload)
+
+
+@openai_router.delete("/responses/{response_id}")
+def delete_openai_response(
+    response_id: str,
+    request: Request,
+    session: Session = Depends(get_session),
+):
+    try:
+        auth = get_sk_auth_context_from_request(request, session)
+    except HTTPException as exc:
+        return _build_openai_error_from_exception(exc, code="responses_auth_error")
+
+    record = _delete_response_record(response_id, api_key_id=int(auth.api_key.id or 0))
+    if not record:
+        return _build_openai_error_response(
+            "response 不存在",
+            status_code=status.HTTP_404_NOT_FOUND,
+            code="response_not_found",
+        )
+
+    return {
+        "id": str(response_id or ""),
+        "object": "response.deleted",
+        "deleted": True,
+    }
