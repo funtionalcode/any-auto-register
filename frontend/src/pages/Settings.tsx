@@ -8,6 +8,7 @@ import {
   MailOutlined,
   SafetyOutlined,
   ApiOutlined,
+  FileTextOutlined,
   PlusOutlined,
 } from '@ant-design/icons'
 import { apiFetch } from '@/lib/utils'
@@ -47,6 +48,10 @@ const SELECT_FIELDS: Record<string, { label: string; value: string }[]> = {
   codex_proxy_upload_type: [
     { label: 'AT（Access Token，推荐）', value: 'at' },
     { label: 'RT（Refresh Token）', value: 'rt' },
+  ],
+  request_logging_enabled: [
+    { label: '关闭', value: '0' },
+    { label: '开启', value: '1' },
   ],
 }
 
@@ -94,6 +99,12 @@ const TAB_ITEMS = [
         ],
       },
     ],
+  },
+  {
+    key: 'logs',
+    label: '日志管理',
+    icon: <FileTextOutlined />,
+    sections: [],
   },
   {
     key: 'chatgpt',
@@ -1306,6 +1317,164 @@ function ApplicationLogPanel() {
   )
 }
 
+function RequestLogPanel({ form }: { form: FormInstance }) {
+  type LogViewMode = 'live' | 'static'
+  const loggingEnabled = String(Form.useWatch('request_logging_enabled', form) || '0')
+  const [logViewMode, setLogViewMode] = useState<LogViewMode>('live')
+  const [logModal, setLogModal] = useState({
+    open: false,
+    path: '',
+    content: '',
+    loading: false,
+    truncated: false,
+    exists: false,
+  })
+  const logContainerRef = useRef<HTMLPreElement>(null)
+
+  const loadLog = async (options?: { silent?: boolean }) => {
+    const silent = Boolean(options?.silent)
+    if (!silent) {
+      setLogModal((current) => ({ ...current, loading: true }))
+    }
+    try {
+      const data = await apiFetch('/request/logs?lines=400')
+      setLogModal((current) => ({
+        ...current,
+        path: data.path || data.log_path || current.path,
+        content: data.content || '',
+        loading: false,
+        truncated: Boolean(data.truncated),
+        exists: data.exists !== false,
+      }))
+    } catch (e: any) {
+      setLogModal((current) => ({
+        ...current,
+        loading: false,
+        content: e?.message || '读取接口请求日志失败',
+        truncated: false,
+        exists: false,
+      }))
+    }
+  }
+
+  const openLogModal = async () => {
+    setLogModal({
+      open: true,
+      path: '',
+      content: '',
+      loading: true,
+      truncated: false,
+      exists: true,
+    })
+    await loadLog()
+  }
+
+  const copyLogContent = async () => {
+    try {
+      await navigator.clipboard.writeText(logModal.content)
+      message.success('日志已复制')
+    } catch {
+      message.error('复制失败')
+    }
+  }
+
+  useEffect(() => {
+    if (!logModal.open || logViewMode !== 'live') return
+    const timer = window.setInterval(() => {
+      void loadLog({ silent: true })
+    }, 1000)
+    return () => window.clearInterval(timer)
+  }, [logModal.open, logViewMode])
+
+  useEffect(() => {
+    if (!logModal.open || logViewMode !== 'live') return
+    const node = logContainerRef.current
+    if (node) {
+      node.scrollTop = node.scrollHeight
+    }
+  }, [logModal.content, logModal.open, logViewMode])
+
+  return (
+    <>
+      <Modal
+        open={logModal.open}
+        title="接口请求日志"
+        onCancel={() => setLogModal((current) => ({ ...current, open: false }))}
+        onOk={() => setLogModal((current) => ({ ...current, open: false }))}
+        width={900}
+        okText="关闭"
+        cancelButtonProps={{ style: { display: 'none' } }}
+      >
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8, gap: 12, flexWrap: 'wrap' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+            <div style={{ fontSize: 12, color: '#7a8ba3' }}>
+              {logModal.path || '暂无日志文件路径'}
+              {logModal.truncated ? ' · 已截取最近日志' : ''}
+            </div>
+            <Segmented<LogViewMode>
+              size="small"
+              value={logViewMode}
+              onChange={(value) => setLogViewMode(value)}
+              options={[
+                { label: '实时日志', value: 'live' },
+                { label: '静态日志', value: 'static' },
+              ]}
+            />
+          </div>
+          <Space>
+            <Button size="small" onClick={() => loadLog()} loading={logModal.loading}>
+              刷新日志
+            </Button>
+            <Button size="small" onClick={copyLogContent} disabled={!logModal.content}>
+              复制日志
+            </Button>
+          </Space>
+        </div>
+        <pre
+          ref={logContainerRef}
+          style={{
+            margin: 0,
+            maxHeight: 520,
+            overflow: 'auto',
+            padding: 12,
+            borderRadius: 8,
+            background: 'rgba(127,127,127,0.08)',
+            fontSize: 12,
+            lineHeight: 1.5,
+            whiteSpace: 'pre-wrap',
+            wordBreak: 'break-word',
+          }}
+        >
+          {logModal.loading && !logModal.content
+            ? '日志加载中...'
+            : logModal.content || (logModal.exists ? '日志文件暂无内容。' : '日志文件尚未生成。')}
+        </pre>
+        <div style={{ marginTop: 8, fontSize: 12, color: '#7a8ba3' }}>
+          {logViewMode === 'live' ? '实时日志模式：每秒自动刷新一次。' : '静态日志模式：仅在点击“刷新日志”时更新。'}
+        </div>
+      </Modal>
+
+      <Card
+        title="接口请求日志"
+        extra={<span style={{ fontSize: 12, color: '#7a8ba3' }}>记录进入后端的 API 请求、请求体和响应体，敏感字段会自动脱敏</span>}
+        style={{ marginBottom: 16 }}
+      >
+        <Space direction="vertical" style={{ width: '100%' }}>
+          <ConfigField field={{ key: 'request_logging_enabled', label: '日志开关', type: 'select' }} />
+          <div>范围：全局 HTTP API 请求，日志查看接口本身不会重复写入日志。</div>
+          <div>当前状态：{loggingEnabled === '1' ? '已开启' : '已关闭'}</div>
+          <div>说明：请求体和响应体会按内容类型做脱敏与截断，避免日志泄露密钥或被超大响应刷满。</div>
+          <Space wrap>
+            <Button onClick={openLogModal}>
+              查看日志
+            </Button>
+          </Space>
+        </Space>
+      </Card>
+    </>
+  )
+}
+
 function IntegrationsPanel() {
   type LogViewMode = 'live' | 'static'
   const [items, setItems] = useState<any[]>([])
@@ -1672,6 +1841,9 @@ export default function Settings() {
       if (!data.mail_provider) {
         data.mail_provider = 'moemail'
       }
+      if (!data.request_logging_enabled) {
+        data.request_logging_enabled = '0'
+      }
       data.mailbox_services_enabled = parseStoredSelectionList(data.mailbox_services_enabled, MAILBOX_SERVICE_KEYS)
       if ((data.mailbox_services_enabled as string[]).length === 0) {
         data.mailbox_services_enabled = [String(data.mail_provider || 'moemail')]
@@ -1793,6 +1965,15 @@ export default function Settings() {
         <div style={{ flex: 1 }}>
           {activeTab === 'integrations' ? (
             <IntegrationsPanel />
+          ) : activeTab === 'logs' ? (
+            <Form form={form} layout="vertical">
+              <RequestLogPanel form={form} />
+              <ApplicationLogPanel />
+              <SolverStatus />
+              <Button type="primary" icon={<SaveOutlined />} onClick={save} loading={saving} block>
+                {saved ? '已保存 ✓' : '保存配置'}
+              </Button>
+            </Form>
           ) : activeTab === 'mailbox' ? (
             <Form form={form} layout="vertical">
               <MailboxSettingsPanel form={form} />
@@ -1809,12 +1990,6 @@ export default function Settings() {
             </Form>
           ) : (
             <Form form={form} layout="vertical">
-              {activeTab === 'captcha' ? (
-                <>
-                  <ApplicationLogPanel />
-                  <SolverStatus />
-                </>
-              ) : null}
               {currentTab.sections.map((section) => (
                 <ConfigSection key={section.key || section.title} section={section} />
               ))}

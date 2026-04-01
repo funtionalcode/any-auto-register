@@ -19,11 +19,13 @@ from api.actions import router as actions_router
 from api.integrations import router as integrations_router
 from api.auth import router as auth_router
 from api.sk_keys import router as sk_keys_router, openai_router, anthropic_apps_router
-from core.log_utils import configure_app_logging, read_app_log
+from core.log_utils import configure_app_logging, configure_request_logging, read_app_log, read_request_log
+from core.request_logging import RequestLoggingMiddleware
 from core.runtime_timezone import configure_timezone
 
 EXPECTED_CONDA_ENV = os.getenv("APP_CONDA_ENV", "any-auto-register")
 APP_LOG_PATH = configure_app_logging()
+REQUEST_LOG_PATH = configure_request_logging()
 configure_timezone()
 logger = logging.getLogger(__name__)
 
@@ -90,6 +92,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(RequestLoggingMiddleware)
 
 app.include_router(accounts_router, prefix="/api")
 app.include_router(tasks_router, prefix="/api")
@@ -134,6 +137,14 @@ def runtime_logs(lines: int = 400):
     data = read_app_log(max_lines=max(50, min(int(lines or 400), 2000)))
     data["label"] = "后端应用日志"
     data["path"] = str(APP_LOG_PATH)
+    return data
+
+
+@app.get("/api/request/logs")
+def request_logs(lines: int = 400):
+    data = read_request_log(max_lines=max(50, min(int(lines or 400), 2000)))
+    data["label"] = "接口请求日志"
+    data["path"] = str(REQUEST_LOG_PATH)
     return data
 
 

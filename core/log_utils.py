@@ -13,6 +13,7 @@ _ANSI_ESCAPE_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 _ORPHAN_ANSI_CODE_RE = re.compile(r"\[(?:\d{1,3}(?:;\d{1,3})*)m")
 _CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
 _APP_LOGGER_CONFIGURED = False
+_REQUEST_LOGGER_CONFIGURED = False
 
 
 def _default_log_root() -> Path:
@@ -31,6 +32,11 @@ def _default_log_root() -> Path:
 
 def app_log_path() -> Path:
     file_name = str(os.getenv("APP_LOG_FILE", "app.log") or "").strip() or "app.log"
+    return _default_log_root() / file_name
+
+
+def request_log_path() -> Path:
+    file_name = str(os.getenv("REQUEST_LOG_FILE", "requests.log") or "").strip() or "requests.log"
     return _default_log_root() / file_name
 
 
@@ -158,5 +164,46 @@ def configure_app_logging() -> Path:
     return path
 
 
+def configure_request_logging() -> Path:
+    global _REQUEST_LOGGER_CONFIGURED
+    path = request_log_path()
+    if _REQUEST_LOGGER_CONFIGURED:
+        return path
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    level_name = str(os.getenv("REQUEST_LOG_LEVEL", os.getenv("APP_LOG_LEVEL", "INFO")) or "INFO").upper()
+    level = getattr(logging, level_name, logging.INFO)
+    formatter = logging.Formatter(
+        fmt="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+    file_handler = RotatingFileHandler(
+        path,
+        maxBytes=max(1024, int(os.getenv("REQUEST_LOG_MAX_BYTES", str(5 * 1024 * 1024)) or 5 * 1024 * 1024)),
+        backupCount=max(1, int(os.getenv("REQUEST_LOG_BACKUP_COUNT", "3") or 3)),
+        encoding="utf-8",
+    )
+    file_handler.setLevel(level)
+    file_handler.setFormatter(formatter)
+
+    request_logger = logging.getLogger("http.request")
+    request_logger.setLevel(level)
+    request_logger.propagate = False
+    existing_paths = {
+        str(getattr(handler, "baseFilename", "") or "")
+        for handler in request_logger.handlers
+    }
+    if str(path) not in existing_paths:
+        request_logger.addHandler(file_handler)
+
+    _REQUEST_LOGGER_CONFIGURED = True
+    return path
+
+
 def read_app_log(*, max_lines: int = 400, max_bytes: int = 128 * 1024) -> dict[str, Any]:
     return read_log_tail(app_log_path(), max_lines=max_lines, max_bytes=max_bytes)
+
+
+def read_request_log(*, max_lines: int = 400, max_bytes: int = 128 * 1024) -> dict[str, Any]:
+    return read_log_tail(request_log_path(), max_lines=max_lines, max_bytes=max_bytes)
