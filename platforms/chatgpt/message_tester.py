@@ -13,6 +13,7 @@ from .token_refresh import TokenRefreshManager
 
 
 TEST_PROMPT = "Reply with exactly TEST_OK"
+TEST_PROMPT = "Reply with exactly haogege"
 
 
 @dataclass

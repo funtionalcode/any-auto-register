@@ -58,7 +58,7 @@ remote-management:
         self.assertEqual(updated.count("remote-management:"), 1)
         self.assertIn("  allow-remote: true", updated)
         self.assertNotIn("  allow-remote: false", updated)
-        self.assertIn('  secret-key: "new-secret"', updated)
+        self.assertRegex(updated, r'  secret-key: "?new-secret"?')
         self.assertIn("  disable-control-panel: false", updated)
 
     def test_cliproxyapi_remote_management_deduplicates_broken_config(self):
@@ -89,8 +89,107 @@ remote-management:
 
         self.assertEqual(updated.count("remote-management:"), 1)
         self.assertEqual(updated.count("allow-remote: true"), 1)
-        self.assertIn('  secret-key: "new-secret"', updated)
+        self.assertRegex(updated, r'  secret-key: "?new-secret"?')
         self.assertIn("  disable-control-panel: false", updated)
+
+    def test_managed_service_defaults_to_installed_and_started(self):
+        store = {}
+        old_get_setting = external_apps._get_setting
+        old_set_setting = external_apps._set_setting
+
+        external_apps._get_setting = lambda key, default="": store.get(key, default)
+        external_apps._set_setting = lambda key, value: store.__setitem__(key, str(value))
+        try:
+            state = external_apps._load_service_state("cliproxyapi")
+        finally:
+            external_apps._get_setting = old_get_setting
+            external_apps._set_setting = old_set_setting
+
+        self.assertTrue(state["installed"])
+        self.assertTrue(state["started"])
+        self.assertTrue(state["managed"])
+        self.assertEqual(store["external_apps_cliproxyapi_installed"], "true")
+        self.assertEqual(store["external_apps_cliproxyapi_started"], "true")
+
+    def test_ensure_managed_services_ready_installs_and_starts_missing_service(self):
+        store = {}
+        running = set()
+        calls = []
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            base_dir = Path(tmp_dir)
+
+            old_get_setting = external_apps._get_setting
+            old_set_setting = external_apps._set_setting
+            old_repo_path = external_apps._repo_path
+            old_status_one = external_apps._status_one
+            old_install = external_apps.install
+            old_start = external_apps.start
+
+            external_apps._get_setting = lambda key, default="": store.get(key, default)
+            external_apps._set_setting = lambda key, value: store.__setitem__(key, str(value))
+            external_apps._repo_path = lambda name: base_dir / name
+
+            def fake_status_one(name: str):
+                repo = base_dir / name
+                desired = external_apps._load_service_state(name)
+                return {
+                    "name": name,
+                    "label": name,
+                    "repo_path": str(repo),
+                    "repo_exists": repo.exists(),
+                    "url": "",
+                    "management_url": "",
+                    "management_key": "",
+                    "desired_installed": desired["installed"],
+                    "desired_running": desired["started"],
+                    "managed": desired["managed"],
+                    "running": name in running,
+                    "starting": False,
+                    "process_alive": name in running,
+                    "pid": None,
+                    "log_path": "",
+                    "last_error": external_apps._LAST_ERROR.get(name, ""),
+                    "kind": "web",
+                }
+
+            def fake_install(name: str, *, persist_state: bool = True):
+                calls.append(("install", name, persist_state))
+                repo = base_dir / name
+                repo.mkdir(parents=True, exist_ok=True)
+                if persist_state:
+                    external_apps._persist_service_state(name, installed=True)
+                return fake_status_one(name)
+
+            def fake_start(name: str, *, persist_state: bool = True):
+                calls.append(("start", name, persist_state))
+                running.add(name)
+                if persist_state:
+                    external_apps._persist_service_state(name, installed=True, started=True)
+                return fake_status_one(name)
+
+            external_apps._status_one = fake_status_one
+            external_apps.install = fake_install
+            external_apps.start = fake_start
+
+            try:
+                results = external_apps.ensure_managed_services_ready(["cliproxyapi"])
+            finally:
+                external_apps._get_setting = old_get_setting
+                external_apps._set_setting = old_set_setting
+                external_apps._repo_path = old_repo_path
+                external_apps._status_one = old_status_one
+                external_apps.install = old_install
+                external_apps.start = old_start
+
+        self.assertEqual(
+            calls,
+            [("install", "cliproxyapi", False), ("start", "cliproxyapi", False)],
+        )
+        self.assertTrue(results[0]["repo_exists"])
+        self.assertTrue(results[0]["running"])
+        self.assertEqual(store["external_apps_cliproxyapi_installed"], "true")
+        self.assertEqual(store["external_apps_cliproxyapi_started"], "true")
 
 
 if __name__ == "__main__":

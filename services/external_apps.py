@@ -72,6 +72,13 @@ _LOCK = threading.Lock()
 _ANSI_ESCAPE_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 _ORPHAN_ANSI_CODE_RE = re.compile(r"\[(?:\d{1,3}(?:;\d{1,3})*)m")
 _CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+_MANAGED_SERVICE_NAMES = ("cliproxyapi", "grok2api")
+_MANAGED_SERVICE_DEFAULTS = {
+    "cliproxyapi": {"installed": True, "started": True},
+    "grok2api": {"installed": True, "started": True},
+}
+_BOOTSTRAP_THREAD: threading.Thread | None = None
+_BOOTSTRAP_THREAD_LOCK = threading.Lock()
 
 
 def _get_setting(key: str, default: str = "") -> str:
@@ -82,6 +89,92 @@ def _get_setting(key: str, default: str = "") -> str:
         return value or default
     except Exception:
         return default
+
+
+def _set_setting(key: str, value: str) -> None:
+    try:
+        from core.config_store import config_store
+
+        config_store.set(key, str(value))
+    except Exception:
+        pass
+
+
+def _bool_setting(value: Any, default: bool = False) -> bool:
+    text = str(value or "").strip().lower()
+    if not text:
+        return default
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off"}:
+        return False
+    return default
+
+
+def _service_state_key(name: str, field: str) -> str:
+    return f"external_apps_{name}_{field}"
+
+
+def _persist_service_state(name: str, installed: bool | None = None, started: bool | None = None) -> None:
+    if started is True and installed is False:
+        installed = True
+    if started is True and installed is None:
+        installed = True
+    if installed is not None:
+        _set_setting(_service_state_key(name, "installed"), "true" if installed else "false")
+    if started is not None:
+        _set_setting(_service_state_key(name, "started"), "true" if started else "false")
+
+
+def _load_service_state(name: str) -> dict[str, bool]:
+    if name not in _SERVICE_META:
+        raise KeyError(name)
+
+    installed_key = _service_state_key(name, "installed")
+    started_key = _service_state_key(name, "started")
+    raw_installed = str(_get_setting(installed_key, "") or "").strip()
+    raw_started = str(_get_setting(started_key, "") or "").strip()
+    managed_defaults = _MANAGED_SERVICE_DEFAULTS.get(name)
+
+    if managed_defaults and not raw_installed and not raw_started:
+        _persist_service_state(
+            name,
+            installed=managed_defaults["installed"],
+            started=managed_defaults["started"],
+        )
+        return {
+            "installed": managed_defaults["installed"],
+            "started": managed_defaults["started"],
+            "managed": True,
+        }
+
+    repo_exists = _repo_path(name).exists()
+    installed = _bool_setting(raw_installed, default=repo_exists)
+    started = _bool_setting(raw_started, default=False)
+
+    updates: dict[str, bool] = {}
+    if managed_defaults:
+        if not raw_installed:
+            updates["installed"] = installed
+        if not raw_started:
+            updates["started"] = started
+
+    if started and not installed:
+        installed = True
+        updates["installed"] = True
+
+    if updates:
+        _persist_service_state(
+            name,
+            installed=updates.get("installed"),
+            started=updates.get("started"),
+        )
+
+    return {
+        "installed": installed,
+        "started": started,
+        "managed": bool(managed_defaults),
+    }
 
 
 def _creationflags() -> int:
@@ -201,11 +294,13 @@ def _clone_repo_if_missing(name: str):
     )
 
 
-def install(name: str) -> dict[str, Any]:
+def install(name: str, *, persist_state: bool = True) -> dict[str, Any]:
     with _LOCK:
         if name not in _SERVICE_META:
             raise KeyError(name)
         _clone_repo_if_missing(name)
+    if persist_state:
+        _persist_service_state(name, installed=True)
     return _status_one(name)
 
 
@@ -346,6 +441,7 @@ def _find_desktop_pid(name: str) -> int | None:
 def _status_one(name: str) -> dict[str, Any]:
     meta = _service_meta(name)
     repo = _repo_path(name)
+    desired_state = _load_service_state(name)
     proc = _PROCS.get(name)
     desktop_pid = _find_desktop_pid(name) if meta["kind"] == "desktop" else None
     running = _health_ok(name) if meta["kind"] == "web" else bool(desktop_pid or _proc_running(name))
@@ -368,6 +464,9 @@ def _status_one(name: str) -> dict[str, Any]:
             if name == "grok2api"
             else ""
         ),
+        "desired_installed": desired_state["installed"],
+        "desired_running": desired_state["started"],
+        "managed": desired_state["managed"],
         "running": running,
         "starting": starting,
         "process_alive": process_alive,
@@ -621,6 +720,7 @@ def _ensure_cliproxyapi_runtime_config(repo: Path):
         remote_management = {}
     remote_management["allow-remote"] = True
     remote_management["secret-key"] = secret
+    remote_management.setdefault("disable-control-panel", False)
     data["remote-management"] = remote_management
 
     # 兼容旧版本读取顶层 secret-key 的情况。
@@ -747,7 +847,7 @@ def _build_command(name: str) -> tuple[list[str], Path]:
     raise KeyError(name)
 
 
-def start(name: str) -> dict[str, Any]:
+def start(name: str, *, persist_state: bool = True) -> dict[str, Any]:
     with _LOCK:
         if name not in _SERVICE_META:
             raise KeyError(name)
@@ -755,6 +855,8 @@ def start(name: str) -> dict[str, Any]:
         repo = _repo_path(name)
         if not repo.exists():
             raise RuntimeError(f"{meta['label']} 未安装，请先在插件页点击“安装”")
+        if persist_state:
+            _persist_service_state(name, installed=True, started=True)
         if _status_one(name)["running"] or name in _STARTING or _proc_running(name):
             return _status_one(name)
         _STARTING.add(name)
@@ -796,9 +898,13 @@ def start(name: str) -> dict[str, Any]:
             _STARTING.discard(name)
 
 
-def stop(name: str) -> dict[str, Any]:
+def stop(name: str, *, persist_state: bool = True) -> dict[str, Any]:
     with _LOCK:
+        if name not in _SERVICE_META:
+            raise KeyError(name)
         meta = _service_meta(name)
+        if persist_state:
+            _persist_service_state(name, started=False)
         _STARTING.discard(name)
         proc = _PROCS.get(name)
         port_pid = None
@@ -862,3 +968,52 @@ def start_all() -> list[dict[str, Any]]:
 
 def stop_all() -> list[dict[str, Any]]:
     return [stop(name) for name in _SERVICE_META]
+
+
+def ensure_managed_services_ready(names: list[str] | tuple[str, ...] | None = None) -> list[dict[str, Any]]:
+    target_names = [name for name in (names or _MANAGED_SERVICE_NAMES) if name in _MANAGED_SERVICE_NAMES]
+    results: list[dict[str, Any]] = []
+
+    for name in target_names:
+        try:
+            desired_state = _load_service_state(name)
+            if desired_state["installed"] and not _repo_path(name).exists():
+                install(name, persist_state=False)
+
+            status = _status_one(name)
+            if desired_state["started"] and not status["running"]:
+                status = start(name, persist_state=False)
+            results.append(status)
+        except Exception as e:
+            _LAST_ERROR[name] = str(e)
+            results.append(_status_one(name))
+
+    return results
+
+
+def _bootstrap_managed_services_worker(names: tuple[str, ...]) -> None:
+    global _BOOTSTRAP_THREAD
+    try:
+        ensure_managed_services_ready(list(names))
+    finally:
+        with _BOOTSTRAP_THREAD_LOCK:
+            _BOOTSTRAP_THREAD = None
+
+
+def ensure_managed_services_async(names: list[str] | tuple[str, ...] | None = None) -> bool:
+    global _BOOTSTRAP_THREAD
+    target_names = tuple(name for name in (names or _MANAGED_SERVICE_NAMES) if name in _MANAGED_SERVICE_NAMES)
+    if not target_names:
+        return False
+
+    with _BOOTSTRAP_THREAD_LOCK:
+        if _BOOTSTRAP_THREAD and _BOOTSTRAP_THREAD.is_alive():
+            return False
+        _BOOTSTRAP_THREAD = threading.Thread(
+            target=_bootstrap_managed_services_worker,
+            args=(target_names,),
+            name="external-apps-bootstrap",
+            daemon=True,
+        )
+        _BOOTSTRAP_THREAD.start()
+    return True

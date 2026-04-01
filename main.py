@@ -57,6 +57,9 @@ def _print_runtime_info() -> None:
 async def lifespan(app: FastAPI):
     _print_runtime_info()
     init_db()
+    from services.external_apps import ensure_managed_services_async
+
+    ensure_managed_services_async()
     load_all()
     print("[OK] 数据库初始化完成")
     from core.registry import list_platforms
