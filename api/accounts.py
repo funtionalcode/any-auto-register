@@ -776,32 +776,118 @@ def get_stats(session: Session = Depends(get_session)):
     return {"total": len(accounts), "by_platform": platforms, "by_status": statuses}
 
 
+def _flush_csv_buffer(buffer: io.StringIO) -> str:
+    payload = buffer.getvalue()
+    buffer.seek(0)
+    buffer.truncate(0)
+    return payload
+
+
+def _format_export_created_at(value: datetime | None) -> str:
+    if not value:
+        return ""
+    return value.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _build_export_filename(platform: Optional[str], status: Optional[str]) -> str:
+    parts = ["accounts"]
+    if platform:
+        parts.append(platform.strip().replace("/", "_"))
+    if status:
+        parts.append(status.strip().replace("/", "_"))
+    return f"{'_'.join(filter(None, parts))}.csv"
+
+
+def _iter_accounts_export_csv(
+    platform: Optional[str] = None,
+    status: Optional[str] = None,
+    *,
+    batch_size: int = 500,
+) -> Iterator[str]:
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow([
+        "platform",
+        "email",
+        "password",
+        "user_id",
+        "region",
+        "status",
+        "cashier_url",
+        "created_at",
+    ])
+    yield _flush_csv_buffer(buffer)
+
+    with Session(engine) as export_session:
+        last_id = 0
+        while True:
+            statement = (
+                select(
+                    AccountModel.id,
+                    AccountModel.platform,
+                    AccountModel.email,
+                    AccountModel.password,
+                    AccountModel.user_id,
+                    AccountModel.region,
+                    AccountModel.status,
+                    AccountModel.cashier_url,
+                    AccountModel.created_at,
+                )
+                .where(AccountModel.id > last_id)
+                .order_by(AccountModel.id.asc())
+                .limit(batch_size)
+            )
+            if platform:
+                statement = statement.where(AccountModel.platform == platform)
+            if status:
+                statement = statement.where(AccountModel.status == status)
+
+            rows = export_session.exec(statement).all()
+            if not rows:
+                break
+
+            for row in rows:
+                (
+                    account_id,
+                    account_platform,
+                    email,
+                    password,
+                    user_id,
+                    region,
+                    account_status,
+                    cashier_url,
+                    created_at,
+                ) = row
+                last_id = int(account_id or last_id)
+                writer.writerow([
+                    account_platform,
+                    email,
+                    password,
+                    user_id,
+                    region,
+                    account_status,
+                    cashier_url,
+                    _format_export_created_at(created_at),
+                ])
+
+            chunk = _flush_csv_buffer(buffer)
+            if chunk:
+                yield chunk
+
+
 @router.get("/export")
 def export_accounts(
     platform: Optional[str] = None,
     status: Optional[str] = None,
-    session: Session = Depends(get_session),
 ):
-    q = select(AccountModel)
-    if platform:
-        q = q.where(AccountModel.platform == platform)
-    if status:
-        q = q.where(AccountModel.status == status)
-    accounts = session.exec(q).all()
-
-    output = io.StringIO()
-    writer = csv.writer(output)
-    writer.writerow(["platform", "email", "password", "user_id", "region",
-                     "status", "cashier_url", "created_at"])
-    for acc in accounts:
-        writer.writerow([acc.platform, acc.email, acc.password, acc.user_id,
-                         acc.region, acc.status, acc.cashier_url,
-                         acc.created_at.strftime("%Y-%m-%d %H:%M:%S")])
-    output.seek(0)
+    filename = _build_export_filename(platform, status)
     return StreamingResponse(
-        iter([output.getvalue()]),
-        media_type="text/csv",
-        headers={"Content-Disposition": "attachment; filename=accounts.csv"}
+        _iter_accounts_export_csv(platform=platform, status=status),
+        media_type="text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "no-store",
+        },
     )
 
 

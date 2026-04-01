@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useRef } from 'react'
 import { useParams } from 'react-router-dom'
 import {
   Table,
@@ -68,6 +68,25 @@ interface AccountBatchCheckResponse {
   error_ids: number[]
   not_found: number[]
   items: AccountCheckItem[]
+}
+
+interface CpaBackfillTaskSnapshot {
+  id: string
+  status: 'pending' | 'running' | 'done' | 'failed' | string
+  message?: string
+  error?: string
+  total: number
+  target_total: number
+  success: number
+  failed: number
+  skipped: number
+  items: any[]
+  logs?: string[]
+  reused?: boolean
+}
+
+interface ActiveCpaBackfillTask extends CpaBackfillTaskSnapshot {
+  mode: 'pending' | 'selected'
 }
 
 interface OfficialQuotaSnapshot {
@@ -364,10 +383,14 @@ function ActionMenu({ acc, onRefresh }: { acc: any; onRefresh: () => void }) {
 export default function Accounts() {
   const { launchTask, completionVersion } = useRegisterTaskCenter()
   const { platform } = useParams<{ platform: string }>()
+  const exportFrameRef = useRef<HTMLIFrameElement | null>(null)
+  const exportResetTimerRef = useRef<number | null>(null)
+  const cpaTaskPollTimerRef = useRef<number | null>(null)
   const [currentPlatform, setCurrentPlatform] = useState(platform || 'trae')
   const [accounts, setAccounts] = useState<any[]>([])
   const [total, setTotal] = useState(0)
   const [loading, setLoading] = useState(false)
+  const [exportLoading, setExportLoading] = useState(false)
   const [search, setSearch] = useState('')
   const [filterStatus, setFilterStatus] = useState('')
   const [page, setPage] = useState(1)
@@ -387,6 +410,7 @@ export default function Accounts() {
   const [importLoading, setImportLoading] = useState(false)
   const [registerLoading, setRegisterLoading] = useState(false)
   const [cpaSyncLoading, setCpaSyncLoading] = useState<'pending' | 'selected' | ''>('')
+  const [cpaTask, setCpaTask] = useState<ActiveCpaBackfillTask | null>(null)
   const [testing, setTesting] = useState<'page' | 'selected' | number | null>(null)
   const [testDeleting, setTestDeleting] = useState(false)
   const [testResult, setTestResult] = useState<{
@@ -402,6 +426,17 @@ export default function Accounts() {
   useEffect(() => {
     if (platform) setCurrentPlatform(platform)
   }, [platform])
+
+  useEffect(() => {
+    return () => {
+      if (exportResetTimerRef.current !== null) {
+        window.clearTimeout(exportResetTimerRef.current)
+      }
+      if (cpaTaskPollTimerRef.current !== null) {
+        window.clearInterval(cpaTaskPollTimerRef.current)
+      }
+    }
+  }, [])
 
   useEffect(() => {
     setPage(1)
@@ -448,10 +483,26 @@ export default function Accounts() {
   }
 
   const exportCsv = () => {
+    if (exportLoading) return
     const params = new URLSearchParams()
     params.set('platform', currentPlatform)
     if (filterStatus) params.set('status', filterStatus)
-    window.open(`/api/accounts/export?${params.toString()}`, '_blank', 'noopener,noreferrer')
+    params.set('_ts', String(Date.now()))
+
+    setExportLoading(true)
+    if (exportResetTimerRef.current !== null) {
+      window.clearTimeout(exportResetTimerRef.current)
+    }
+    exportResetTimerRef.current = window.setTimeout(() => {
+      setExportLoading(false)
+      exportResetTimerRef.current = null
+    }, 1500)
+
+    const targetUrl = `/api/accounts/export?${params.toString()}`
+    if (exportFrameRef.current) {
+      exportFrameRef.current.src = targetUrl
+    }
+    message.success('已开始导出，界面可继续操作')
   }
 
   const handleDelete = async (id: number) => {
@@ -602,6 +653,54 @@ export default function Accounts() {
     })
   }
 
+  const stopCpaTaskPolling = () => {
+    if (cpaTaskPollTimerRef.current !== null) {
+      window.clearInterval(cpaTaskPollTimerRef.current)
+      cpaTaskPollTimerRef.current = null
+    }
+  }
+
+  const finalizeCpaTask = async (snapshot: ActiveCpaBackfillTask) => {
+    stopCpaTaskPolling()
+    setCpaSyncLoading('')
+
+    const actionLabel = snapshot.mode === 'selected' ? '所选账号 CPA 上传' : '未上传账号 CPA 补传'
+    const failureLines = buildCpaFailureLines(snapshot)
+
+    if (snapshot.status === 'failed') {
+      message.error(snapshot.error || `${actionLabel}失败`)
+    } else if (!snapshot.total) {
+      message.info('没有可处理的账号')
+    } else if (!snapshot.failed) {
+      message.success(`${actionLabel}完成：成功 ${snapshot.success} / ${snapshot.total}`)
+    } else if (!snapshot.success) {
+      message.error(failureLines[0] || `${actionLabel}失败：成功 ${snapshot.success} / ${snapshot.total}`)
+    } else {
+      message.warning(failureLines[0] || `${actionLabel}部分完成：成功 ${snapshot.success} / ${snapshot.total}`)
+    }
+
+    showCpaSyncResult(`${actionLabel}结果`, snapshot)
+    await load()
+  }
+
+  const pollCpaTask = async (taskId: string, mode: 'pending' | 'selected') => {
+    try {
+      const snapshot = await apiFetch(`/integrations/backfill/tasks/${taskId}`) as CpaBackfillTaskSnapshot
+      const nextTask: ActiveCpaBackfillTask = { ...snapshot, mode }
+      setCpaTask(nextTask)
+
+      if (snapshot.status === 'done' || snapshot.status === 'failed') {
+        await finalizeCpaTask(nextTask)
+      }
+      return snapshot
+    } catch (e: any) {
+      stopCpaTaskPolling()
+      setCpaSyncLoading('')
+      message.error(`获取 CPA 后台任务状态失败: ${e?.message || e || '未知错误'}`)
+      return null
+    }
+  }
+
   const handleCpaBackfill = async (mode: 'pending' | 'selected') => {
     if (currentPlatform !== 'chatgpt') return
 
@@ -627,29 +726,30 @@ export default function Accounts() {
 
     setCpaSyncLoading(mode)
     try {
-      const result = await apiFetch('/integrations/backfill', {
+      const task = await apiFetch('/integrations/backfill/async', {
         method: 'POST',
         body: JSON.stringify(body),
-      })
-      const failureLines = buildCpaFailureLines(result)
+      }) as CpaBackfillTaskSnapshot
 
-      const actionLabel = mode === 'selected' ? '所选账号 CPA 上传' : '未上传账号 CPA 补传'
-      if (!result.total) {
-        message.info('没有可处理的账号')
-      } else if (!result.failed) {
-        message.success(`${actionLabel}完成：成功 ${result.success} / ${result.total}`)
-      } else if (!result.success) {
-        message.error(failureLines[0] || `${actionLabel}失败：成功 ${result.success} / ${result.total}`)
-      } else {
-        message.warning(failureLines[0] || `${actionLabel}部分完成：成功 ${result.success} / ${result.total}`)
+      const nextTask: ActiveCpaBackfillTask = { ...task, mode }
+      setCpaTask(nextTask)
+      message.success(task.reused ? '已有 CPA 后台任务在执行，已切换到该任务' : 'CPA 上传已转入后台执行')
+
+      stopCpaTaskPolling()
+      const snapshot = await pollCpaTask(task.id, mode)
+      if (snapshot && snapshot.status !== 'done' && snapshot.status !== 'failed') {
+        cpaTaskPollTimerRef.current = window.setInterval(() => {
+          void pollCpaTask(task.id, mode)
+        }, 2000)
       }
-
-      showCpaSyncResult(`${actionLabel}结果`, result)
-      await load()
     } catch (e: any) {
+      stopCpaTaskPolling()
       message.error(`CPA 上传失败: ${e.message}`)
-    } finally {
       setCpaSyncLoading('')
+    } finally {
+      if (!cpaTaskPollTimerRef.current) {
+        setCpaSyncLoading('')
+      }
     }
   }
 
@@ -858,6 +958,36 @@ export default function Accounts() {
 
   return (
     <div>
+      <iframe ref={exportFrameRef} title="accounts-export" style={{ display: 'none' }} />
+      {currentPlatform === 'chatgpt' && cpaTask && (
+        <Alert
+          showIcon
+          closable={cpaTask.status === 'done' || cpaTask.status === 'failed'}
+          onClose={() => setCpaTask(null)}
+          type={
+            cpaTask.status === 'failed'
+              ? 'error'
+              : cpaTask.status === 'done'
+                ? (cpaTask.failed > 0 ? 'warning' : 'success')
+                : 'info'
+          }
+          style={{ marginBottom: 12 }}
+          message={
+            cpaTask.status === 'failed'
+              ? 'CPA 后台任务失败'
+              : cpaTask.status === 'done'
+                ? 'CPA 后台任务已完成'
+                : 'CPA 后台任务运行中'
+          }
+          description={
+            [
+              cpaTask.message || '',
+              `进度 ${cpaTask.total}/${cpaTask.target_total || cpaTask.total || 0}`,
+              `成功 ${cpaTask.success}，失败 ${cpaTask.failed}，跳过 ${cpaTask.skipped}`,
+            ].filter(Boolean).join(' · ')
+          }
+        />
+      )}
       <div style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 }}>
         <Space>
           <Input.Search
@@ -934,7 +1064,9 @@ export default function Accounts() {
             </Popconfirm>
           )}
           <Button icon={<UploadOutlined />} onClick={() => setImportModalOpen(true)}>导入</Button>
-          <Button icon={<DownloadOutlined />} onClick={exportCsv} disabled={accounts.length === 0}>导出</Button>
+          <Button icon={<DownloadOutlined />} onClick={exportCsv} disabled={accounts.length === 0} loading={exportLoading}>
+            导出
+          </Button>
           <Button icon={<PlusOutlined />} onClick={() => setAddModalOpen(true)}>新增</Button>
           <Button type="primary" icon={<PlusOutlined />} onClick={() => setRegisterModalOpen(true)}>注册</Button>
           <Button icon={<ReloadOutlined spin={loading} />} onClick={load} />
