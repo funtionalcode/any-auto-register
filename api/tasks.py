@@ -137,6 +137,30 @@ def _log(task_id: str, msg: str):
     print(entry)
 
 
+def _build_task_log_detail(
+    *,
+    task_id: str,
+    attempt_no: int,
+    total_count: int,
+    logs: list[str] | None = None,
+    source: str = "manual",
+    meta: dict | None = None,
+    proxy: str | None = None,
+) -> dict:
+    detail: dict[str, object] = {
+        "task_id": task_id,
+        "attempt_no": attempt_no,
+        "total_count": total_count,
+        "source": source,
+        "logs": list(logs or []),
+    }
+    if meta:
+        detail["meta"] = meta
+    if proxy:
+        detail["proxy"] = proxy
+    return detail
+
+
 def _save_task_log(
     platform: str, email: str, status: str, error: str = "", detail: dict = None
 ):
@@ -153,8 +177,9 @@ def _save_task_log(
         s.commit()
 
 
-def _auto_upload_integrations(task_id: str, account):
+def _auto_upload_integrations(task_id: str, account, log_fn=None):
     """注册成功后自动导入外部系统。"""
+    emit = log_fn or (lambda msg: _log(task_id, msg))
     try:
         from services.external_sync import sync_account
 
@@ -162,9 +187,9 @@ def _auto_upload_integrations(task_id: str, account):
             name = result.get("name", "Auto Upload")
             ok = bool(result.get("ok"))
             msg = result.get("msg", "")
-            _log(task_id, f"  [{name}] {'✓ ' + msg if ok else '✗ ' + msg}")
+            emit(f"  [{name}] {'✓ ' + msg if ok else '✗ ' + msg}")
     except Exception as e:
-        _log(task_id, f"  [Auto Upload] 自动导入异常: {e}")
+        emit(f"  [Auto Upload] 自动导入异常: {e}")
 
 
 def _run_register(task_id: str, req: RegisterTaskRequest):
@@ -176,6 +201,8 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
 
     with _tasks_lock:
         _tasks[task_id]["status"] = "running"
+        task_source = str(_tasks[task_id].get("source") or "manual")
+        task_meta = deepcopy(_tasks[task_id].get("meta") or {})
     success = 0
     errors = []
     start_gate_lock = threading.Lock()
@@ -199,6 +226,14 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
 
         def _do_one(i: int):
             nonlocal next_start_time
+            attempt_logs: list[str] = []
+            _proxy = None
+
+            def _attempt_log(msg: str):
+                ts = time.strftime("%H:%M:%S")
+                attempt_logs.append(f"[{ts}] {msg}")
+                _log(task_id, f"[{i + 1}/{req.count}] {msg}")
+
             try:
                 from core.proxy_pool import proxy_pool
 
@@ -211,9 +246,8 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
                         now = time.time()
                         wait_seconds = max(0.0, next_start_time - now)
                         if wait_seconds > 0:
-                            _log(
-                                task_id,
-                                f"第 {i + 1} 个账号启动前延迟 {wait_seconds:g} 秒",
+                            _attempt_log(
+                                f"启动前延迟 {wait_seconds:g} 秒"
                             )
                             time.sleep(wait_seconds)
                         next_start_time = time.time() + req.register_delay_seconds
@@ -232,14 +266,14 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
                 )
                 _mailbox = _build_mailbox(_proxy)
                 _platform = PlatformCls(config=_config, mailbox=_mailbox)
-                _platform._log_fn = lambda msg: _log(task_id, msg)
+                _platform._log_fn = _attempt_log
                 if getattr(_platform, "mailbox", None) is not None:
-                    _platform.mailbox._log_fn = _platform._log_fn
+                    _platform.mailbox._log_fn = _attempt_log
                 with _tasks_lock:
                     _tasks[task_id]["progress"] = f"{i + 1}/{req.count}"
-                _log(task_id, f"开始注册第 {i + 1}/{req.count} 个账号")
+                _attempt_log("开始注册")
                 if _proxy:
-                    _log(task_id, f"使用代理: {_proxy}")
+                    _attempt_log(f"使用代理: {_proxy}")
                 account = _platform.register(
                     email=req.email or None,
                     password=req.password,
@@ -274,22 +308,53 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
                 saved_account = save_account(account)
                 if _proxy:
                     proxy_pool.report_success(_proxy)
-                _log(task_id, f"✓ 注册成功: {account.email}")
-                _save_task_log(req.platform, account.email, "success")
-                _auto_upload_integrations(task_id, saved_account or account)
+                _attempt_log(f"✓ 注册成功: {account.email}")
+                _auto_upload_integrations(
+                    task_id,
+                    saved_account or account,
+                    log_fn=_attempt_log,
+                )
                 cashier_url = (account.extra or {}).get("cashier_url", "")
                 if cashier_url:
-                    _log(task_id, f"  [升级链接] {cashier_url}")
+                    _attempt_log(f"  [升级链接] {cashier_url}")
                     with _tasks_lock:
                         _tasks[task_id].setdefault("cashier_urls", []).append(
                             cashier_url
                         )
+                _save_task_log(
+                    req.platform,
+                    account.email,
+                    "success",
+                    detail=_build_task_log_detail(
+                        task_id=task_id,
+                        attempt_no=i + 1,
+                        total_count=req.count,
+                        logs=attempt_logs,
+                        source=task_source,
+                        meta=task_meta,
+                        proxy=_proxy,
+                    ),
+                )
                 return True
             except Exception as e:
                 if _proxy:
                     proxy_pool.report_fail(_proxy)
-                _log(task_id, f"✗ 注册失败: {e}")
-                _save_task_log(req.platform, req.email or "", "failed", error=str(e))
+                _attempt_log(f"✗ 注册失败: {e}")
+                _save_task_log(
+                    req.platform,
+                    req.email or "",
+                    "failed",
+                    error=str(e),
+                    detail=_build_task_log_detail(
+                        task_id=task_id,
+                        attempt_no=i + 1,
+                        total_count=req.count,
+                        logs=attempt_logs,
+                        source=task_source,
+                        meta=task_meta,
+                        proxy=_proxy,
+                    ),
+                )
                 return str(e)
 
         from concurrent.futures import ThreadPoolExecutor, as_completed

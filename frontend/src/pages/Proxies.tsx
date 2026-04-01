@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Card, Table, Button, Input, Tag, Space, Popconfirm, message } from 'antd'
+import { Card, Table, Button, Input, Tag, Space, Popconfirm, message, Modal, Typography } from 'antd'
 import {
   PlusOutlined,
   DeleteOutlined,
@@ -8,20 +8,64 @@ import {
   CloseCircleOutlined,
   SwapRightOutlined,
   SwapLeftOutlined,
+  EditOutlined,
+  ApiOutlined,
 } from '@ant-design/icons'
 import { apiFetch } from '@/lib/utils'
 
+interface ProxyItem {
+  id: number
+  url: string
+  region: string
+  success_count: number
+  fail_count: number
+  is_active: boolean
+  last_checked?: string | null
+}
+
+interface ProxyTestResult {
+  ip?: string
+  latency_ms?: number
+  country_code?: string
+  country?: string
+  region_name?: string
+  city?: string
+  region_label?: string
+  normalized_url?: string
+  proxy?: ProxyItem
+}
+
+function formatDateTime(value?: string | null) {
+  if (!value) return '-'
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString('zh-CN')
+}
+
 export default function Proxies() {
-  const [proxies, setProxies] = useState<any[]>([])
+  const [proxies, setProxies] = useState<ProxyItem[]>([])
   const [newProxy, setNewProxy] = useState('')
   const [region, setRegion] = useState('')
   const [checking, setChecking] = useState(false)
   const [loading, setLoading] = useState(false)
+  const [testing, setTesting] = useState<number | 'draft' | null>(null)
+  const [editingProxy, setEditingProxy] = useState<ProxyItem | null>(null)
+  const [editingRegion, setEditingRegion] = useState('')
+  const [testResult, setTestResult] = useState<{
+    open: boolean
+    title: string
+    proxyId?: number
+    currentRegion?: string
+    detectedRegion?: string
+    data?: ProxyTestResult
+  }>({
+    open: false,
+    title: '',
+  })
 
   const load = async () => {
     setLoading(true)
     try {
-      const data = await apiFetch('/proxies')
+      const data = await apiFetch('/proxies') as ProxyItem[]
       setProxies(data)
     } finally {
       setLoading(false)
@@ -34,7 +78,7 @@ export default function Proxies() {
 
   const add = async () => {
     if (!newProxy.trim()) return
-    const lines = newProxy.trim().split('\n').map((l) => l.trim()).filter(Boolean)
+    const lines = newProxy.trim().split('\n').map((line) => line.trim()).filter(Boolean)
     try {
       if (lines.length > 1) {
         await apiFetch('/proxies/bulk', {
@@ -50,33 +94,102 @@ export default function Proxies() {
       message.success('添加成功')
       setNewProxy('')
       setRegion('')
-      load()
+      await load()
     } catch (e: any) {
       message.error(`添加失败: ${e.message}`)
     }
   }
 
+  const updateRegion = async (id: number, nextRegion: string, options?: { silent?: boolean }) => {
+    await apiFetch(`/proxies/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ region: nextRegion }),
+    })
+    if (!options?.silent) {
+      message.success('地区已更新')
+    }
+    await load()
+  }
+
   const del = async (id: number) => {
     await apiFetch(`/proxies/${id}`, { method: 'DELETE' })
     message.success('删除成功')
-    load()
+    await load()
   }
 
   const toggle = async (id: number) => {
     await apiFetch(`/proxies/${id}/toggle`, { method: 'PATCH' })
-    load()
+    await load()
   }
 
   const check = async () => {
     setChecking(true)
-    await apiFetch('/proxies/check', { method: 'POST' })
-    setTimeout(() => {
-      load()
+    try {
+      await apiFetch('/proxies/check', { method: 'POST' })
+      setTimeout(() => {
+        void load()
+        setChecking(false)
+      }, 3000)
+    } catch (e: any) {
       setChecking(false)
-    }, 3000)
+      message.error(`检测失败: ${e.message}`)
+    }
   }
 
-  const columns: any[] = [
+  const runDraftTest = async () => {
+    const lines = newProxy.trim().split('\n').map((line) => line.trim()).filter(Boolean)
+    if (lines.length !== 1) {
+      message.error('测试输入代理时请只保留一条代理地址')
+      return
+    }
+    setTesting('draft')
+    try {
+      const data = await apiFetch('/proxies/test', {
+        method: 'POST',
+        body: JSON.stringify({ url: lines[0] }),
+      }) as ProxyTestResult
+      if (!region && data.region_label) {
+        setRegion(String(data.region_label))
+      }
+      setTestResult({
+        open: true,
+        title: '代理测试结果',
+        detectedRegion: String(data.region_label || ''),
+        data,
+      })
+      message.success('代理测试成功')
+    } catch (e: any) {
+      message.error(`测试失败: ${e.message}`)
+    } finally {
+      setTesting(null)
+    }
+  }
+
+  const runSavedProxyTest = async (record: ProxyItem) => {
+    setTesting(record.id)
+    try {
+      const data = await apiFetch(`/proxies/${record.id}/test`, {
+        method: 'POST',
+        body: JSON.stringify({ save_region: false }),
+      }) as ProxyTestResult
+      setTestResult({
+        open: true,
+        title: '代理测试结果',
+        proxyId: record.id,
+        currentRegion: record.region,
+        detectedRegion: String(data.region_label || ''),
+        data,
+      })
+      message.success('代理测试成功')
+    } catch (e: any) {
+      message.error(`测试失败: ${e.message}`)
+    } finally {
+      await load()
+      setTesting(null)
+    }
+  }
+
+  const columns = [
     {
       title: '代理地址',
       dataIndex: 'url',
@@ -87,12 +200,14 @@ export default function Proxies() {
       title: '地区',
       dataIndex: 'region',
       key: 'region',
-      render: (text: string) => text || '-',
+      width: 180,
+      render: (text: string) => text ? <Tag color="blue">{text}</Tag> : <Typography.Text type="secondary">未设置</Typography.Text>,
     },
     {
       title: '成功/失败',
       key: 'stats',
-      render: (_: any, record: any) => (
+      width: 120,
+      render: (_: unknown, record: ProxyItem) => (
         <Space>
           <Tag color="success">{record.success_count}</Tag>
           <span>/</span>
@@ -104,6 +219,7 @@ export default function Proxies() {
       title: '状态',
       dataIndex: 'is_active',
       key: 'is_active',
+      width: 100,
       render: (active: boolean) => (
         <Tag color={active ? 'success' : 'error'} icon={active ? <CheckCircleOutlined /> : <CloseCircleOutlined />}>
           {active ? '活跃' : '禁用'}
@@ -111,10 +227,34 @@ export default function Proxies() {
       ),
     },
     {
+      title: '最近检测',
+      dataIndex: 'last_checked',
+      key: 'last_checked',
+      width: 180,
+      render: (value: string | null) => formatDateTime(value),
+    },
+    {
       title: '操作',
       key: 'action',
-      render: (_: any, record: any) => (
+      width: 180,
+      render: (_: unknown, record: ProxyItem) => (
         <Space>
+          <Button
+            type="text"
+            size="small"
+            icon={<ApiOutlined />}
+            loading={testing === record.id}
+            onClick={() => runSavedProxyTest(record)}
+          />
+          <Button
+            type="text"
+            size="small"
+            icon={<EditOutlined />}
+            onClick={() => {
+              setEditingProxy(record)
+              setEditingRegion(record.region || '')
+            }}
+          />
           <Button
             type="text"
             size="small"
@@ -131,6 +271,59 @@ export default function Proxies() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      <Modal
+        open={Boolean(editingProxy)}
+        title="修改地区"
+        onCancel={() => setEditingProxy(null)}
+        onOk={async () => {
+          if (!editingProxy) return
+          await updateRegion(editingProxy.id, editingRegion)
+          setEditingProxy(null)
+        }}
+      >
+        <Input
+          value={editingRegion}
+          onChange={(event) => setEditingRegion(event.target.value)}
+          placeholder="例如 US / California 或 SG"
+        />
+      </Modal>
+
+      <Modal
+        open={testResult.open}
+        title={testResult.title}
+        onCancel={() => setTestResult({ open: false, title: '' })}
+        onOk={() => setTestResult({ open: false, title: '' })}
+        okText="关闭"
+        cancelButtonProps={{ style: { display: 'none' } }}
+        footer={[
+          testResult.proxyId && testResult.detectedRegion ? (
+            <Button
+              key="apply-region"
+              onClick={async () => {
+                await updateRegion(testResult.proxyId as number, testResult.detectedRegion as string)
+                setTestResult({ open: false, title: '' })
+              }}
+            >
+              应用检测地区
+            </Button>
+          ) : null,
+          <Button key="close" type="primary" onClick={() => setTestResult({ open: false, title: '' })}>
+            关闭
+          </Button>,
+        ].filter(Boolean)}
+      >
+        <Space direction="vertical" style={{ width: '100%' }}>
+          <div>出口 IP：{testResult.data?.ip || '-'}</div>
+          <div>检测地区：{testResult.data?.region_label || '-'}</div>
+          <div>国家：{testResult.data?.country || '-'}</div>
+          <div>省州：{testResult.data?.region_name || '-'}</div>
+          <div>城市：{testResult.data?.city || '-'}</div>
+          <div>延迟：{typeof testResult.data?.latency_ms === 'number' ? `${testResult.data.latency_ms} ms` : '-'}</div>
+          <div>规范化代理：{testResult.data?.normalized_url || '-'}</div>
+          {testResult.currentRegion !== undefined ? <div>当前已保存地区：{testResult.currentRegion || '-'}</div> : null}
+        </Space>
+      </Modal>
+
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <div>
           <h1 style={{ fontSize: 24, fontWeight: 'bold', margin: 0 }}>代理管理</h1>
@@ -150,13 +343,16 @@ export default function Proxies() {
             rows={3}
             style={{ fontFamily: 'monospace' }}
           />
-          <Space>
+          <Space wrap>
             <Input
               value={region}
               onChange={(e) => setRegion(e.target.value)}
               placeholder="地区标签 (如 US, SG)"
-              style={{ width: 200 }}
+              style={{ width: 220 }}
             />
+            <Button icon={<ApiOutlined />} onClick={runDraftTest} loading={testing === 'draft'}>
+              测试
+            </Button>
             <Button type="primary" icon={<PlusOutlined />} onClick={add}>
               添加
             </Button>

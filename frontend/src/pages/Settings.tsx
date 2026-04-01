@@ -249,6 +249,17 @@ interface MailboxServiceConfig {
   fields: FieldConfig[]
 }
 
+interface MailboxInboxItem {
+  id: string
+  subject: string
+  from: string
+  to: string
+  created_at: string
+  preview: string
+  content: string
+  verification_code: string
+}
+
 interface TabConfig {
   key: string
   label: string
@@ -492,9 +503,108 @@ function MailboxSettingsPanel({ form }: { form: FormInstance }) {
   )
   const effectiveServiceKeys = enabledServiceKeys.length > 0 ? enabledServiceKeys : [selectedServiceKey]
   const selectedServices = MAILBOX_SERVICES.filter((service) => effectiveServiceKeys.includes(service.key))
+  const [inboxEmail, setInboxEmail] = useState('')
+  const [inboxAccountId, setInboxAccountId] = useState('')
+  const [inboxExtra, setInboxExtra] = useState<Record<string, unknown>>({})
+  const [inboxProxy, setInboxProxy] = useState('')
+  const [inboxLoading, setInboxLoading] = useState(false)
+  const [inboxCreating, setInboxCreating] = useState(false)
+  const [inboxLoaded, setInboxLoaded] = useState(false)
+  const [inboxItems, setInboxItems] = useState<MailboxInboxItem[]>([])
+  const [activeInboxItem, setActiveInboxItem] = useState<MailboxInboxItem | null>(null)
+
+  useEffect(() => {
+    setInboxItems([])
+    setInboxLoaded(false)
+    setInboxExtra({})
+    setActiveInboxItem(null)
+  }, [selectedServiceKey])
+
+  const createTestInbox = async () => {
+    setInboxCreating(true)
+    try {
+      const data = await apiFetch('/mailbox/inbox/create', {
+        method: 'POST',
+        body: JSON.stringify({
+          provider: selectedServiceKey,
+          config: form.getFieldsValue(true),
+          proxy: inboxProxy,
+        }),
+      })
+      setInboxEmail(String(data.email || ''))
+      setInboxAccountId(String(data.account_id || ''))
+      setInboxExtra(data.extra && typeof data.extra === 'object' ? data.extra : {})
+      setInboxItems([])
+      setInboxLoaded(false)
+      message.success('测试邮箱已生成')
+    } catch (e: any) {
+      message.error(e?.message || '生成测试邮箱失败')
+    } finally {
+      setInboxCreating(false)
+    }
+  }
+
+  const loadInbox = async () => {
+    setInboxLoading(true)
+    try {
+      const data = await apiFetch('/mailbox/inbox/messages', {
+        method: 'POST',
+        body: JSON.stringify({
+          provider: selectedServiceKey,
+          config: form.getFieldsValue(true),
+          email: inboxEmail,
+          account_id: inboxAccountId,
+          extra: inboxExtra,
+          proxy: inboxProxy,
+          limit: 10,
+        }),
+      })
+      setInboxEmail(String(data.email || inboxEmail || ''))
+      setInboxAccountId(String(data.account_id || inboxAccountId || ''))
+      setInboxItems(Array.isArray(data.items) ? data.items : [])
+      setInboxLoaded(true)
+      message.success(`收件箱刷新完成，共 ${Number(data.total || 0)} 封邮件`)
+    } catch (e: any) {
+      message.error(e?.message || '读取收件箱失败')
+    } finally {
+      setInboxLoading(false)
+    }
+  }
 
   return (
     <>
+      <Modal
+        open={Boolean(activeInboxItem)}
+        title="邮件详情"
+        width={900}
+        onCancel={() => setActiveInboxItem(null)}
+        onOk={() => setActiveInboxItem(null)}
+      >
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 12 }}>
+          <div>主题：{activeInboxItem?.subject || '-'}</div>
+          <div>发件人：{activeInboxItem?.from || '-'}</div>
+          <div>收件人：{activeInboxItem?.to || '-'}</div>
+          <div>时间：{activeInboxItem?.created_at || '-'}</div>
+          <div>验证码：{activeInboxItem?.verification_code || '-'}</div>
+        </div>
+        <pre
+          style={{
+            margin: 0,
+            maxHeight: 520,
+            overflow: 'auto',
+            padding: 12,
+            borderRadius: 8,
+            background: 'rgba(127,127,127,0.08)',
+            fontSize: 12,
+            lineHeight: 1.6,
+            whiteSpace: 'pre-wrap',
+            wordBreak: 'break-word',
+          }}
+        >
+          {activeInboxItem?.content || activeInboxItem?.preview || '暂无内容'}
+        </pre>
+      </Modal>
+
       <Card
         title="邮箱服务"
         extra={<span style={{ fontSize: 12, color: '#7a8ba3' }}>默认邮箱服务仍为单选；下方多选决定哪些服务会在设置页和注册页中显示</span>}
@@ -522,6 +632,79 @@ function MailboxSettingsPanel({ form }: { form: FormInstance }) {
       ))}
 
       {effectiveServiceKeys.includes('cfworker') ? <CFWorkerDomainPoolSection form={form} /> : null}
+
+      <Card
+        title="收件箱测试"
+        extra={<span style={{ fontSize: 12, color: '#7a8ba3' }}>用于单独测试某个邮箱账号的收件情况和验证码提取</span>}
+        style={{ marginBottom: 16 }}
+      >
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <Typography.Text type="secondary">
+            可直接生成测试邮箱，也可手动填写已有邮箱和账号 ID / Token 查看当前收件箱。部分服务如 TempMail.lol、DuckMail、API Mail 需要 Token。
+          </Typography.Text>
+          <Form.Item label="邮箱地址" style={{ marginBottom: 0 }}>
+            <Input
+              value={inboxEmail}
+              onChange={(event) => setInboxEmail(event.target.value)}
+              placeholder="demo@example.com"
+            />
+          </Form.Item>
+          <Form.Item label="账号 ID / Token（可选）" style={{ marginBottom: 0 }}>
+            <Input
+              value={inboxAccountId}
+              onChange={(event) => setInboxAccountId(event.target.value)}
+              placeholder="account id / token"
+            />
+          </Form.Item>
+          <Form.Item label="代理（可选）" style={{ marginBottom: 0 }}>
+            <Input
+              value={inboxProxy}
+              onChange={(event) => setInboxProxy(event.target.value)}
+              placeholder="http://127.0.0.1:7890"
+            />
+          </Form.Item>
+          <Space wrap>
+            <Button onClick={createTestInbox} loading={inboxCreating}>
+              生成测试邮箱
+            </Button>
+            <Button type="primary" onClick={loadInbox} loading={inboxLoading}>
+              刷新收件箱
+            </Button>
+          </Space>
+          {(inboxEmail || inboxAccountId) ? (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+              <div>当前测试邮箱：{inboxEmail || '-'}</div>
+              <div>当前账号 ID / Token：{inboxAccountId || '-'}</div>
+            </div>
+          ) : null}
+          {inboxItems.length > 0 ? (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+              {inboxItems.map((item) => (
+                <Card key={item.id || `${item.subject}-${item.created_at}`} size="small">
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                    <Space wrap>
+                      <Tag>{item.subject || '无主题'}</Tag>
+                      {item.verification_code ? <Tag color="success">验证码 {item.verification_code}</Tag> : null}
+                      {item.created_at ? <Tag color="blue">{item.created_at}</Tag> : null}
+                    </Space>
+                    {item.from ? <div>发件人：{item.from}</div> : null}
+                    <div style={{ color: '#7a8ba3' }}>{item.preview || item.content || '暂无预览'}</div>
+                    <Space>
+                      <Button type="link" style={{ padding: 0 }} onClick={() => setActiveInboxItem(item)}>
+                        查看详情
+                      </Button>
+                    </Space>
+                  </div>
+                </Card>
+              ))}
+            </div>
+          ) : inboxLoaded ? (
+            <Typography.Text type="secondary">当前收件箱暂无邮件。</Typography.Text>
+          ) : (
+            <Typography.Text type="secondary">点击“刷新收件箱”后，这里会显示最近邮件列表。</Typography.Text>
+          )}
+        </div>
+      </Card>
     </>
   )
 }

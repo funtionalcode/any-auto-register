@@ -1,4 +1,6 @@
 """Grok (x.ai) 平台插件"""
+import traceback
+
 from core.base_platform import BasePlatform, Account, AccountStatus, RegisterConfig
 from core.base_mailbox import BaseMailbox
 from core.registry import register
@@ -35,26 +37,40 @@ class GrokPlatform(BasePlatform):
         for attempt in range(1, mailbox_attempts + 1):
             mail_acct = None
             current_email = email
-            if self.mailbox and not current_email:
-                mail_acct = self.mailbox.get_email()
-                current_email = mail_acct.email if mail_acct else None
+            try:
+                if self.mailbox and not current_email:
+                    log(f"[Grok][Attempt {attempt}] 获取测试邮箱")
+                    mail_acct = self.mailbox.get_email()
+                    current_email = mail_acct.email if mail_acct else None
+            except Exception as e:
+                log(f"[Grok][Attempt {attempt}][ERROR] 获取邮箱失败: {e}")
+                for line in traceback.format_exc().strip().splitlines():
+                    log(f"[Grok][Attempt {attempt}][TRACE] {line}")
+                raise
             log(f"邮箱: {current_email}")
             before_ids = self.mailbox.get_current_ids(mail_acct) if (self.mailbox and mail_acct) else set()
 
             def otp_cb():
-                log("等待验证码...")
-                code = self.mailbox.wait_for_code(
-                    mail_acct,
-                    keyword="",
-                    before_ids=before_ids,
-                    code_pattern=r'[A-Z0-9]{3}-[A-Z0-9]{3}',
-                )
-                if code:
-                    code = code.replace('-', '').replace(' ', '')
-                    log(f"验证码: {code}")
-                return code
+                try:
+                    log("等待验证码...")
+                    code = self.mailbox.wait_for_code(
+                        mail_acct,
+                        keyword="",
+                        before_ids=before_ids,
+                        code_pattern=r'[A-Z0-9]{3}-[A-Z0-9]{3}',
+                    )
+                    if code:
+                        code = code.replace('-', '').replace(' ', '')
+                        log(f"验证码: {code}")
+                    return code
+                except Exception as e:
+                    log(f"[Grok][Attempt {attempt}][ERROR] 收取验证码失败: {e}")
+                    for line in traceback.format_exc().strip().splitlines():
+                        log(f"[Grok][Attempt {attempt}][TRACE] {line}")
+                    raise
 
             try:
+                log(f"[Grok][Attempt {attempt}] 开始注册")
                 result = reg.register(
                     email=current_email,
                     password=password,
@@ -67,6 +83,9 @@ class GrokPlatform(BasePlatform):
                 if attempt < mailbox_attempts and "邮箱域名被拒绝" in msg:
                     log(f"Grok 邮箱域名被拒绝，切换新邮箱重试 {attempt + 1}/{mailbox_attempts}")
                     continue
+                log(f"[Grok][Attempt {attempt}][ERROR] 注册失败: {msg}")
+                for line in traceback.format_exc().strip().splitlines():
+                    log(f"[Grok][Attempt {attempt}][TRACE] {line}")
                 raise
         else:
             raise last_error if last_error else RuntimeError("Grok 注册失败")

@@ -717,6 +717,10 @@ class RegistrationEngine:
         try:
             self._log("=" * 60)
             self._log("开始注册流程")
+            if self.proxy_url:
+                self._log(f"使用代理: {self.proxy_url}")
+            else:
+                self._log("未配置代理，直连注册")
             self._log("=" * 60)
 
             # 1. 检查 IP 地理位置

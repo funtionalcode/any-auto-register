@@ -124,6 +124,10 @@ class RegistrationEngineV2:
                         self._log("=" * 60)
                         self._log("开始注册流程 V2 (Session 复用直取 AccessToken)")
                         self._log(f"请求模式: {self.browser_mode}")
+                        if self.proxy_url:
+                            self._log(f"使用代理: {self.proxy_url}")
+                        else:
+                            self._log("未配置代理，直连注册")
                         self._log("=" * 60)
                     else:
                         self._log(f"整流程重试 {attempt + 1}/{self.max_retries} ...")

@@ -13,6 +13,7 @@ import os
 import random
 import string
 import time
+import traceback
 from typing import Callable, Optional, Tuple
 
 
@@ -526,17 +527,24 @@ class GrokRegister:
         playwright = None
         browser = None
         context = None
+        page = None
+        current_step = "初始化"
         try:
+            current_step = "启动浏览器"
             playwright, browser = self._launch_browser()
+            current_step = "创建浏览器上下文"
             context = browser.new_context(
                 viewport={"width": 1400, "height": 1200},
                 user_agent=UA,
             )
             page = context.new_page()
 
+            current_step = "打开注册页"
             self._goto_email_signup(page)
+            current_step = "提交邮箱"
             self._submit_email(page, email)
 
+            current_step = "获取邮箱验证码"
             if not otp_callback:
                 code = input("验证码: ").strip()
             else:
@@ -545,12 +553,18 @@ class GrokRegister:
             if not code:
                 raise RuntimeError("未获取到验证码")
 
+            current_step = "提交邮箱验证码"
             self._submit_otp(page, code)
+            current_step = "填写用户信息"
             self._fill_user_form(page, given_name, family_name, password)
+            current_step = "通过 Turnstile"
             self._solve_turnstile_on_page(page)
+            current_step = "提交注册"
             self._submit_register(page)
+            current_step = "接受 ToS"
             self._accept_tos_if_needed(page)
 
+            current_step = "提取认证 Cookie"
             cookies = context.cookies()
             if not self._has_auth_cookies(cookies):
                 page.wait_for_timeout(5000)
@@ -571,6 +585,25 @@ class GrokRegister:
                 "sso_rw": sso_rw,
                 "cookies": cookies,
             }
+        except Exception as e:
+            self.log(f"[Grok][ERROR] 当前步骤: {current_step}")
+            self.log(f"[Grok][ERROR] 错误: {e}")
+            if page is not None:
+                try:
+                    self.log(f"[Grok][ERROR] 当前 URL: {page.url}")
+                except Exception:
+                    pass
+                try:
+                    body = page.locator("body").inner_text(timeout=1500)
+                    body_preview = " ".join(str(body or "").split())[:500]
+                    if body_preview:
+                        self.log(f"[Grok][ERROR] 页面片段: {body_preview}")
+                except Exception:
+                    pass
+            tb_lines = traceback.format_exc().strip().splitlines()
+            for line in tb_lines:
+                self.log(f"[Grok][TRACE] {line}")
+            raise
         finally:
             try:
                 if context:

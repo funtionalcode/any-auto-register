@@ -13,6 +13,7 @@ from api.tasks import router as tasks_router
 from api.platforms import router as platforms_router
 from api.proxies import router as proxies_router
 from api.config import router as config_router
+from api.mailbox import router as mailbox_router
 from api.actions import router as actions_router
 from api.integrations import router as integrations_router
 from core.runtime_timezone import configure_timezone
@@ -85,6 +86,7 @@ app.include_router(tasks_router, prefix="/api")
 app.include_router(platforms_router, prefix="/api")
 app.include_router(proxies_router, prefix="/api")
 app.include_router(config_router, prefix="/api")
+app.include_router(mailbox_router, prefix="/api")
 app.include_router(actions_router, prefix="/api")
 app.include_router(integrations_router, prefix="/api")
 
