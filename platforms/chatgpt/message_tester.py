@@ -58,6 +58,21 @@ class ChatGPTModelsResult:
 
 
 @dataclass
+class ChatGPTQuotaResult:
+    ok: bool
+    invalid: bool
+    message: str
+    used_proxy: str = ""
+    query_url: str = ""
+    summary: dict[str, Any] = field(default_factory=dict)
+    signals: list[dict[str, Any]] = field(default_factory=list)
+    data: Any = None
+    updated_access_token: str = ""
+    updated_refresh_token: str = ""
+    response_status_code: int = 0
+
+
+@dataclass
 class PreparedChatRequest:
     client: ChatGPTClient
     access_token: str
@@ -517,6 +532,27 @@ def _build_models_headers(
     return url, headers
 
 
+def _build_quota_headers(
+    client: ChatGPTClient,
+    access_token: str,
+    url: str,
+) -> dict[str, str]:
+    origin = _official_target_origin(url, client.BASE)
+    return client._headers(
+        url,
+        accept="application/json, text/plain, */*",
+        referer=f"{origin}/",
+        origin=origin,
+        fetch_site="same-origin",
+        extra_headers={
+            "authorization": f"Bearer {access_token}",
+            "oai-device-id": client.device_id,
+            "oai-language": "en-US",
+            "cookie": _build_cookie_header(client),
+        },
+    )
+
+
 def _build_conversation_payload(
     prompt: str,
     *,
@@ -694,6 +730,118 @@ def _extract_model_entries(payload: Any) -> list[dict[str, str]]:
         seen.add(identifier)
         results.append(normalized)
     return results
+
+
+def _build_quota_candidate_urls(client: ChatGPTClient, target_url: str = "") -> list[str]:
+    origin = _official_target_origin(str(target_url or "").strip(), client.BASE).rstrip("/")
+    candidates = [
+        f"{origin}/backend-api/accounts/check/v4-2023-04-27",
+        f"{origin}/backend-api/accounts/check",
+        f"{origin}/backend-api/me",
+    ]
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for item in candidates:
+        normalized = str(item or "").strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        deduped.append(normalized)
+    return deduped
+
+
+def _summary_value(data: Any, path: str) -> Any:
+    current = data
+    for segment in str(path or "").split("."):
+        if not segment:
+            continue
+        if not isinstance(current, dict):
+            return None
+        current = current.get(segment)
+    return current
+
+
+def _clean_summary(summary: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in summary.items()
+        if value not in (None, "", [], {})
+    }
+
+
+def _extract_quota_summary(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+
+    summary = {
+        "account_id": _summary_value(payload, "accounts.default.account.account_id")
+        or payload.get("account_id")
+        or payload.get("id"),
+        "account_structure": _summary_value(payload, "accounts.default.account.structure"),
+        "subscription_plan": _summary_value(payload, "accounts.default.entitlement.subscription_plan")
+        or payload.get("plan_type"),
+        "has_active_subscription": _summary_value(payload, "accounts.default.entitlement.has_active_subscription"),
+        "expires_at": _summary_value(payload, "accounts.default.entitlement.expires_at"),
+        "will_renew": _summary_value(payload, "accounts.default.last_active_subscription.will_renew"),
+        "purchase_origin_platform": _summary_value(payload, "accounts.default.last_active_subscription.purchase_origin_platform"),
+        "has_previously_paid_subscription": _summary_value(
+            payload,
+            "accounts.default.account.has_previously_paid_subscription",
+        ),
+        "plan_type": payload.get("plan_type"),
+    }
+    return _clean_summary(summary)
+
+
+def _is_signal_key(key: str) -> bool:
+    normalized = str(key or "").strip().lower()
+    if not normalized:
+        return False
+    keywords = (
+        "remaining",
+        "quota",
+        "limit",
+        "cap",
+        "usage",
+        "reset",
+        "expire",
+        "renew",
+        "balance",
+        "credit",
+    )
+    return any(keyword in normalized for keyword in keywords)
+
+
+def _append_signal(signals: list[dict[str, Any]], seen: set[str], path: str, value: Any) -> None:
+    normalized_path = str(path or "").strip()
+    if not normalized_path or normalized_path in seen:
+        return
+    if isinstance(value, (dict, list)):
+        return
+    seen.add(normalized_path)
+    signals.append({"path": normalized_path, "value": value})
+
+
+def _collect_quota_signals(payload: Any) -> list[dict[str, Any]]:
+    signals: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def walk(value: Any, path: str = "", depth: int = 0) -> None:
+        if depth > 6:
+            return
+        if isinstance(value, dict):
+            for key, item in value.items():
+                next_path = f"{path}.{key}" if path else str(key)
+                if _is_signal_key(key):
+                    _append_signal(signals, seen, next_path, item)
+                walk(item, next_path, depth + 1)
+            return
+        if isinstance(value, list):
+            for index, item in enumerate(value[:12]):
+                walk(item, f"{path}[{index}]", depth + 1)
+
+    walk(payload)
+    return signals[:32]
 
 
 def _result_from_http_error(
@@ -976,6 +1124,151 @@ def fetch_available_models(
             ok=False,
             invalid=False,
             message=str(e) or "查询 ChatGPT 模型列表失败",
+            used_proxy=proxy,
+        )
+
+
+def fetch_official_quota(
+    account: Any,
+    proxy: str,
+    *,
+    target_url: str = "",
+) -> ChatGPTQuotaResult:
+    if not proxy:
+        return ChatGPTQuotaResult(
+            ok=False,
+            invalid=False,
+            message="未配置可用代理，无法查询 ChatGPT 官方配额",
+        )
+
+    chain_name = "fetch_official_quota"
+    client = None
+    response = None
+    last_message = "查询 ChatGPT 官方配额失败"
+    last_status_code = 0
+    last_query_url = ""
+
+    try:
+        client = ChatGPTClient(proxy=proxy, verbose=False)
+        _prepare_auth_context(client, account)
+
+        access_token, updated_access_token, updated_refresh_token = _ensure_access_token(account, proxy)
+
+        for url in _build_quota_candidate_urls(client, target_url):
+            last_query_url = url
+            try:
+                headers = _build_quota_headers(client, access_token, url)
+                response = client.session.get(
+                    url,
+                    headers=headers,
+                    timeout=60,
+                )
+                _log_http_response(chain_name, response, note=f"response_received url={url}")
+
+                raw_text = str(getattr(response, "text", "") or "")
+                last_status_code = int(getattr(response, "status_code", 0) or 0)
+                if response.status_code >= 400:
+                    _log_http_response(
+                        chain_name,
+                        response,
+                        note=f"http_error url={url}",
+                        body_excerpt=_truncate_text(raw_text, limit=600),
+                    )
+                    if response.status_code == 401:
+                        return ChatGPTQuotaResult(
+                            ok=False,
+                            invalid=True,
+                            message="会话无效或 access_token 已过期",
+                            used_proxy=proxy,
+                            query_url=url,
+                            updated_access_token=updated_access_token,
+                            updated_refresh_token=updated_refresh_token,
+                            response_status_code=response.status_code,
+                        )
+                    if response.status_code == 403:
+                        return ChatGPTQuotaResult(
+                            ok=False,
+                            invalid=True,
+                            message="账号被拒绝访问或已受限",
+                            used_proxy=proxy,
+                            query_url=url,
+                            updated_access_token=updated_access_token,
+                            updated_refresh_token=updated_refresh_token,
+                            response_status_code=response.status_code,
+                        )
+
+                    body_excerpt = _truncate_text(raw_text, limit=200)
+                    last_message = f"查询官方配额失败: HTTP {response.status_code}"
+                    if body_excerpt:
+                        last_message = f"{last_message} - {body_excerpt}"
+                    if response.status_code == 404:
+                        continue
+                    continue
+
+                try:
+                    data = response.json()
+                except Exception:
+                    data = raw_text
+
+                summary = _extract_quota_summary(data)
+                signals = _collect_quota_signals(data)
+                plan = str(summary.get("subscription_plan") or summary.get("plan_type") or "").strip()
+                if plan:
+                    message = f"已获取官方账户信息，当前套餐: {plan}"
+                else:
+                    message = "已获取官方账户信息"
+                if signals:
+                    message = f"{message}，识别到 {len(signals)} 个配额相关字段"
+
+                return ChatGPTQuotaResult(
+                    ok=True,
+                    invalid=False,
+                    message=message,
+                    used_proxy=proxy,
+                    query_url=url,
+                    summary=summary,
+                    signals=signals,
+                    data=data,
+                    updated_access_token=updated_access_token,
+                    updated_refresh_token=updated_refresh_token,
+                    response_status_code=response.status_code,
+                )
+            except Exception as e:
+                logger.exception(
+                    "[chatgpt-message] chain=%s note=exception proxy=%s url=%s",
+                    chain_name,
+                    _sanitize_proxy(proxy),
+                    url,
+                )
+                last_message = str(e) or last_message
+            finally:
+                try:
+                    if response is not None:
+                        response.close()
+                except Exception:
+                    pass
+                response = None
+
+        return ChatGPTQuotaResult(
+            ok=False,
+            invalid=False,
+            message=last_message,
+            used_proxy=proxy,
+            query_url=last_query_url,
+            updated_access_token=updated_access_token,
+            updated_refresh_token=updated_refresh_token,
+            response_status_code=last_status_code,
+        )
+    except Exception as e:
+        logger.exception(
+            "[chatgpt-message] chain=%s note=exception proxy=%s",
+            chain_name,
+            _sanitize_proxy(proxy),
+        )
+        return ChatGPTQuotaResult(
+            ok=False,
+            invalid=False,
+            message=str(e) or "查询 ChatGPT 官方配额失败",
             used_proxy=proxy,
         )
     finally:

@@ -28,12 +28,14 @@ import {
   DeleteOutlined,
   SafetyOutlined,
   MessageOutlined,
+  ApiOutlined,
 } from '@ant-design/icons'
 import { apiFetch } from '@/lib/utils'
 import { normalizeExecutorForPlatform } from '@/lib/registerOptions'
 import { useRegisterTaskCenter } from '@/components/RegisterTaskCenter'
 
 const { Text } = Typography
+const CHATGPT_OFFICIAL_QUOTA_MENU_KEY = '__chatgpt_official_quota__'
 
 const STATUS_COLORS: Record<string, string> = {
   registered: 'default',
@@ -110,6 +112,82 @@ function formatSyncTime(value?: string) {
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString()
 }
 
+function formatQuotaValue(value: unknown) {
+  if (value == null || value === '') return '-'
+  if (typeof value === 'string') return value
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value)
+  try {
+    return JSON.stringify(value)
+  } catch {
+    return String(value)
+  }
+}
+
+function formatStructuredText(data: unknown) {
+  if (typeof data === 'string') return data
+  try {
+    return JSON.stringify(data, null, 2)
+  } catch {
+    return String(data)
+  }
+}
+
+function formatOfficialQuotaResult(data: any) {
+  const summary = data?.summary && typeof data.summary === 'object' ? data.summary : {}
+  const signals = Array.isArray(data?.signals) ? data.signals : []
+  const lines: string[] = []
+  const summaryLabels: Record<string, string> = {
+    account_id: '账号 ID',
+    account_structure: '账号结构',
+    subscription_plan: '套餐',
+    has_active_subscription: '订阅激活',
+    expires_at: '到期时间',
+    will_renew: '自动续费',
+    purchase_origin_platform: '购买来源',
+    has_previously_paid_subscription: '历史付费',
+    plan_type: 'Plan Type',
+  }
+
+  if (data?.query_url) {
+    lines.push(`查询地址: ${data.query_url}`)
+  }
+  if (data?.used_proxy) {
+    lines.push(`实际代理: ${data.used_proxy}`)
+  }
+  if (data?.response_status_code) {
+    lines.push(`响应状态: HTTP ${data.response_status_code}`)
+  }
+
+  const summaryEntries = Object.entries(summary)
+  if (summaryEntries.length > 0) {
+    lines.push('')
+    lines.push('关键信息:')
+    for (const [key, value] of summaryEntries) {
+      lines.push(`${summaryLabels[key] || key}: ${formatQuotaValue(value)}`)
+    }
+  }
+
+  if (signals.length > 0) {
+    lines.push('')
+    lines.push('配额相关字段:')
+    for (const item of signals) {
+      if (!item || typeof item !== 'object') continue
+      lines.push(`${formatQuotaValue(item.path)}: ${formatQuotaValue(item.value)}`)
+    }
+  } else {
+    lines.push('')
+    lines.push('配额相关字段: 官方响应里暂未识别到常见 remaining/quota/limit/cap 字段')
+  }
+
+  if (data?.data !== undefined) {
+    lines.push('')
+    lines.push('原始响应:')
+    lines.push(formatStructuredText(data.data))
+  }
+
+  return lines.join('\n').trim()
+}
+
 function ActionMenu({ acc, onRefresh }: { acc: any; onRefresh: () => void }) {
   const [actions, setActions] = useState<any[]>([])
   const [resultOpen, setResultOpen] = useState(false)
@@ -177,19 +255,55 @@ function ActionMenu({ acc, onRefresh }: { acc: any; onRefresh: () => void }) {
     }
   }
 
-  const menuItems: MenuProps['items'] = actions.map((a) => ({
+  const handleOfficialQuota = async () => {
+    const messageKey = `official-quota-${acc.id}`
+    message.loading({ content: '正在查询官方配额...', key: messageKey, duration: 0 })
+    try {
+      const data = await apiFetch(`/accounts/${acc.id}/chatgpt/quota`, {
+        method: 'POST',
+        body: JSON.stringify({}),
+      })
+      message.success({ content: data?.message || '官方配额查询成功', key: messageKey })
+      showResult('官方配额', 'success', formatOfficialQuotaResult(data))
+      onRefresh()
+    } catch (e: any) {
+      const detail = e?.message ? String(e.message) : '官方配额查询失败'
+      message.error({ content: detail, key: messageKey })
+      showResult('官方配额', 'error', detail)
+    }
+  }
+
+  const menuItems: MenuProps['items'] = []
+  if (acc.platform === 'chatgpt') {
+    menuItems.push({
+      key: CHATGPT_OFFICIAL_QUOTA_MENU_KEY,
+      label: '查询官方配额',
+      icon: <ApiOutlined />,
+    })
+  }
+  if (menuItems.length > 0 && actions.length > 0) {
+    menuItems.push({ type: 'divider' })
+  }
+  menuItems.push(...actions.map((a) => ({
     key: a.id,
     label: a.label,
-  }))
+  })))
 
-  if (actions.length === 0) return null
+  if (menuItems.length === 0) return null
 
   return (
     <>
       <Dropdown
         menu={{
           items: menuItems,
-          onClick: ({ key }) => handleAction(String(key)),
+          onClick: ({ key }) => {
+            const actionKey = String(key)
+            if (actionKey === CHATGPT_OFFICIAL_QUOTA_MENU_KEY) {
+              handleOfficialQuota()
+              return
+            }
+            handleAction(actionKey)
+          },
         }}
       >
         <Button type="link" size="small" icon={<MoreOutlined />} />
