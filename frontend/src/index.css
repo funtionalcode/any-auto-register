@@ -123,15 +123,37 @@ body {
 .register-task-dock {
   position: fixed;
   right: 20px;
-  bottom: 20px;
+  bottom: 92px;
   z-index: 1080;
   display: flex;
   flex-direction: column;
   gap: 12px;
   width: min(360px, calc(100vw - 24px));
-  max-height: calc(100vh - 40px);
+  max-height: calc(100vh - 112px);
   overflow: auto;
   padding-right: 4px;
+}
+
+.register-task-fab-anchor {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: 1081;
+}
+
+.register-task-fab {
+  width: 56px;
+  height: 56px;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  box-shadow: 0 18px 40px rgba(15, 23, 42, 0.22);
+}
+
+.register-task-fab.is-open {
+  box-shadow: 0 22px 48px rgba(15, 23, 42, 0.28);
+}
+
+.register-task-fab.is-running {
+  animation: registerTaskPulse 1.8s ease-out infinite;
 }
 
 .register-task-dock-toolbar,
@@ -197,12 +219,35 @@ body {
   .register-task-dock-card {
     animation: slideInRight 0.24s ease-out;
   }
+
+  .register-task-dock {
+    animation: slideInRight 0.2s ease-out;
+  }
+}
+
+@keyframes registerTaskPulse {
+  0%,
+  100% {
+    transform: translateZ(0) scale(1);
+    box-shadow: 0 18px 40px rgba(15, 23, 42, 0.22);
+  }
+
+  50% {
+    transform: translateZ(0) scale(1.03);
+    box-shadow: 0 22px 44px rgba(37, 99, 235, 0.28);
+  }
 }
 
 @media (max-width: 768px) {
   .register-task-dock {
     right: 12px;
-    bottom: 12px;
+    bottom: 84px;
     width: calc(100vw - 24px);
+    max-height: calc(100vh - 108px);
+  }
+
+  .register-task-fab-anchor {
+    right: 12px;
+    bottom: 12px;
   }
 }

@@ -365,6 +365,7 @@ export function RegisterTaskCenterProvider({ children }: { children: ReactNode }
   const [tasks, setTasks] = useState<ManagedRegisterTask[]>([])
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null)
   const [completionVersion, setCompletionVersion] = useState(0)
+  const [dockOpen, setDockOpen] = useState(false)
   const [dockFilter, setDockFilter] = useState<'all' | 'running' | 'finished'>(() => readStoredDockFilter())
   const [collapsedPlatforms, setCollapsedPlatforms] = useState<string[]>(() => readStoredCollapsedPlatforms())
   const tasksRef = useRef<ManagedRegisterTask[]>([])
@@ -448,6 +449,7 @@ export function RegisterTaskCenterProvider({ children }: { children: ReactNode }
         )),
       ])
     })
+    setDockOpen(false)
     activeTaskIdRef.current = result.task_id
     setActiveTaskId(result.task_id)
     await refreshTask(result.task_id)
@@ -460,6 +462,7 @@ export function RegisterTaskCenterProvider({ children }: { children: ReactNode }
       if (item.id === activeTaskIdRef.current) return { ...item, minimized: true }
       return item
     }))
+    setDockOpen(false)
     activeTaskIdRef.current = taskId
     setActiveTaskId(taskId)
   }, [])
@@ -529,8 +532,16 @@ export function RegisterTaskCenterProvider({ children }: { children: ReactNode }
     return true
   })
   const groupedMinimizedTasks = groupTasksByPlatform(filteredMinimizedTasks)
-  const runningCount = tasks.filter((item) => !isTerminal(item.status)).length
-  const finishedCount = tasks.length - runningCount
+  const runningCount = minimizedTasks.filter((item) => !isTerminal(item.status)).length
+  const finishedCount = minimizedTasks.length - runningCount
+  const totalUnseenLogs = minimizedTasks.reduce((count, item) => count + (item.unseenLogs || 0), 0)
+  const dockBadgeCount = totalUnseenLogs > 0 ? totalUnseenLogs : minimizedTasks.length
+
+  useEffect(() => {
+    if (minimizedTasks.length === 0 && dockOpen) {
+      setDockOpen(false)
+    }
+  }, [dockOpen, minimizedTasks.length])
 
   const minimizeAllTasks = useCallback(() => {
     setTasks((current) => current.map((item) => ({ ...item, minimized: true, unseenLogs: 0 })))
@@ -594,7 +605,7 @@ export function RegisterTaskCenterProvider({ children }: { children: ReactNode }
         onCancel={() => activeTask && minimizeTask(activeTask.id)}
         footer={activeTask ? [
           <Button key="minimize" icon={<MinusOutlined />} onClick={() => minimizeTask(activeTask.id)}>
-            最小化到右下角
+            最小化为右下角图标
           </Button>,
           <Button
             key="remove"
@@ -617,156 +628,183 @@ export function RegisterTaskCenterProvider({ children }: { children: ReactNode }
       </Modal>
 
       {minimizedTasks.length > 0 ? (
-        <div className="register-task-dock">
-          <Card size="small" className="register-task-dock-toolbar">
-            <Space direction="vertical" size={10} style={{ width: '100%' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12 }}>
-                <Space size={8}>
-                  <FolderOpenOutlined />
-                  <Text strong>后台任务中心</Text>
-                </Space>
-                <Tag color="processing">{tasks.length} 个任务</Tag>
-              </div>
-              <Space size={8} wrap>
-                <Text type="secondary">运行中 {runningCount}</Text>
-                <Text type="secondary">已完成 {finishedCount}</Text>
-                <Text type="secondary">平台 {groupedMinimizedTasks.length}</Text>
-              </Space>
-              <Space direction="vertical" size={8} style={{ width: '100%' }}>
-                <Space size={8} wrap>
-                  <FilterOutlined />
-                  <Text type="secondary">筛选</Text>
-                </Space>
-                <Segmented
-                  block
-                  value={dockFilter}
-                  onChange={(value) => setDockFilter(value as 'all' | 'running' | 'finished')}
-                  options={[
-                    { label: '全部', value: 'all' },
-                    { label: '运行中', value: 'running' },
-                    { label: '已完成', value: 'finished' },
-                  ]}
-                />
-              </Space>
-              <Space size={8} wrap>
-                <Button
-                  size="small"
-                  icon={<ShrinkOutlined />}
-                  onClick={minimizeAllTasks}
-                  disabled={tasks.every((item) => item.minimized)}
-                >
-                  全部最小化
-                </Button>
-                <Button
-                  size="small"
-                  danger
-                  icon={<CloseOutlined />}
-                  onClick={dismissCompletedTasks}
-                  disabled={finishedCount === 0}
-                >
-                  清理已完成
-                </Button>
-                <Button
-                  size="small"
-                  icon={<CaretDownOutlined />}
-                  onClick={expandAllGroups}
-                  disabled={collapsedPlatforms.length === 0}
-                >
-                  展开分组
-                </Button>
-                <Button
-                  size="small"
-                  icon={<CaretRightOutlined />}
-                  onClick={collapseAllGroups}
-                  disabled={groupedMinimizedTasks.length === 0 || groupedMinimizedTasks.every((group) => collapsedPlatforms.includes(group.platform))}
-                >
-                  折叠分组
-                </Button>
-              </Space>
-            </Space>
-          </Card>
-
-          {groupedMinimizedTasks.length === 0 ? (
-            <Card size="small" className="register-task-dock-card">
-              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="当前筛选下没有任务" />
-            </Card>
-          ) : groupedMinimizedTasks.map((group) => (
-            <div key={group.platform} className="register-task-group">
-              <button
-                type="button"
-                className="register-task-group-toggle"
-                onClick={() => togglePlatformCollapsed(group.platform)}
-                aria-expanded={!collapsedPlatforms.includes(group.platform)}
-              >
-                <Space size={8} wrap>
-                  {collapsedPlatforms.includes(group.platform) ? <CaretRightOutlined /> : <CaretDownOutlined />}
-                  <Text strong>{group.label}</Text>
-                  <Tag>{group.items.length} 个</Tag>
-                  <Tag color="processing">
-                    {group.items.filter((item) => !isTerminal(item.status)).length} 运行中
-                  </Tag>
-                </Space>
-              </button>
-
-              {!collapsedPlatforms.includes(group.platform) && group.items.map((task) => {
-                const statusMeta = getStatusMeta(task.status)
-                const latestLog = (task.logs || []).slice(-1)[0] || '任务后台运行中'
-                return (
-                  <Badge count={task.unseenLogs} size="small" key={task.id} offset={[-8, 8]}>
-                    <Card
-                      size="small"
-                      className="register-task-dock-card"
-                      title={
-                        <Space size={8}>
-                          {statusMeta.label === '运行中' ? <LoadingOutlined /> : null}
-                          <span>{task.platformLabel}</span>
-                        </Space>
-                      }
-                      extra={<Tag color={statusMeta.color}>{task.progress || statusMeta.label}</Tag>}
-                      actions={[
-                        <Button key="open" type="link" size="small" onClick={() => openTask(task.id)}>
-                          查看
-                        </Button>,
-                        <Button
-                          key="close"
-                          type="link"
-                          size="small"
-                          danger={isTerminal(task.status)}
-                          disabled={!isTerminal(task.status)}
-                          onClick={() => dismissTask(task.id)}
-                        >
-                          关闭
-                        </Button>,
+        <>
+          {dockOpen ? (
+            <div className="register-task-dock">
+              <Card size="small" className="register-task-dock-toolbar">
+                <Space direction="vertical" size={10} style={{ width: '100%' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12 }}>
+                    <Space size={8}>
+                      <FolderOpenOutlined />
+                      <Text strong>后台任务中心</Text>
+                    </Space>
+                    <Space size={8}>
+                      <Tag color="processing">已收起 {minimizedTasks.length}</Tag>
+                      <Button
+                        type="text"
+                        size="small"
+                        icon={<CloseOutlined />}
+                        onClick={() => setDockOpen(false)}
+                        aria-label="收起后台任务中心"
+                      />
+                    </Space>
+                  </div>
+                  <Space size={8} wrap>
+                    <Text type="secondary">运行中 {runningCount}</Text>
+                    <Text type="secondary">已完成 {finishedCount}</Text>
+                    <Text type="secondary">平台 {groupedMinimizedTasks.length}</Text>
+                  </Space>
+                  <Space direction="vertical" size={8} style={{ width: '100%' }}>
+                    <Space size={8} wrap>
+                      <FilterOutlined />
+                      <Text type="secondary">筛选</Text>
+                    </Space>
+                    <Segmented
+                      block
+                      value={dockFilter}
+                      onChange={(value) => setDockFilter(value as 'all' | 'running' | 'finished')}
+                      options={[
+                        { label: '全部', value: 'all' },
+                        { label: '运行中', value: 'running' },
+                        { label: '已完成', value: 'finished' },
                       ]}
+                    />
+                  </Space>
+                  <Space size={8} wrap>
+                    <Button
+                      size="small"
+                      icon={<ShrinkOutlined />}
+                      onClick={minimizeAllTasks}
+                      disabled={tasks.every((item) => item.minimized)}
                     >
-                      <Space direction="vertical" size={6} style={{ width: '100%' }}>
-                        <Text strong>{task.summary}</Text>
-                        <Paragraph
-                          ellipsis={{ rows: 2 }}
-                          style={{ marginBottom: 0, minHeight: 40, color: 'inherit' }}
+                      全部最小化
+                    </Button>
+                    <Button
+                      size="small"
+                      danger
+                      icon={<CloseOutlined />}
+                      onClick={dismissCompletedTasks}
+                      disabled={finishedCount === 0}
+                    >
+                      清理已完成
+                    </Button>
+                    <Button
+                      size="small"
+                      icon={<CaretDownOutlined />}
+                      onClick={expandAllGroups}
+                      disabled={collapsedPlatforms.length === 0}
+                    >
+                      展开分组
+                    </Button>
+                    <Button
+                      size="small"
+                      icon={<CaretRightOutlined />}
+                      onClick={collapseAllGroups}
+                      disabled={groupedMinimizedTasks.length === 0 || groupedMinimizedTasks.every((group) => collapsedPlatforms.includes(group.platform))}
+                    >
+                      折叠分组
+                    </Button>
+                  </Space>
+                </Space>
+              </Card>
+
+              {groupedMinimizedTasks.length === 0 ? (
+                <Card size="small" className="register-task-dock-card">
+                  <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="当前筛选下没有任务" />
+                </Card>
+              ) : groupedMinimizedTasks.map((group) => (
+                <div key={group.platform} className="register-task-group">
+                  <button
+                    type="button"
+                    className="register-task-group-toggle"
+                    onClick={() => togglePlatformCollapsed(group.platform)}
+                    aria-expanded={!collapsedPlatforms.includes(group.platform)}
+                  >
+                    <Space size={8} wrap>
+                      {collapsedPlatforms.includes(group.platform) ? <CaretRightOutlined /> : <CaretDownOutlined />}
+                      <Text strong>{group.label}</Text>
+                      <Tag>{group.items.length} 个</Tag>
+                      <Tag color="processing">
+                        {group.items.filter((item) => !isTerminal(item.status)).length} 运行中
+                      </Tag>
+                    </Space>
+                  </button>
+
+                  {!collapsedPlatforms.includes(group.platform) && group.items.map((task) => {
+                    const statusMeta = getStatusMeta(task.status)
+                    const latestLog = (task.logs || []).slice(-1)[0] || '任务后台运行中'
+                    return (
+                      <Badge count={task.unseenLogs} size="small" key={task.id} offset={[-8, 8]}>
+                        <Card
+                          size="small"
+                          className="register-task-dock-card"
+                          title={
+                            <Space size={8}>
+                              {statusMeta.label === '运行中' ? <LoadingOutlined /> : null}
+                              <span>{task.platformLabel}</span>
+                            </Space>
+                          }
+                          extra={<Tag color={statusMeta.color}>{task.progress || statusMeta.label}</Tag>}
+                          actions={[
+                            <Button key="open" type="link" size="small" onClick={() => openTask(task.id)}>
+                              查看
+                            </Button>,
+                            <Button
+                              key="close"
+                              type="link"
+                              size="small"
+                              danger={isTerminal(task.status)}
+                              disabled={!isTerminal(task.status)}
+                              onClick={() => dismissTask(task.id)}
+                            >
+                              关闭
+                            </Button>,
+                          ]}
                         >
-                          {latestLog}
-                        </Paragraph>
-                        <Space size={8} wrap>
-                          {(task.success || 0) > 0 ? (
-                            <Text style={{ color: '#10b981' }}>
-                              <CheckCircleOutlined /> 成功 {task.success}
-                            </Text>
-                          ) : null}
-                          {(task.errors || []).length > 0 ? (
-                            <Text type="danger">
-                              <CloseCircleOutlined /> 失败 {(task.errors || []).length}
-                            </Text>
-                          ) : null}
-                        </Space>
-                      </Space>
-                    </Card>
-                  </Badge>
-                )
-              })}
+                          <Space direction="vertical" size={6} style={{ width: '100%' }}>
+                            <Text strong>{task.summary}</Text>
+                            <Paragraph
+                              ellipsis={{ rows: 2 }}
+                              style={{ marginBottom: 0, minHeight: 40, color: 'inherit' }}
+                            >
+                              {latestLog}
+                            </Paragraph>
+                            <Space size={8} wrap>
+                              {(task.success || 0) > 0 ? (
+                                <Text style={{ color: '#10b981' }}>
+                                  <CheckCircleOutlined /> 成功 {task.success}
+                                </Text>
+                              ) : null}
+                              {(task.errors || []).length > 0 ? (
+                                <Text type="danger">
+                                  <CloseCircleOutlined /> 失败 {(task.errors || []).length}
+                                </Text>
+                              ) : null}
+                            </Space>
+                          </Space>
+                        </Card>
+                      </Badge>
+                    )
+                  })}
+                </div>
+              ))}
             </div>
-          ))}
-        </div>
+          ) : null}
+
+          <div className="register-task-fab-anchor">
+            <Badge count={dockBadgeCount} overflowCount={99} size="small">
+              <Button
+                type={runningCount > 0 ? 'primary' : 'default'}
+                shape="circle"
+                className={`register-task-fab${dockOpen ? ' is-open' : ''}${runningCount > 0 ? ' is-running' : ''}`}
+                icon={<FolderOpenOutlined />}
+                onClick={() => setDockOpen((current) => !current)}
+                aria-label={dockOpen ? '收起后台任务中心' : '展开后台任务中心'}
+                title={dockOpen ? '收起后台任务中心' : `后台任务中心：${minimizedTasks.length} 个任务`}
+              />
+            </Badge>
+          </div>
+        </>
       ) : null}
     </RegisterTaskCenterContext.Provider>
   )
