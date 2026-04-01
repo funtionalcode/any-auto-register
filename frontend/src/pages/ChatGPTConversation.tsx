@@ -8,6 +8,7 @@ import {
   Select,
   Space,
   Spin,
+  Switch,
   Tag,
   Typography,
   message,
@@ -139,6 +140,7 @@ export default function ChatGPTConversation() {
   const [selectedProxy, setSelectedProxy] = useState('')
   const [customProxy, setCustomProxy] = useState('')
   const [mode, setMode] = useState<ConversationMode>('official')
+  const [streamEnabled, setStreamEnabled] = useState(true)
   const [officialModel, setOfficialModel] = useState('auto')
   const [customTargetUrl, setCustomTargetUrl] = useState('')
   const [customApiKey, setCustomApiKey] = useState('')
@@ -247,6 +249,7 @@ export default function ChatGPTConversation() {
         body: JSON.stringify({
           prompt: normalizedPrompt,
           mode,
+          stream: streamEnabled,
           proxy: effectiveProxy,
           conversation_id: mode === 'official' ? conversationId : '',
           parent_message_id: mode === 'official' ? parentMessageId : '',
@@ -473,6 +476,17 @@ export default function ChatGPTConversation() {
                 placeholder="留空表示使用上方选择或自动代理"
               />
             </div>
+
+            <div style={{ minWidth: 180 }}>
+              <div style={{ marginBottom: 6 }}>流式输出</div>
+              <Switch
+                checked={streamEnabled}
+                checkedChildren="开启"
+                unCheckedChildren="关闭"
+                onChange={setStreamEnabled}
+                disabled={sending}
+              />
+            </div>
           </Space>
 
           {mode === 'official' ? (
@@ -518,6 +532,9 @@ export default function ChatGPTConversation() {
           <Space size={8} wrap>
             <Tag color="processing">当前代理: {effectiveProxy || '自动选择'}</Tag>
             <Tag color="purple">当前模型: {currentModel || (mode === 'official' ? 'auto' : 'gpt-4o-mini')}</Tag>
+            <Tag color={streamEnabled ? 'geekblue' : 'default'}>
+              返回方式: {streamEnabled ? '流式' : '非流式'}
+            </Tag>
             {lastUsedProxy ? <Tag color="success">最近实际代理: {lastUsedProxy}</Tag> : null}
             {lastTargetUrl ? <Tag>最近目标: {lastTargetUrl}</Tag> : null}
             {lastModel ? <Tag>最近使用模型: {lastModel}</Tag> : null}
@@ -594,7 +611,7 @@ export default function ChatGPTConversation() {
           />
           <Space style={{ justifyContent: 'space-between', width: '100%' }}>
             <Text type="secondary">
-              官方模式默认目标为 `https://chatgpt.com/backend-api/conversation`
+              官方模式默认目标为 `https://chatgpt.com/backend-api/conversation`，可切换流式或非流式返回
             </Text>
             <Button
               type="primary"

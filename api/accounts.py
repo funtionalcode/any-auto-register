@@ -4,7 +4,7 @@ import json
 import logging
 from datetime import datetime, timezone
 from types import SimpleNamespace
-from typing import Optional
+from typing import Iterator, Optional
 from urllib.parse import urlsplit, urlunsplit
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
@@ -53,6 +53,7 @@ class BatchCheckRequest(BaseModel):
 class ChatGPTConversationRequest(BaseModel):
     prompt: str
     mode: str = "official"
+    stream: bool = True
     conversation_id: Optional[str] = None
     parent_message_id: Optional[str] = None
     proxy: Optional[str] = None
@@ -251,6 +252,53 @@ def _normalize_openai_chat_url(target_url: str) -> str:
     return urlunsplit(parts._replace(path=next_path))
 
 
+def _extract_openai_message_text(choice: dict) -> str:
+    if not isinstance(choice, dict):
+        return ""
+
+    for field in ("message", "delta"):
+        payload = choice.get(field)
+        if not isinstance(payload, dict):
+            continue
+        content = payload.get("content")
+        if isinstance(content, str):
+            return content.strip()
+        if isinstance(content, list):
+            parts: list[str] = []
+            for item in content:
+                if isinstance(item, str) and item.strip():
+                    parts.append(item.strip())
+                    continue
+                if not isinstance(item, dict):
+                    continue
+                text = str(item.get("text") or item.get("content") or "").strip()
+                if text:
+                    parts.append(text)
+            if parts:
+                return "".join(parts)
+
+    text = choice.get("text")
+    if isinstance(text, str):
+        return text.strip()
+    return ""
+
+
+def _extract_openai_response_text(payload: dict) -> str:
+    if not isinstance(payload, dict):
+        return ""
+
+    choices = payload.get("choices")
+    if isinstance(choices, list):
+        parts: list[str] = []
+        for choice in choices:
+            text = _extract_openai_message_text(choice)
+            if text:
+                parts.append(text)
+        if parts:
+            return "\n".join(parts).strip()
+    return ""
+
+
 def _stream_openai_compatible_chat(
     *,
     target_url: str,
@@ -258,6 +306,7 @@ def _stream_openai_compatible_chat(
     model: str,
     messages: list[dict[str, str]],
     proxy: str,
+    stream: bool = True,
 ) -> StreamingResponse:
     import requests
 
@@ -277,25 +326,31 @@ def _stream_openai_compatible_chat(
                     "target_url": normalized_url,
                     "transport": "openai_compatible",
                     "model": model,
+                    "request_mode": "stream" if stream else "sync",
+                    "chain": "openai_compatible_stream" if stream else "openai_compatible_sync",
                 },
             )
 
-            response = requests.post(
-                normalized_url,
-                json={
-                    "model": model,
-                    "messages": messages,
-                    "stream": True,
-                },
-                headers={
-                    "Content-Type": "application/json",
-                    "Accept": "text/event-stream",
-                    **({"Authorization": f"Bearer {api_key}"} if str(api_key or "").strip() else {}),
-                },
-                proxies=build_requests_proxy_config(proxy),
-                timeout=180,
-                stream=True,
-            )
+            request_json = {
+                "model": model,
+                "messages": messages,
+                "stream": bool(stream),
+            }
+            request_headers = {
+                "Content-Type": "application/json",
+                "Accept": "text/event-stream" if stream else "application/json",
+                **({"Authorization": f"Bearer {api_key}"} if str(api_key or "").strip() else {}),
+            }
+            request_kwargs = {
+                "json": request_json,
+                "headers": request_headers,
+                "proxies": build_requests_proxy_config(proxy),
+                "timeout": 180,
+            }
+            if stream:
+                request_kwargs["stream"] = True
+
+            response = requests.post(normalized_url, **request_kwargs)
 
             with response:
                 if response.status_code >= 400:
@@ -310,6 +365,52 @@ def _stream_openai_compatible_chat(
                             "used_proxy": proxy,
                             "target_url": normalized_url,
                             "model": model,
+                            "request_mode": "stream" if stream else "sync",
+                            "chain": "openai_compatible_stream" if stream else "openai_compatible_sync",
+                        },
+                    )
+                    return
+
+                if not stream:
+                    response_text = ""
+                    try:
+                        response_text = _extract_openai_response_text(response.json())
+                    except Exception:
+                        response_text = ""
+                    if not response_text:
+                        response_text = str(response.text or "").strip()
+
+                    if not response_text:
+                        _report_chatgpt_proxy_result(proxy, ok=False, invalid=False)
+                        yield _encode_sse(
+                            "error",
+                            {
+                                "ok": False,
+                                "invalid": False,
+                                "message": "自定义接口已返回，但没有解析到回复内容",
+                                "used_proxy": proxy,
+                                "target_url": normalized_url,
+                                "model": model,
+                                "request_mode": "sync",
+                                "chain": "openai_compatible_sync",
+                            },
+                        )
+                        return
+
+                    _report_chatgpt_proxy_result(proxy, ok=True, invalid=False)
+                    yield _encode_sse(
+                        "done",
+                        {
+                            "ok": True,
+                            "invalid": False,
+                            "message": f"自定义接口回复成功: {response_text[:80]}",
+                            "response_excerpt": response_text[:200],
+                            "response_text": response_text,
+                            "used_proxy": proxy,
+                            "target_url": normalized_url,
+                            "model": model,
+                            "request_mode": "sync",
+                            "chain": "openai_compatible_sync",
                         },
                     )
                     return
@@ -332,24 +433,7 @@ def _stream_openai_compatible_chat(
                     delta = ""
                     choices = data.get("choices")
                     if isinstance(choices, list) and choices:
-                        first = choices[0] if isinstance(choices[0], dict) else {}
-                        delta_info = first.get("delta") if isinstance(first, dict) else {}
-                        if isinstance(delta_info, dict):
-                            content_value = delta_info.get("content")
-                            if isinstance(content_value, str):
-                                delta = content_value
-                            elif isinstance(content_value, list):
-                                parts: list[str] = []
-                                for item in content_value:
-                                    if isinstance(item, dict):
-                                        text = str(item.get("text") or "").strip()
-                                        if text:
-                                            parts.append(text)
-                                delta = "".join(parts)
-                        if not delta:
-                            message_data = first.get("message") if isinstance(first, dict) else {}
-                            if isinstance(message_data, dict):
-                                delta = str(message_data.get("content") or "")
+                        delta = _extract_openai_message_text(choices[0])
 
                     if not delta:
                         continue
@@ -362,6 +446,8 @@ def _stream_openai_compatible_chat(
                             "used_proxy": proxy,
                             "target_url": normalized_url,
                             "model": model,
+                            "request_mode": "stream",
+                            "chain": "openai_compatible_stream",
                         },
                     )
 
@@ -392,6 +478,8 @@ def _stream_openai_compatible_chat(
                     "used_proxy": proxy,
                     "target_url": normalized_url,
                     "model": model,
+                    "request_mode": "stream",
+                    "chain": "openai_compatible_stream",
                 },
             )
         except Exception as e:
@@ -405,6 +493,8 @@ def _stream_openai_compatible_chat(
                     "used_proxy": proxy,
                     "target_url": normalized_url,
                     "model": model,
+                    "request_mode": "stream" if stream else "sync",
+                    "chain": "openai_compatible_stream" if stream else "openai_compatible_sync",
                 },
             )
 
@@ -417,6 +507,74 @@ def _stream_openai_compatible_chat(
             "X-Accel-Buffering": "no",
         },
     )
+
+
+def _iter_official_chat_chunks(
+    account: SimpleNamespace,
+    *,
+    proxy: str,
+    prompt: str,
+    model: str,
+    conversation_id: str,
+    parent_message_id: str,
+    stream: bool,
+) -> Iterator[dict[str, dict]]:
+    from platforms.chatgpt.message_tester import send_chat_message, stream_chat_message
+
+    normalized_model = str(model or "auto").strip() or "auto"
+    normalized_conversation_id = str(conversation_id or "").strip()
+    normalized_parent_message_id = str(parent_message_id or "").strip()
+    if stream:
+        yield from stream_chat_message(
+            account,
+            proxy=proxy,
+            prompt=prompt,
+            model=normalized_model,
+            conversation_id=normalized_conversation_id,
+            parent_message_id=normalized_parent_message_id,
+        )
+        return
+
+    yield {
+        "event": "meta",
+        "data": {
+            "used_proxy": proxy,
+            "model": normalized_model,
+            "conversation_id": normalized_conversation_id,
+            "parent_message_id": normalized_parent_message_id,
+            "chain": "send_chat_message",
+            "shared_test_flow": True,
+            "request_mode": "sync",
+        },
+    }
+
+    result = send_chat_message(
+        account,
+        proxy=proxy,
+        prompt=prompt,
+        model=normalized_model,
+        conversation_id=normalized_conversation_id,
+        parent_message_id=normalized_parent_message_id,
+    )
+    yield {
+        "event": "done" if result.ok else "error",
+        "data": {
+            "ok": result.ok,
+            "invalid": result.invalid,
+            "message": result.message,
+            "response_excerpt": result.response_excerpt,
+            "response_text": result.response_text,
+            "conversation_id": result.conversation_id,
+            "response_message_id": result.response_message_id,
+            "used_proxy": result.used_proxy or proxy,
+            "model": result.model or normalized_model,
+            "updated_access_token": result.updated_access_token,
+            "updated_refresh_token": result.updated_refresh_token,
+            "chain": "send_chat_message",
+            "shared_test_flow": True,
+            "request_mode": "sync",
+        },
+    }
 
 
 def _check_account_validity(acc: AccountModel, *, config: RegisterConfig | None = None) -> dict:
@@ -691,12 +849,11 @@ def chatgpt_chat_stream(
     body: ChatGPTConversationRequest,
     session: Session = Depends(get_session),
 ):
-    from platforms.chatgpt.message_tester import stream_chat_message
-
     acc = _get_chatgpt_account_or_404(account_id, session)
     extra = _parse_account_extra(acc.extra_json)
     prompt = str(body.prompt or "").strip()
     mode = str(body.mode or "official").strip().lower() or "official"
+    stream = bool(body.stream)
     if not prompt:
         raise HTTPException(400, "消息不能为空")
 
@@ -709,6 +866,7 @@ def chatgpt_chat_stream(
             model=model or "gpt-4o-mini",
             messages=_normalize_chat_messages(body.messages, prompt),
             proxy=proxy,
+            stream=stream,
         )
 
     chatgpt_account = _build_chatgpt_message_account(acc, extra)
@@ -720,25 +878,27 @@ def chatgpt_chat_stream(
         host = remainder.rsplit("@", 1)[-1]
         proxy_for_log = f"{scheme}://***@{host}"
     logger.info(
-        "[chatgpt-chat-stream] account_id=%s mode=%s model=%s conversation_id=%s parent_message_id=%s proxy=%s",
+        "[chatgpt-chat-stream] account_id=%s mode=%s model=%s conversation_id=%s parent_message_id=%s proxy=%s stream=%s",
         account_id,
         mode,
         model or "auto",
         conversation_id,
         parent_message_id,
         proxy_for_log,
+        stream,
     )
 
     def event_stream():
         proxy_reported = False
         try:
-            for chunk in stream_chat_message(
+            for chunk in _iter_official_chat_chunks(
                 chatgpt_account,
                 proxy=proxy,
                 prompt=prompt,
                 model=model or "auto",
                 conversation_id=conversation_id,
                 parent_message_id=parent_message_id,
+                stream=stream,
             ):
                 event_name = str(chunk.get("event") or "message").strip() or "message"
                 data = dict(chunk.get("data") or {})
@@ -755,6 +915,7 @@ def chatgpt_chat_stream(
                     data.setdefault("used_proxy", proxy)
                     data.setdefault("target_url", "https://chatgpt.com/backend-api/conversation")
                     data.setdefault("model", model or "auto")
+                    data.setdefault("request_mode", "stream" if stream else "sync")
                     data["account_id"] = int(acc.id or account_id)
                     data["email"] = acc.email
 
