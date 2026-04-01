@@ -16,6 +16,8 @@ from api.config import router as config_router
 from api.mailbox import router as mailbox_router
 from api.actions import router as actions_router
 from api.integrations import router as integrations_router
+from api.auth import router as auth_router
+from api.sk_keys import router as sk_keys_router
 from core.runtime_timezone import configure_timezone
 
 EXPECTED_CONDA_ENV = os.getenv("APP_CONDA_ENV", "any-auto-register")
@@ -92,6 +94,8 @@ app.include_router(config_router, prefix="/api")
 app.include_router(mailbox_router, prefix="/api")
 app.include_router(actions_router, prefix="/api")
 app.include_router(integrations_router, prefix="/api")
+app.include_router(auth_router, prefix="/api")
+app.include_router(sk_keys_router, prefix="/api")
 
 
 @app.get("/api/solver/status")
