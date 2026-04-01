@@ -713,7 +713,7 @@ def _record_api_access(
     *,
     request: Request,
     status_code: int,
-    auth: SKAuthContext | None = None,
+    auth: Optional["SKAuthContext"] = None,
     current_user: UserModel | None = None,
     model: str = "",
     target_url: str = "",
