@@ -11,6 +11,8 @@ import {
   SunOutlined,
   MoonOutlined,
   LogoutOutlined,
+  MenuFoldOutlined,
+  MenuUnfoldOutlined,
 } from '@ant-design/icons'
 import zhCN from 'antd/locale/zh_CN'
 import Dashboard from '@/pages/Dashboard'
@@ -153,7 +155,10 @@ function AppContent() {
             collapsible
             collapsed={collapsed}
             onCollapse={setCollapsed}
+            trigger={null}
             style={{
+              display: 'flex',
+              flexDirection: 'column',
               background: currentTheme.token?.colorBgContainer,
               borderRight: `1px solid ${currentTheme.token?.colorBorder}`,
             }}
@@ -182,24 +187,31 @@ function AppContent() {
                 </span>
               )}
             </div>
-            <Menu
-              mode="inline"
-              selectedKeys={getSelectedKey()}
-              defaultOpenKeys={['/accounts']}
-              items={menuItems}
-              onClick={({ key }) => navigate(key)}
-              style={{
-                borderRight: 0,
-                background: 'transparent',
-              }}
-            />
             <div
               style={{
-                position: 'absolute',
-                bottom: 16,
-                left: 0,
-                right: 0,
-                padding: '0 16px',
+                flex: 1,
+                minHeight: 0,
+                overflowY: 'auto',
+                overflowX: 'hidden',
+              }}
+            >
+              <Menu
+                mode="inline"
+                selectedKeys={getSelectedKey()}
+                defaultOpenKeys={['/accounts']}
+                items={menuItems}
+                onClick={({ key }) => navigate(key)}
+                style={{
+                  borderRight: 0,
+                  background: 'transparent',
+                }}
+              />
+            </div>
+            <div
+              style={{
+                marginTop: 'auto',
+                padding: '12px 16px 16px',
+                borderTop: `1px solid ${currentTheme.token?.colorBorder}`,
               }}
             >
               <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
@@ -216,6 +228,18 @@ function AppContent() {
                     <div style={{ fontSize: 12, opacity: 0.72 }}>{user.role}</div>
                   </div>
                 ) : null}
+                <Button
+                  block
+                  icon={collapsed ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />}
+                  onClick={() => setCollapsed((current) => !current)}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: collapsed ? 'center' : 'space-between',
+                  }}
+                >
+                  {!collapsed && '收起侧栏'}
+                </Button>
                 <Button
                   block
                   icon={isLight ? <SunOutlined /> : <MoonOutlined />}

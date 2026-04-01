@@ -387,6 +387,59 @@ class AuthAndSkFlowTests(unittest.TestCase):
             "https://chatgpt.com/backend-api/conversation",
         )
 
+    def test_chat_completions_normalizes_official_models_target_to_conversation(self):
+        _, admin_headers = self._bootstrap_admin()
+
+        create_key_resp = self.client.post(
+            "/api/sk-keys",
+            headers=admin_headers,
+            json={
+                "name": "official-chat-target-key",
+                "target_url": "https://chatgpt.com/backend-api/models",
+                "upstream_api_key": "chatgpt-access-token",
+            },
+        )
+        self.assertEqual(create_key_resp.status_code, 200, create_key_resp.text)
+        create_key_payload = create_key_resp.json()
+        self.assertEqual(
+            create_key_payload["item"]["target_url"],
+            "https://chatgpt.com/backend-api/conversation",
+        )
+
+        sk_headers = {"Authorization": f"Bearer {create_key_payload['secret_key']}"}
+        completion_result = SimpleNamespace(
+            ok=True,
+            invalid=False,
+            message="ok",
+            response_excerpt="pong",
+            response_text="pong",
+            model="gpt-5",
+            conversation_id="conv_456",
+            response_message_id="msg_456",
+            used_proxy="",
+            updated_access_token="",
+            updated_refresh_token="",
+        )
+
+        with mock.patch("platforms.chatgpt.message_tester.send_chat_message", return_value=completion_result) as mock_send:
+            chat_resp = self.client.post(
+                "/v1/chat/completions",
+                headers=sk_headers,
+                json={
+                    "model": "gpt-5",
+                    "messages": [{"role": "user", "content": "hello"}],
+                    "target_url": "https://chatgpt.com/backend-api/models",
+                },
+            )
+
+        self.assertEqual(chat_resp.status_code, 200, chat_resp.text)
+        self.assertEqual(chat_resp.json()["choices"][0]["message"]["content"], "pong")
+        self.assertTrue(mock_send.called)
+        self.assertEqual(
+            mock_send.call_args.kwargs["target_url"],
+            "https://chatgpt.com/backend-api/conversation",
+        )
+
     def test_sk_key_wraps_chatgpt_official_stream_as_openai_sse(self):
         _, admin_headers = self._bootstrap_admin()
 
