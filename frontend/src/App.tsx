@@ -1,6 +1,6 @@
 import { BrowserRouter, Routes, Route, useLocation, useNavigate } from 'react-router-dom'
 import { useState, useEffect } from 'react'
-import { ConfigProvider, Layout, Menu, Button } from 'antd'
+import { ConfigProvider, Layout, Menu, Button, Card, Typography } from 'antd'
 import {
   DashboardOutlined,
   UserOutlined,
@@ -27,6 +27,7 @@ import { RegisterTaskCenterProvider } from '@/components/RegisterTaskCenter'
 import { AuthProvider, useAuth } from '@/components/AuthProvider'
 
 const { Sider, Content } = Layout
+const { Title, Paragraph } = Typography
 
 function AppContent() {
   const { loading, user, logout } = useAuth()
@@ -48,7 +49,7 @@ function AppContent() {
   }, [themeMode])
 
   useEffect(() => {
-    if (!user) return
+    if (!user || user.role !== 'admin') return
     fetch('/api/platforms')
       .then(r => r.json())
       .then(d => setPlatforms((d || [])
@@ -71,6 +72,20 @@ function AppContent() {
     return (
       <ConfigProvider theme={currentTheme} locale={zhCN}>
         <AuthPortal />
+      </ConfigProvider>
+    )
+  }
+
+  if (user.role !== 'admin') {
+    return (
+      <ConfigProvider theme={currentTheme} locale={zhCN}>
+        <div style={{ minHeight: '100vh', display: 'grid', placeItems: 'center', padding: 24 }}>
+          <Card bordered={false} style={{ width: 'min(560px, 100%)' }}>
+            <Title level={3}>禁止访问</Title>
+            <Paragraph>普通用户不允许访问管理控制台页面。</Paragraph>
+            <Button danger onClick={logout}>退出登录</Button>
+          </Card>
+        </div>
       </ConfigProvider>
     )
   }

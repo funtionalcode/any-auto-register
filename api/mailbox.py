@@ -95,24 +95,58 @@ def _normalize_message(
     created_at: Any = "",
     content: Any = "",
     preview: Any = "",
+    html_content: Any = "",
+    raw_content: Any = "",
 ) -> dict[str, Any]:
     subject_text = str(subject or "").strip()
     sender_text = str(sender or "").strip()
     recipient_text = str(recipient or "").strip()
-    content_text = str(content or "").strip()
+    preview_text = str(preview or "").strip()
+    if preview_text:
+        try:
+            preview_text = mailbox._decode_raw_content(preview_text) or preview_text
+        except Exception:
+            pass
+
+    content_source = next(
+        (
+            value
+            for value in [content, raw_content, html_content]
+            if str(value or "").strip()
+        ),
+        "",
+    )
+    content_text = str(content_source or "").strip()
     if content_text:
         try:
             content_text = mailbox._decode_raw_content(content_text) or content_text
         except Exception:
             pass
-    preview_text = str(preview or "").strip() or _short_preview(content_text)
+    html_text = ""
+    for candidate in [html_content, raw_content, content]:
+        candidate_text = str(candidate or "").strip()
+        if not candidate_text:
+            continue
+        try:
+            html_text = mailbox._extract_html_content(candidate_text)
+        except Exception:
+            html_text = ""
+        if html_text:
+            break
+    preview_text = preview_text or _short_preview(content_text)
     verification_code = ""
     try:
+        html_plain = ""
+        if html_text:
+            try:
+                html_plain = mailbox._decode_raw_content(html_text) or ""
+            except Exception:
+                html_plain = ""
         verification_code = str(
             mailbox._safe_extract(
                 " ".join(
                     part
-                    for part in [subject_text, preview_text, content_text]
+                    for part in [subject_text, preview_text, content_text, html_plain]
                     if str(part or "").strip()
                 )
             )
@@ -129,6 +163,7 @@ def _normalize_message(
         "created_at": _format_created_at(created_at),
         "preview": preview_text,
         "content": content_text,
+        "html": html_text,
         "verification_code": verification_code,
     }
 
@@ -189,7 +224,8 @@ def _list_messages(provider: str, mailbox, account: MailboxAccount, limit: int) 
                 sender=mail.get("from"),
                 recipient=account.email,
                 created_at=mail.get("createTime") or mail.get("receiveTime"),
-                content=mail.get("content") or mail.get("html"),
+                content=mail.get("content"),
+                html_content=mail.get("html"),
             )
             for mail in mails[:limit]
         ]
@@ -213,11 +249,8 @@ def _list_messages(provider: str, mailbox, account: MailboxAccount, limit: int) 
                 recipient=account.email,
                 created_at=mail.get("date"),
                 preview=mail.get("body"),
-                content=" ".join(
-                    str(part or "")
-                    for part in [mail.get("body"), mail.get("html")]
-                    if str(part or "").strip()
-                ),
+                content=mail.get("body"),
+                html_content=mail.get("html"),
             )
             for mail in mails[:limit]
         ]
@@ -238,13 +271,10 @@ def _list_messages(provider: str, mailbox, account: MailboxAccount, limit: int) 
                 preview=mail.get("content"),
                 content=" ".join(
                     str(part or "")
-                    for part in [
-                        mail.get("content"),
-                        mail.get("text"),
-                        mail.get("html"),
-                    ]
+                    for part in [mail.get("content"), mail.get("text")]
                     if str(part or "").strip()
                 ),
+                html_content=mail.get("html"),
             )
             for idx, mail in enumerate(mails[:limit])
         ]
@@ -277,11 +307,8 @@ def _list_messages(provider: str, mailbox, account: MailboxAccount, limit: int) 
                     recipient=account.email,
                     created_at=detail.get("createdAt") or msg.get("createdAt"),
                     preview=msg.get("intro"),
-                    content=" ".join(
-                        str(part or "")
-                        for part in [detail.get("text"), detail.get("html")]
-                        if str(part or "").strip()
-                    ),
+                    content=detail.get("text"),
+                    html_content=detail.get("html"),
                 )
             )
         return items
@@ -304,11 +331,8 @@ def _list_messages(provider: str, mailbox, account: MailboxAccount, limit: int) 
                     recipient=account.email,
                     created_at=detail.get("createdAt") or message.get("createdAt"),
                     preview=message.get("snippet"),
-                    content=" ".join(
-                        str(part or "")
-                        for part in [detail.get("text"), detail.get("html")]
-                        if str(part or "").strip()
-                    ),
+                    content=detail.get("text"),
+                    html_content=detail.get("html"),
                 )
             )
         return items
@@ -324,7 +348,7 @@ def _list_messages(provider: str, mailbox, account: MailboxAccount, limit: int) 
                 recipient=account.email,
                 created_at=mail.get("created_at"),
                 preview=mail.get("raw"),
-                content=mail.get("raw"),
+                raw_content=mail.get("raw"),
             )
             for mail in mails[:limit]
         ]
@@ -360,10 +384,11 @@ def _list_messages(provider: str, mailbox, account: MailboxAccount, limit: int) 
                         message.get("content"),
                         message.get("text"),
                         message.get("body"),
-                        message.get("html"),
                     ]
                     if str(part or "").strip()
                 ),
+                html_content=message.get("html"),
+                raw_content=message.get("body"),
             )
             for message in messages[:limit]
         ]
@@ -384,11 +409,8 @@ def _list_messages(provider: str, mailbox, account: MailboxAccount, limit: int) 
                 recipient=account.email or getattr(mail_list, "email_address", ""),
                 created_at=mail.received_at,
                 preview=mail.body,
-                content=" ".join(
-                    str(part or "")
-                    for part in [mail.body, mail.html_body]
-                    if str(part or "").strip()
-                ),
+                content=mail.body,
+                html_content=mail.html_body,
             )
             for mail in (mail_list.mails or [])[:limit]
         ]
@@ -452,11 +474,8 @@ def _list_messages(provider: str, mailbox, account: MailboxAccount, limit: int) 
                     recipient=account.email,
                     created_at=detail_data.get("createdAt") or message.get("createdAt"),
                     preview=message.get("intro"),
-                    content=" ".join(
-                        str(part or "")
-                        for part in [detail_data.get("text"), detail_data.get("html")]
-                        if str(part or "").strip()
-                    ),
+                    content=detail_data.get("text"),
+                    html_content=detail_data.get("html"),
                 )
             )
         return items

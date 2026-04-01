@@ -257,6 +257,7 @@ interface MailboxInboxItem {
   created_at: string
   preview: string
   content: string
+  html: string
   verification_code: string
 }
 
@@ -274,6 +275,13 @@ function formatResultText(data: unknown) {
   } catch {
     return String(data)
   }
+}
+
+function buildMailboxHtmlDocument(rawHtml: string) {
+  const html = String(rawHtml || '').trim()
+  if (!html) return ''
+  if (/<html[\s>]|<!doctype/i.test(html)) return html
+  return `<!doctype html><html><head><meta charset="utf-8" /><base target="_blank" /></head><body>${html}</body></html>`
 }
 
 function normalizeDomainList(input: unknown): string[] {
@@ -512,6 +520,7 @@ function MailboxSettingsPanel({ form }: { form: FormInstance }) {
   const [inboxLoaded, setInboxLoaded] = useState(false)
   const [inboxItems, setInboxItems] = useState<MailboxInboxItem[]>([])
   const [activeInboxItem, setActiveInboxItem] = useState<MailboxInboxItem | null>(null)
+  const activeInboxHtml = buildMailboxHtmlDocument(activeInboxItem?.html || '')
 
   useEffect(() => {
     setInboxItems([])
@@ -587,22 +596,71 @@ function MailboxSettingsPanel({ form }: { form: FormInstance }) {
           <div>时间：{activeInboxItem?.created_at || '-'}</div>
           <div>验证码：{activeInboxItem?.verification_code || '-'}</div>
         </div>
-        <pre
-          style={{
-            margin: 0,
-            maxHeight: 520,
-            overflow: 'auto',
-            padding: 12,
-            borderRadius: 8,
-            background: 'rgba(127,127,127,0.08)',
-            fontSize: 12,
-            lineHeight: 1.6,
-            whiteSpace: 'pre-wrap',
-            wordBreak: 'break-word',
-          }}
-        >
-          {activeInboxItem?.content || activeInboxItem?.preview || '暂无内容'}
-        </pre>
+        {activeInboxHtml ? (
+          <Tabs
+            key={activeInboxItem?.id || 'mailbox-detail'}
+            defaultActiveKey="html"
+            items={[
+              {
+                key: 'html',
+                label: '渲染视图',
+                children: (
+                  <iframe
+                    title="邮件 HTML 预览"
+                    sandbox=""
+                    srcDoc={activeInboxHtml}
+                    style={{
+                      width: '100%',
+                      minHeight: 520,
+                      border: '1px solid rgba(127,127,127,0.16)',
+                      borderRadius: 8,
+                      background: '#fff',
+                    }}
+                  />
+                ),
+              },
+              {
+                key: 'text',
+                label: '文本视图',
+                children: (
+                  <pre
+                    style={{
+                      margin: 0,
+                      maxHeight: 520,
+                      overflow: 'auto',
+                      padding: 12,
+                      borderRadius: 8,
+                      background: 'rgba(127,127,127,0.08)',
+                      fontSize: 12,
+                      lineHeight: 1.6,
+                      whiteSpace: 'pre-wrap',
+                      wordBreak: 'break-word',
+                    }}
+                  >
+                    {activeInboxItem?.content || activeInboxItem?.preview || '暂无内容'}
+                  </pre>
+                ),
+              },
+            ]}
+          />
+        ) : (
+          <pre
+            style={{
+              margin: 0,
+              maxHeight: 520,
+              overflow: 'auto',
+              padding: 12,
+              borderRadius: 8,
+              background: 'rgba(127,127,127,0.08)',
+              fontSize: 12,
+              lineHeight: 1.6,
+              whiteSpace: 'pre-wrap',
+              wordBreak: 'break-word',
+            }}
+          >
+            {activeInboxItem?.content || activeInboxItem?.preview || '暂无内容'}
+          </pre>
+        )}
       </Modal>
 
       <Card

@@ -601,12 +601,16 @@ export default function AccessControl() {
           <Form.Item
             name="target_url"
             label="Chat Completions URL"
-            rules={[{ required: true, message: '请输入 OpenAI 兼容目标地址' }]}
+            extra="留空默认走 https://chatgpt.com/backend-api/conversation；如果要转发到 OpenAI 兼容上游，再填写完整 /chat/completions 地址。"
           >
-            <Input placeholder="https://your-upstream.example.com/v1/chat/completions" />
+            <Input placeholder="留空使用 ChatGPT 官方 conversation；或填写 https://your-upstream.example.com/v1/chat/completions" />
           </Form.Item>
-          <Form.Item name="upstream_api_key" label="Upstream API Key">
-            <Input.Password placeholder={editingKey ? '留空则保持原值；如需清空请显式输入空格后再删除' : '可选'} />
+          <Form.Item
+            name="upstream_api_key"
+            label="Upstream API Key / Access Token"
+            extra="官方 ChatGPT 模式下，这里填 access_token；普通 OpenAI 兼容模式下，这里填上游 API Key。"
+          >
+            <Input.Password placeholder={editingKey ? '留空则保持原值；如需清空请显式输入空格后再删除' : '官方模式填 access_token，兼容模式填 API Key'} />
           </Form.Item>
           <Space size={12} style={{ width: '100%' }} align="start">
             <Form.Item name="proxy_id" label="绑定代理池" style={{ flex: 1 }}>

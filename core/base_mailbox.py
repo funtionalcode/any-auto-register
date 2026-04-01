@@ -68,32 +68,80 @@ class BaseMailbox(ABC):
                 return m.group(1) if m.groups() else m.group(0)
         return None
 
-    def _decode_raw_content(self, raw: str) -> str:
-        """解析邮件原始文本 (借鉴自 Fugle)，处理 Quoted-Printable 和 HTML 实体"""
-        import quopri, html, re
+    def _decode_raw_payload(self, raw: str) -> str:
+        """解码邮件原始载荷，保留 HTML 结构供后续按需处理。"""
+        import quopri
+        import re
 
         text = str(raw or "")
         if not text:
             return ""
-        # 简单切分 Header 和 Body
-        if "\r\n\r\n" in text:
-            text = text.split("\r\n\r\n", 1)[1]
-        elif "\n\n" in text:
-            text = text.split("\n\n", 1)[1]
+
+        normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+        if "\n\n" in normalized:
+            head, body = normalized.split("\n\n", 1)
+            header_lines = [line for line in head.split("\n") if line.strip()]
+            if header_lines and all(
+                re.match(r"^[A-Za-z0-9-]+:\s*.*$", line) or re.match(r"^[ \t].*$", line)
+                for line in header_lines
+            ):
+                normalized = body
+
         try:
-            # 处理 Quoted-Printable
-            decoded_bytes = quopri.decodestring(text)
-            text = decoded_bytes.decode("utf-8", errors="ignore")
+            decoded_bytes = quopri.decodestring(normalized)
+            normalized = decoded_bytes.decode("utf-8", errors="ignore")
         except Exception:
             pass
+        return normalized
+
+    def _strip_mime_noise(self, text: str) -> str:
+        import re
+
+        cleaned = str(text or "")
+        if not cleaned:
+            return ""
+
+        cleaned = re.sub(
+            r"(?im)^content-(?:type|transfer-encoding|disposition):.*(?:\n[ \t].*)*$",
+            " ",
+            cleaned,
+        )
+        cleaned = re.sub(r"(?im)^mime-version:.*$", " ", cleaned)
+        cleaned = re.sub(r"(?im)^charset=.*$", " ", cleaned)
+        cleaned = re.sub(r"(?im)^--+[_=\w.-]+(?:--)?$", " ", cleaned)
+        cleaned = re.sub(r"(?i)----=_part_[\w.]+", " ", cleaned)
+        return cleaned
+
+    def _decode_raw_content(self, raw: str) -> str:
+        """解析邮件原始文本 (借鉴自 Fugle)，处理 Quoted-Printable 和 HTML 实体"""
+        import html, re
+
+        text = self._decode_raw_payload(raw)
         # 清除 HTML 标签并反转义
-        text = html.unescape(text)
-        text = re.sub(r"(?im)^content-(?:type|transfer-encoding):.*$", " ", text)
-        text = re.sub(r"(?im)^--+[_=\w.-]+$", " ", text)
-        text = re.sub(r"(?i)----=_part_[\w.]+", " ", text)
+        text = html.unescape(self._strip_mime_noise(text))
         text = re.sub(r"<[^>]+>", " ", text)
         text = re.sub(r"\s+", " ", text).strip()
         return text
+
+    def _decode_raw_html(self, raw: str) -> str:
+        """解析邮件原始 HTML，保留标签结构用于安全渲染。"""
+        return self._strip_mime_noise(self._decode_raw_payload(raw)).strip()
+
+    def _looks_like_html(self, text: str) -> bool:
+        import re
+
+        sample = str(text or "").strip().lower()
+        if not sample:
+            return False
+        strong_markers = ("<!doctype html", "<html", "<body", "<head", "<table", "<div")
+        if any(marker in sample for marker in strong_markers):
+            return True
+        tags = re.findall(r"</?[a-z][^>]*>", sample)
+        return len(tags) >= 3
+
+    def _extract_html_content(self, raw: str) -> str:
+        text = self._decode_raw_html(raw)
+        return text if self._looks_like_html(text) else ""
 
     @abstractmethod
     def get_current_ids(self, account: MailboxAccount) -> set:

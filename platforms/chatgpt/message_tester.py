@@ -101,6 +101,16 @@ def _sanitize_proxy(proxy: str) -> str:
     return f"{scheme}://{username}:***@{host}"
 
 
+def _exception_message(exc: Exception, fallback: str) -> str:
+    text = str(exc or "").strip()
+    if text:
+        return text
+    exc_type = type(exc).__name__.strip()
+    if exc_type and exc_type != "Exception":
+        return f"{fallback}: {exc_type}"
+    return fallback
+
+
 def _response_header_snapshot(response: Any) -> dict[str, str]:
     snapshot: dict[str, str] = {}
     headers = getattr(response, "headers", None)
@@ -913,13 +923,6 @@ def send_chat_message(
     history_and_training_disabled: bool = False,
     archive_after_send: bool = False,
 ) -> ChatGPTMessageTestResult:
-    if not proxy:
-        return ChatGPTMessageTestResult(
-            ok=False,
-            invalid=False,
-            message="未配置可用代理，无法执行 ChatGPT 发消息测试",
-        )
-
     chain_name = "send_chat_message"
     client = None
     response = None
@@ -1012,7 +1015,7 @@ def send_chat_message(
         return ChatGPTMessageTestResult(
             ok=False,
             invalid=False,
-            message=str(e) or "ChatGPT 发消息测试失败",
+            message=_exception_message(e, "ChatGPT 发消息测试失败"),
             used_proxy=proxy,
         )
     finally:
@@ -1034,13 +1037,6 @@ def fetch_available_models(
     *,
     target_url: str = "",
 ) -> ChatGPTModelsResult:
-    if not proxy:
-        return ChatGPTModelsResult(
-            ok=False,
-            invalid=False,
-            message="未配置可用代理，无法查询 ChatGPT 模型列表",
-        )
-
     chain_name = "fetch_available_models"
     client = None
     response = None
@@ -1123,9 +1119,20 @@ def fetch_available_models(
         return ChatGPTModelsResult(
             ok=False,
             invalid=False,
-            message=str(e) or "查询 ChatGPT 模型列表失败",
+            message=_exception_message(e, "查询 ChatGPT 模型列表失败"),
             used_proxy=proxy,
         )
+    finally:
+        try:
+            if response is not None:
+                response.close()
+        except Exception:
+            pass
+        try:
+            if client is not None:
+                client.session.close()
+        except Exception:
+            pass
 
 
 def fetch_official_quota(
@@ -1134,13 +1141,6 @@ def fetch_official_quota(
     *,
     target_url: str = "",
 ) -> ChatGPTQuotaResult:
-    if not proxy:
-        return ChatGPTQuotaResult(
-            ok=False,
-            invalid=False,
-            message="未配置可用代理，无法查询 ChatGPT 官方配额",
-        )
-
     chain_name = "fetch_official_quota"
     client = None
     response = None
@@ -1268,7 +1268,7 @@ def fetch_official_quota(
         return ChatGPTQuotaResult(
             ok=False,
             invalid=False,
-            message=str(e) or "查询 ChatGPT 官方配额失败",
+            message=_exception_message(e, "查询 ChatGPT 官方配额失败"),
             used_proxy=proxy,
         )
     finally:
@@ -1306,18 +1306,6 @@ def stream_chat_message(
     target_url: str = "",
     history_and_training_disabled: bool = False,
 ) -> Iterator[dict[str, Any]]:
-    if not proxy:
-        yield {
-            "event": "error",
-            "data": {
-                "ok": False,
-                "invalid": False,
-                "message": "未配置可用代理，无法执行 ChatGPT 发消息测试",
-                "used_proxy": "",
-            },
-        }
-        return
-
     chain_name = "stream_chat_message"
     client = None
     response = None
@@ -1510,7 +1498,7 @@ def stream_chat_message(
             "data": {
                 "ok": False,
                 "invalid": False,
-                "message": str(e) or "ChatGPT 发消息测试失败",
+                "message": _exception_message(e, "ChatGPT 发消息测试失败"),
                 "used_proxy": proxy,
                 "model": str(model or "auto").strip() or "auto",
                 "target_url": str(target_url or "").strip(),

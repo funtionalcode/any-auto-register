@@ -83,11 +83,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       method: 'POST',
       body: JSON.stringify({ username, password }),
     })
+    const nextUser = (data?.user || null) as AuthUser | null
+    if (nextUser?.role !== 'admin') {
+      clearAuthToken()
+      setToken('')
+      setUser(null)
+      throw new Error('普通用户不允许访问控制台')
+    }
     const nextToken = String(data?.token || '')
     setAuthToken(nextToken)
     setToken(nextToken)
     setBootstrapped(true)
-    setUser((data?.user || null) as AuthUser | null)
+    setUser(nextUser)
   }
 
   const bootstrap = async (username: string, password: string) => {
