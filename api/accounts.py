@@ -100,6 +100,65 @@ def _build_runtime_account(acc: AccountModel) -> Account:
 
 
 def _check_account_validity(acc: AccountModel, *, config: RegisterConfig | None = None) -> dict:
+    if acc.platform == "chatgpt":
+        from core.proxy_pool import proxy_pool
+        from platforms.chatgpt.message_tester import send_test_message
+
+        extra = _parse_account_extra(acc.extra_json)
+        preferred_proxy = str(
+            extra.get("test_proxy")
+            or config_store.get("chatgpt_test_proxy", "")
+            or ""
+        ).strip()
+        proxy = preferred_proxy or proxy_pool.get_next(region=acc.region or "") or proxy_pool.get_next()
+        if not proxy:
+            return {
+                "id": acc.id,
+                "platform": acc.platform,
+                "email": acc.email,
+                "valid": False,
+                "status": "error",
+                "message": "未配置可用代理，无法执行 ChatGPT 发消息测试",
+            }
+
+        account = _build_runtime_account(acc)
+
+        class _ChatGPTAccount:
+            pass
+
+        chatgpt_account = _ChatGPTAccount()
+        chatgpt_account.email = account.email
+        chatgpt_account.access_token = extra.get("access_token") or acc.token
+        chatgpt_account.refresh_token = extra.get("refresh_token", "")
+        chatgpt_account.id_token = extra.get("id_token", "")
+        chatgpt_account.session_token = extra.get("session_token", "")
+        chatgpt_account.client_id = extra.get("client_id", "app_EMoamEEZ73f0CkXaXp7hrann")
+        chatgpt_account.cookies = extra.get("cookies", "")
+
+        result = send_test_message(chatgpt_account, proxy=proxy)
+
+        if result.updated_access_token:
+            extra["access_token"] = result.updated_access_token
+            acc.token = result.updated_access_token
+        if result.updated_refresh_token:
+            extra["refresh_token"] = result.updated_refresh_token
+        if result.updated_access_token or result.updated_refresh_token:
+            acc.extra_json = json.dumps(extra, ensure_ascii=False)
+
+        if result.ok or result.invalid:
+            proxy_pool.report_success(proxy)
+        else:
+            proxy_pool.report_fail(proxy)
+
+        return {
+            "id": acc.id,
+            "platform": acc.platform,
+            "email": acc.email,
+            "valid": result.ok,
+            "status": "valid" if result.ok else ("invalid" if result.invalid else "error"),
+            "message": result.message,
+        }
+
     PlatformCls = get(acc.platform)
     plugin = PlatformCls(config=config or RegisterConfig(extra=config_store.get_all()))
     valid = bool(plugin.check_valid(_build_runtime_account(acc)))
