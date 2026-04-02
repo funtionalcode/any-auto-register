@@ -1161,22 +1161,32 @@ class TurnstileAPIServer:
         """
 
 
+def _default_thread_count() -> int:
+    try:
+        return max(1, int(os.getenv("SOLVER_THREAD", "1")))
+    except ValueError:
+        return 1
+
+
 def parse_args():
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser(description="Turnstile API Server")
+    default_thread = _default_thread_count()
 
     parser.add_argument('--no-headless', action='store_true', help='Run the browser with GUI (disable headless mode). By default, headless mode is enabled.')
     parser.add_argument('--useragent', type=str, help='User-Agent string (if not specified, random configuration is used)')
     parser.add_argument('--debug', action='store_true', help='Enable or disable debug mode for additional logging and troubleshooting information (default: False)')
     parser.add_argument('--browser_type', type=str, default='chromium', help='Specify the browser type for the solver. Supported options: chromium, chrome, msedge, camoufox (default: chromium)')
-    parser.add_argument('--thread', type=int, default=4, help='Set the number of browser threads to use for multi-threaded mode. Increasing this will speed up execution but requires more resources (default: 1)')
+    parser.add_argument('--thread', type=int, default=default_thread, help='Set the number of browser threads to use for multi-threaded mode. Increasing this will speed up execution but requires more resources (default: SOLVER_THREAD env or 1)')
     parser.add_argument('--proxy', action='store_true', help='Enable proxy support for the solver (Default: False)')
     parser.add_argument('--random', action='store_true', help='Use random User-Agent and Sec-CH-UA configuration from pool')
     parser.add_argument('--browser', type=str, help='Specify browser name to use (e.g., chrome, firefox)')
     parser.add_argument('--version', type=str, help='Specify browser version to use (e.g., 139, 141)')
     parser.add_argument('--host', type=str, default='0.0.0.0', help='Specify the IP address where the API solver runs. (Default: 0.0.0.0)')
     parser.add_argument('--port', type=str, default=os.getenv('SOLVER_PORT', '8889'), help='Set the port for the API solver to listen on. (Default: SOLVER_PORT env or 8889)')
-    return parser.parse_args()
+    args = parser.parse_args()
+    args.thread = max(1, args.thread)
+    return args
 
 
 def create_app(headless: bool, useragent: str, debug: bool, browser_type: str, thread: int, proxy_support: bool, use_random_config: bool, browser_name: str, browser_version: str) -> Quart:

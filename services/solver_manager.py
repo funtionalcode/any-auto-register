@@ -43,6 +43,13 @@ def _solver_browser_type() -> str:
     return os.getenv("SOLVER_BROWSER_TYPE", default)
 
 
+def _solver_thread() -> int:
+    try:
+        return max(1, int(os.getenv("SOLVER_THREAD", "1")))
+    except ValueError:
+        return 1
+
+
 def _proc_alive() -> bool:
     global _proc
     if _proc and _proc.poll() is None:
@@ -70,6 +77,7 @@ def status() -> dict[str, Any]:
         "url": _solver_url(),
         "bind_host": _solver_bind_host(),
         "browser_type": _solver_browser_type(),
+        "thread_count": _solver_thread(),
         "log_path": str(_log_path()),
         "last_error": _last_error,
     }
@@ -137,6 +145,8 @@ def start():
                 solver_script,
                 "--browser_type",
                 _solver_browser_type(),
+                "--thread",
+                str(_solver_thread()),
                 "--host",
                 _solver_bind_host(),
                 "--port",

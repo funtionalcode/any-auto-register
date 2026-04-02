@@ -23,6 +23,7 @@ services:
       APP_RUNTIME_DIR: /runtime
       APP_ENABLE_SOLVER: "1"
       SOLVER_PORT: "8889"
+      SOLVER_THREAD: ${SOLVER_THREAD:-1}
       SOLVER_BIND_HOST: 0.0.0.0
       LOCAL_SOLVER_URL: http://127.0.0.1:8889
       INSIDE_DOCKER: "1"

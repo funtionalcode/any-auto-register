@@ -209,6 +209,7 @@ DATABASE_URL=sqlite:////app/data/account_manager.db
 | `DATABASE_URL` | `sqlite:////app/data/account_manager.db` | SQLite 数据库地址 |
 | `APP_ENABLE_SOLVER` | `1` | 是否自动启动本地 Solver，设为 `0` 可禁用 |
 | `SOLVER_PORT` | `8889` | Solver 监听端口 |
+| `SOLVER_THREAD` | `1` | Solver 浏览器并发数；每个并发都会预启动一个独立浏览器实例 |
 | `LOCAL_SOLVER_URL` | `http://127.0.0.1:8889` | 后端访问 Solver 的地址 |
 | `EXTERNAL_APPS_HOST` | `127.0.0.1` | 插件页展示的 `CLIProxyAPI` / `grok2api` 外部访问地址 |
 | `EXTERNAL_APPS_SCHEME` | `http` | 插件页展示地址使用的协议 |
