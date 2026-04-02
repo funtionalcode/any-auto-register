@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Card, Form, Input, Select, Button, message, Tabs, Space, Tag, Typography, Modal, Segmented, Alert } from 'antd'
+import { Card, Form, Input, Select, Button, message, Tabs, Space, Tag, Typography, Modal, Segmented, Alert, Switch } from 'antd'
 import type { FormInstance } from 'antd'
 import {
   SaveOutlined,
@@ -11,10 +11,12 @@ import {
   FileTextOutlined,
   PlusOutlined,
 } from '@ant-design/icons'
+import { parseBooleanConfigValue } from '@/lib/configValueParsers'
 import { apiFetch } from '@/lib/utils'
 
 const SELECT_FIELDS: Record<string, { label: string; value: string }[]> = {
   mail_provider: [
+    { label: 'LuckMail（订单接码 / 已购邮箱）', value: 'luckmail' },
     { label: 'Laoudo（固定邮箱）', value: 'laoudo' },
     { label: 'TempMail.lol（自动生成）', value: 'tempmail_lol' },
     { label: 'SkyMail（CloudMail 接口）', value: 'skymail' },
@@ -23,7 +25,6 @@ const SELECT_FIELDS: Record<string, { label: string; value: string }[]> = {
     { label: 'YYDS Mail / MaliAPI', value: 'maliapi' },
     { label: 'Freemail（自建 CF Worker）', value: 'freemail' },
     { label: 'CF Worker（自建域名）', value: 'cfworker' },
-    { label: 'LuckMail（订单接码 / 已购邮箱）', value: 'luckmail' },
     { label: 'API Mail（Mail.tm 临时邮箱）', value: 'api_mail' },
   ],
   maliapi_auto_domain_strategy: [
@@ -241,7 +242,7 @@ interface FieldConfig {
   key: string
   label: string
   placeholder?: string
-  type?: 'select' | 'input'
+  type?: 'select' | 'input' | 'boolean'
   secret?: boolean
 }
 
@@ -650,15 +651,24 @@ function parseStoredSelectionList(value: unknown, allowedValues: string[]): stri
 function ConfigField({ field }: { field: FieldConfig }) {
   const [showSecret, setShowSecret] = useState(false)
   const options = SELECT_FIELDS[field.key]
+  const isBooleanField = field.type === 'boolean'
   const helpText =
     field.key === 'default_executor'
       ? '仅对支持的平台生效；ChatGPT、Cursor、Grok、Kiro、Tavily、Trae 支持浏览器模式，OpenBlockLabs 仅支持纯协议。'
       : undefined
 
   return (
-    <Form.Item label={field.label} name={field.key} extra={helpText} preserve>
+    <Form.Item
+      label={field.label}
+      name={field.key}
+      extra={helpText}
+      valuePropName={isBooleanField ? 'checked' : undefined}
+      preserve
+    >
       {options ? (
         <Select options={options} style={{ width: '100%' }} />
+      ) : isBooleanField ? (
+        <Switch checkedChildren="开启" unCheckedChildren="关闭" />
       ) : field.secret ? (
         <Input.Password
           placeholder={field.placeholder}
@@ -2022,6 +2032,9 @@ export default function Settings() {
 
   useEffect(() => {
     apiFetch('/config').then((data) => {
+      if (!data.mail_provider) {
+        data.mail_provider = 'luckmail'
+      }
       if (!data.maliapi_base_url) {
         data.maliapi_base_url = 'https://maliapi.215.im/v1'
       }
@@ -2044,6 +2057,8 @@ export default function Settings() {
       }
       data.cfworker_domains = parseStoredDomainList(data.cfworker_domains)
       data.cfworker_enabled_domains = parseStoredDomainList(data.cfworker_enabled_domains)
+      setLoadedConfig(data)
+      data.cfworker_random_subdomain = parseBooleanConfigValue(data.cfworker_random_subdomain)
       setLoadedConfig(data)
       form.setFieldsValue(data)
     })
@@ -2088,6 +2103,7 @@ export default function Settings() {
         chatgpt_modules_enabled: chatgptModulesEnabled,
         cfworker_domains: domains,
         cfworker_enabled_domains: enabledDomains,
+        cfworker_random_subdomain: parseBooleanConfigValue(nextConfig.cfworker_random_subdomain),
       }
 
       if (domains.length > 0) {
@@ -2116,6 +2132,7 @@ export default function Settings() {
         cfworker_domains: domains,
         cfworker_enabled_domains: enabledDomains,
         cfworker_domain: domains.length > 0 ? '' : normalizedConfig.cfworker_domain,
+        cfworker_random_subdomain: normalizedConfig.cfworker_random_subdomain,
       })
       message.success('保存成功')
       setSaved(true)

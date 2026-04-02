@@ -32,6 +32,7 @@ class GrokPlatform(BasePlatform):
             headless=(self.config.executor_type or "").lower() == "headless",
         )
         mailbox_attempts = 1 if email else int(self.config.extra.get("grok_mailbox_attempts", 8))
+        otp_timeout = self.get_mailbox_otp_timeout()
         last_error = None
 
         for attempt in range(1, mailbox_attempts + 1):
@@ -56,6 +57,7 @@ class GrokPlatform(BasePlatform):
                     code = self.mailbox.wait_for_code(
                         mail_acct,
                         keyword="",
+                        timeout=otp_timeout,
                         before_ids=before_ids,
                         code_pattern=r'[A-Z0-9]{3}-[A-Z0-9]{3}',
                     )

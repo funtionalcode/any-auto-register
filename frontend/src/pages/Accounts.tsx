@@ -29,9 +29,13 @@ import {
   MessageOutlined,
   ApiOutlined,
 } from '@ant-design/icons'
-import { apiFetch } from '@/lib/utils'
-import { normalizeExecutorForPlatform } from '@/lib/registerOptions'
+import { ChatGPTRegistrationModeSwitch } from '@/components/ChatGPTRegistrationModeSwitch'
 import { useRegisterTaskCenter } from '@/components/RegisterTaskCenter'
+import { usePersistentChatGPTRegistrationMode } from '@/hooks/usePersistentChatGPTRegistrationMode'
+import { parseBooleanConfigValue } from '@/lib/configValueParsers'
+import { buildChatGPTRegistrationRequestAdapter } from '@/lib/chatgptRegistrationRequestAdapter'
+import { apiFetch } from '@/lib/utils'
+import { normalizeExecutorForPlatform } from '@/lib/platformExecutorOptions'
 
 const { Text } = Typography
 const CHATGPT_OFFICIAL_QUOTA_MENU_KEY = '__chatgpt_official_quota__'
@@ -422,6 +426,8 @@ export default function Accounts() {
   const [registerForm] = Form.useForm()
   const [addForm] = Form.useForm()
   const [detailForm] = Form.useForm()
+  const { mode: chatgptRegistrationMode, setMode: setChatgptRegistrationMode } =
+    usePersistentChatGPTRegistrationMode()
   const [importText, setImportText] = useState('')
   const [importLoading, setImportLoading] = useState(false)
   const [registerLoading, setRegisterLoading] = useState(false)
@@ -580,6 +586,56 @@ export default function Accounts() {
     try {
       const cfg = await apiFetch('/config')
       const executorType = normalizeExecutorForPlatform(currentPlatform, cfg.default_executor)
+      const registerExtra = {
+        mail_provider: cfg.mail_provider || 'laoudo',
+        laoudo_auth: cfg.laoudo_auth,
+        laoudo_email: cfg.laoudo_email,
+        laoudo_account_id: cfg.laoudo_account_id,
+        maliapi_base_url: cfg.maliapi_base_url,
+        maliapi_api_key: cfg.maliapi_api_key,
+        maliapi_domain: cfg.maliapi_domain,
+        maliapi_auto_domain_strategy: cfg.maliapi_auto_domain_strategy,
+        yescaptcha_key: cfg.yescaptcha_key,
+        moemail_api_url: cfg.moemail_api_url,
+        skymail_api_base: cfg.skymail_api_base,
+        skymail_token: cfg.skymail_token,
+        skymail_domain: cfg.skymail_domain,
+        duckmail_address: cfg.duckmail_address,
+        duckmail_password: cfg.duckmail_password,
+        duckmail_api_url: cfg.duckmail_api_url,
+        duckmail_provider_url: cfg.duckmail_provider_url,
+        duckmail_bearer: cfg.duckmail_bearer,
+        freemail_api_url: cfg.freemail_api_url,
+        freemail_admin_token: cfg.freemail_admin_token,
+        freemail_username: cfg.freemail_username,
+        freemail_password: cfg.freemail_password,
+        cfworker_api_url: cfg.cfworker_api_url,
+        cfworker_admin_token: cfg.cfworker_admin_token,
+        cfworker_custom_auth: cfg.cfworker_custom_auth,
+        cfworker_domain: cfg.cfworker_domain,
+        cfworker_subdomain: cfg.cfworker_subdomain,
+        cfworker_random_subdomain: parseBooleanConfigValue(cfg.cfworker_random_subdomain),
+        cfworker_fingerprint: cfg.cfworker_fingerprint,
+        smstome_cookie: cfg.smstome_cookie,
+        smstome_country_slugs: cfg.smstome_country_slugs,
+        smstome_phone_attempts: cfg.smstome_phone_attempts,
+        smstome_otp_timeout_seconds: cfg.smstome_otp_timeout_seconds,
+        smstome_poll_interval_seconds: cfg.smstome_poll_interval_seconds,
+        smstome_sync_max_pages_per_country: cfg.smstome_sync_max_pages_per_country,
+        luckmail_base_url: cfg.luckmail_base_url,
+        luckmail_api_key: cfg.luckmail_api_key,
+        luckmail_email_type: cfg.luckmail_email_type,
+        luckmail_domain: cfg.luckmail_domain,
+      }
+      const chatgptRegistrationRequestAdapter =
+        buildChatGPTRegistrationRequestAdapter(
+          currentPlatform,
+          chatgptRegistrationMode,
+        )
+      const adaptedRegisterExtra = chatgptRegistrationRequestAdapter
+        ? chatgptRegistrationRequestAdapter.extendExtra(registerExtra)
+        : registerExtra
+
       await launchTask({
         platform: currentPlatform,
         count: values.count,
@@ -588,41 +644,7 @@ export default function Accounts() {
         executor_type: executorType,
         captcha_solver: cfg.default_captcha_solver || 'yescaptcha',
         proxy: null,
-        extra: {
-          mail_provider: cfg.mail_provider || 'laoudo',
-          laoudo_auth: cfg.laoudo_auth,
-          laoudo_email: cfg.laoudo_email,
-          laoudo_account_id: cfg.laoudo_account_id,
-          maliapi_base_url: cfg.maliapi_base_url,
-          maliapi_api_key: cfg.maliapi_api_key,
-          maliapi_domain: cfg.maliapi_domain,
-          maliapi_auto_domain_strategy: cfg.maliapi_auto_domain_strategy,
-          yescaptcha_key: cfg.yescaptcha_key,
-          moemail_api_url: cfg.moemail_api_url,
-          skymail_api_base: cfg.skymail_api_base,
-          skymail_token: cfg.skymail_token,
-          skymail_domain: cfg.skymail_domain,
-          duckmail_address: cfg.duckmail_address,
-          duckmail_password: cfg.duckmail_password,
-          duckmail_api_url: cfg.duckmail_api_url,
-          duckmail_provider_url: cfg.duckmail_provider_url,
-          duckmail_bearer: cfg.duckmail_bearer,
-          freemail_api_url: cfg.freemail_api_url,
-          freemail_admin_token: cfg.freemail_admin_token,
-          freemail_username: cfg.freemail_username,
-          freemail_password: cfg.freemail_password,
-          cfworker_api_url: cfg.cfworker_api_url,
-          cfworker_admin_token: cfg.cfworker_admin_token,
-          cfworker_custom_auth: cfg.cfworker_custom_auth,
-          cfworker_domain: cfg.cfworker_domain,
-          cfworker_fingerprint: cfg.cfworker_fingerprint,
-          smstome_cookie: cfg.smstome_cookie,
-          smstome_country_slugs: cfg.smstome_country_slugs,
-          smstome_phone_attempts: cfg.smstome_phone_attempts,
-          smstome_otp_timeout_seconds: cfg.smstome_otp_timeout_seconds,
-          smstome_poll_interval_seconds: cfg.smstome_poll_interval_seconds,
-          smstome_sync_max_pages_per_country: cfg.smstome_sync_max_pages_per_country,
-        },
+        extra: adaptedRegisterExtra,
       })
       message.success('注册任务已启动，可最小化到右下角后台执行')
       setRegisterModalOpen(false)
@@ -1252,6 +1274,14 @@ export default function Accounts() {
           <Form.Item name="register_delay_seconds" label="每个注册延迟(秒)" initialValue={0}>
             <InputNumber min={0} precision={1} step={0.5} style={{ width: '100%' }} placeholder="0 = 不延迟" />
           </Form.Item>
+          {currentPlatform === 'chatgpt' && (
+            <Form.Item label="ChatGPT Token 方案">
+              <ChatGPTRegistrationModeSwitch
+                mode={chatgptRegistrationMode}
+                onChange={setChatgptRegistrationMode}
+              />
+            </Form.Item>
+          )}
           <Form.Item>
             <Button type="primary" htmlType="submit" block loading={registerLoading}>
               启动后台注册

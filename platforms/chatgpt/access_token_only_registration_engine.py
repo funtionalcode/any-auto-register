@@ -9,8 +9,8 @@ import traceback
 from datetime import datetime
 from typing import Optional, Callable
 
-from core.base_platform import AccountStatus
-from platforms.chatgpt.register import RegistrationResult
+from core.task_runtime import TaskInterruption
+from platforms.chatgpt.refresh_token_registration_engine import RegistrationResult
 
 from .chatgpt_client import ChatGPTClient
 from .utils import generate_random_name, generate_random_birthday
@@ -38,7 +38,7 @@ class EmailServiceAdapter:
             self.log_fn(f"\u6210\u529f\u83b7\u53d6\u9a8c\u8bc1\u7801: {code}")
         return code
 
-class RegistrationEngineV2:
+class AccessTokenOnlyRegistrationEngine:
     def __init__(
         self,
         email_service,
@@ -213,6 +213,8 @@ class RegistrationEngineV2:
                         continue
                     result.error_message = last_error
                     return result
+                except TaskInterruption:
+                    raise
                 except Exception as attempt_error:
                     last_error = str(attempt_error)
                     if attempt < self.max_retries - 1 and self._should_retry(last_error):
@@ -223,9 +225,15 @@ class RegistrationEngineV2:
             result.error_message = last_error or "注册失败"
             return result
 
+        except TaskInterruption:
+            raise
         except Exception as e:
             self._log(f"V2 注册全流程执行异常: {e}", "error")
             for line in traceback.format_exc().rstrip().splitlines():
                 self._log(line, "error")
             result.error_message = str(e)
             return result
+
+
+# 兼容旧命名，逐步迁移到更见名知意的类名。
+RegistrationEngineV2 = AccessTokenOnlyRegistrationEngine

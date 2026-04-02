@@ -88,11 +88,14 @@ FROM runtime
 
 COPY --from=frontend-builder /app/static /app/static
 
-RUN chmod +x /app/docker/entrypoint.sh \
-    && mkdir -p /runtime /runtime/logs /runtime/smstome_used /app/_ext_targets
+RUN apt-get update && apt-get install -y --no-install-recommends dos2unix git iproute2 procps \
+    && dos2unix /app/docker/entrypoint.sh \
+    && chmod +x /app/docker/entrypoint.sh \
+    && mkdir -p /runtime /runtime/logs /runtime/smstome_used /_ext_targets \
+    && rm -rf /var/lib/apt/lists/*
 
 EXPOSE 8000 8889 8317 8011
 
-VOLUME ["/runtime", "/app/_ext_targets"]
+VOLUME ["/runtime", "/_ext_targets"]
 
 ENTRYPOINT ["/app/docker/entrypoint.sh"]
