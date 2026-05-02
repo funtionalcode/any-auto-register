@@ -204,14 +204,6 @@ class ChatGPTPlatform(BasePlatform):
             {"id": "sync_cliproxyapi_status", "label": "同步 CLIProxyAPI 状态", "params": []},
             {"id": "refresh_token", "label": "刷新 Token", "params": []},
             {
-                "id": "payment_link",
-                "label": "生成支付链接",
-                "params": [
-                    {"key": "country", "label": "地区", "type": "select", "options": ["US", "SG", "TR", "HK", "JP", "GB", "AU", "CA"]},
-                    {"key": "plan", "label": "套餐", "type": "select", "options": ["plus", "team"]},
-                ],
-            },
-            {
                 "id": "upload_cpa",
                 "label": "上传 CPA",
                 "params": [
@@ -320,25 +312,8 @@ class ChatGPTPlatform(BasePlatform):
                 }
             return {"ok": False, "error": result.error_message}
 
-        if action_id == "payment_link":
-            from platforms.chatgpt.payment import generate_plus_link, generate_team_link
-
-            plan = params.get("plan", "plus")
-            country = params.get("country", "US")
-            if plan == "plus":
-                url = generate_plus_link(a, proxy=proxy, country=country)
-            else:
-                url = generate_team_link(
-                    a,
-                    workspace_name=params.get("workspace_name", "MyTeam"),
-                    price_interval=params.get("price_interval", "month"),
-                    seat_quantity=int(params.get("seat_quantity", 5) or 5),
-                    proxy=proxy,
-                    country=country,
-                )
-            return {"ok": bool(url), "data": {"url": url}}
-
         if action_id == "upload_cpa":
+            from services.cpa_target import build_cpa_upload_request_url
             from platforms.chatgpt.cpa_upload import generate_token_json, upload_to_cpa
 
             token_data = generate_token_json(a)
@@ -347,7 +322,11 @@ class ChatGPTPlatform(BasePlatform):
                 api_url=params.get("api_url"),
                 api_key=params.get("api_key"),
             )
-            return {"ok": ok, "data": msg}
+            return {
+                "ok": ok,
+                "data": msg,
+                "request_url": build_cpa_upload_request_url(params.get("api_url")),
+            }
 
         if action_id == "upload_sub2api":
             from platforms.chatgpt.sub2api_upload import upload_to_sub2api

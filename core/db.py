@@ -99,6 +99,82 @@ class ProxyModel(SQLModel, table=True):
     last_checked: Optional[datetime] = None
 
 
+class UserModel(SQLModel, table=True):
+    __tablename__ = "users"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    username: str = Field(index=True, unique=True)
+    password_hash: str
+    role: str = Field(default="user", index=True)
+    is_active: bool = True
+    created_at: datetime = Field(default_factory=_utcnow)
+    updated_at: datetime = Field(default_factory=_utcnow)
+
+
+class SKApiKeyModel(SQLModel, table=True):
+    __tablename__ = "sk_api_keys"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="users.id", index=True)
+    name: str = Field(index=True)
+    description: str = ""
+    key_prefix: str = Field(index=True)
+    key_hash: str = Field(index=True, unique=True)
+    target_url: str = ""
+    upstream_api_key: str = ""
+    proxy_id: Optional[int] = Field(default=None, foreign_key="proxies.id", index=True)
+    proxy_url: str = ""
+    token_limit: int = 0
+    prompt_tokens_used: int = 0
+    completion_tokens_used: int = 0
+    total_tokens_used: int = 0
+    request_count: int = 0
+    is_active: bool = True
+    last_used_at: Optional[datetime] = None
+    created_at: datetime = Field(default_factory=_utcnow)
+    updated_at: datetime = Field(default_factory=_utcnow)
+
+
+class SKApiKeyUsageLog(SQLModel, table=True):
+    __tablename__ = "sk_api_key_usage_logs"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    api_key_id: int = Field(foreign_key="sk_api_keys.id", index=True)
+    user_id: int = Field(foreign_key="users.id", index=True)
+    model: str = ""
+    target_url: str = ""
+    proxy_url: str = ""
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    success: bool = True
+    error: str = ""
+    created_at: datetime = Field(default_factory=_utcnow)
+
+
+class ApiAccessLog(SQLModel, table=True):
+    __tablename__ = "api_access_logs"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    actor_type: str = Field(default="anonymous", index=True)
+    user_id: Optional[int] = Field(default=None, foreign_key="users.id", index=True)
+    username: str = Field(default="", index=True)
+    api_key_id: Optional[int] = Field(default=None, foreign_key="sk_api_keys.id", index=True)
+    api_key_name: str = ""
+    api_key_prefix: str = Field(default="", index=True)
+    method: str = Field(default="", index=True)
+    path: str = Field(default="", index=True)
+    status_code: int = Field(default=200, index=True)
+    success: bool = Field(default=True, index=True)
+    client_ip: str = ""
+    user_agent: str = ""
+    target_url: str = ""
+    model: str = ""
+    error: str = ""
+    duration_ms: int = 0
+    created_at: datetime = Field(default_factory=_utcnow, index=True)
+
+
 def save_account(account) -> 'AccountModel':
     """从 base_platform.Account 存入数据库（同平台同邮箱则更新）"""
     with Session(engine) as session:

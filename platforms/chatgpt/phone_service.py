@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Callable, Iterable, Optional
 
+from services.chatgpt_modules import is_chatgpt_module_enabled
 from smstome_tool import (
     PhoneEntry,
     get_unused_phone,
@@ -45,6 +46,8 @@ class SMSToMePhoneService:
 
     @property
     def enabled(self) -> bool:
+        if not is_chatgpt_module_enabled("smstome"):
+            return False
         return self._has_pool_file() or bool(self.cookie_header)
 
     def prefix_hint(self, phone: str) -> str:

@@ -1,42 +1,60 @@
+import { clearAuthToken, getAuthToken, setAuthToken } from './auth'
+
 export const API = '/api'
 export const API_BASE = '/api'
 
 export function getToken(): string {
-  return localStorage.getItem('auth_token') || ''
+  return getAuthToken()
 }
 
 export function setToken(token: string): void {
-  localStorage.setItem('auth_token', token)
+  setAuthToken(token)
 }
 
 export function clearToken(): void {
-  localStorage.removeItem('auth_token')
+  clearAuthToken()
 }
 
 export async function apiFetch(path: string, opts?: RequestInit) {
-  const token = getToken()
-  const baseHeaders: Record<string, string> = { 'Content-Type': 'application/json' }
-  if (token) baseHeaders['Authorization'] = `Bearer ${token}`
+  const headers = new Headers(opts?.headers || {})
+  const token = getAuthToken()
+  if (token && !headers.has('Authorization')) {
+    headers.set('Authorization', `Bearer ${token}`)
+  }
+  if (!(opts?.body instanceof FormData) && !headers.has('Content-Type')) {
+    headers.set('Content-Type', 'application/json')
+  }
+
   const res = await fetch(API + path, {
     ...opts,
-    headers: { ...baseHeaders, ...(opts?.headers as Record<string, string> || {}) },
+    headers,
   })
-  if (res.status === 401) {
-    clearToken()
-    if (window.location.pathname !== '/login') {
-      window.location.href = '/login'
-    }
-    throw new Error('未认证，请重新登录')
-  }
+  const contentType = String(res.headers.get('content-type') || '')
+
   if (!res.ok) {
-    const text = await res.text()
-    try {
-      const json = JSON.parse(text)
-      throw new Error(json.detail || text)
-    } catch (e) {
-      if (e instanceof SyntaxError) throw new Error(text)
-      throw e
+    let errorText = ''
+    if (contentType.includes('application/json')) {
+      try {
+        const data = await res.json()
+        errorText = String(data?.detail || data?.message || JSON.stringify(data) || '')
+      } catch {
+        errorText = ''
+      }
     }
+    if (!errorText) {
+      errorText = await res.text()
+    }
+    if (res.status === 401 && token) {
+      clearAuthToken()
+    }
+    throw new Error(errorText || `请求失败: HTTP ${res.status}`)
   }
-  return res.json()
+
+  if (res.status === 204) {
+    return null
+  }
+  if (contentType.includes('application/json')) {
+    return res.json()
+  }
+  return res.text()
 }

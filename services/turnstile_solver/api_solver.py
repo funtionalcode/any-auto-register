@@ -27,18 +27,19 @@ from rich.align import Align
 from rich import box
 
 
-
+_ORIGINAL_LOGGER_CLASS = logging.getLoggerClass()
+_COLOR_ENABLED = sys.stdout.isatty() and os.getenv("NO_COLOR", "").strip() == ""
 COLORS = {
-    'MAGENTA': '\033[35m',
-    'BLUE': '\033[34m',
-    'GREEN': '\033[32m',
-    'YELLOW': '\033[33m',
-    'RED': '\033[31m',
-    'RESET': '\033[0m',
+    'MAGENTA': '\033[35m' if _COLOR_ENABLED else '',
+    'BLUE': '\033[34m' if _COLOR_ENABLED else '',
+    'GREEN': '\033[32m' if _COLOR_ENABLED else '',
+    'YELLOW': '\033[33m' if _COLOR_ENABLED else '',
+    'RED': '\033[31m' if _COLOR_ENABLED else '',
+    'RESET': '\033[0m' if _COLOR_ENABLED else '',
 }
 
 
-class CustomLogger(logging.Logger):
+class CustomLogger(_ORIGINAL_LOGGER_CLASS):
     @staticmethod
     def format_message(level, color, message):
         timestamp = time.strftime('%H:%M:%S')
@@ -62,9 +63,13 @@ class CustomLogger(logging.Logger):
 
 logging.setLoggerClass(CustomLogger)
 logger: CustomLogger = logging.getLogger("TurnstileAPIServer")  # type: ignore
+logging.setLoggerClass(_ORIGINAL_LOGGER_CLASS)
 logger.setLevel(logging.DEBUG)
-handler = logging.StreamHandler(sys.stdout)
-logger.addHandler(handler)
+logger.propagate = False
+if not logger.handlers:
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(logging.Formatter('%(message)s'))
+    logger.addHandler(handler)
 
 
 class TurnstileAPIServer:
@@ -81,6 +86,11 @@ class TurnstileAPIServer:
         self.browser_name = browser_name
         self.browser_version = browser_version
         self.console = Console()
+        self._playwright = None
+        self._camoufox = None
+        self._browsers = []
+        self._cleanup_task = None
+        self._shutting_down = False
         
         # Initialize useragent and sec_ch_ua attributes
         self.useragent = useragent
@@ -143,6 +153,7 @@ class TurnstileAPIServer:
     def _setup_routes(self) -> None:
         """Set up the application routes."""
         self.app.before_serving(self._startup)
+        self.app.after_serving(self._shutdown)
         self.app.route('/turnstile', methods=['GET'])(self.process_turnstile)
         self.app.route('/result', methods=['GET'])(self.get_result)
         self.app.route('/')(self.index)
@@ -157,11 +168,65 @@ class TurnstileAPIServer:
             await self._initialize_browser()
             
             # Запускаем периодическую очистку старых результатов
-            asyncio.create_task(self._periodic_cleanup())
+            self._cleanup_task = asyncio.create_task(self._periodic_cleanup())
             
         except Exception as e:
             logger.error(f"Failed to initialize browser: {str(e)}")
             raise
+
+    async def _await_maybe(self, value):
+        if asyncio.iscoroutine(value) or isinstance(value, asyncio.Future):
+            return await value
+        return value
+
+    async def _close_resource(self, resource, methods: tuple[str, ...], label: str) -> bool:
+        if resource is None:
+            return False
+        for method_name in methods:
+            method = getattr(resource, method_name, None)
+            if not callable(method):
+                continue
+            try:
+                await self._await_maybe(method())
+                if self.debug:
+                    logger.debug(f"Shutdown: closed {label} via {method_name}()")
+                return True
+            except Exception as e:
+                logger.warning(f"Shutdown: failed closing {label} via {method_name}(): {e}")
+        return False
+
+    async def _shutdown(self) -> None:
+        if self._shutting_down:
+            return
+
+        self._shutting_down = True
+        logger.info("Starting solver shutdown cleanup")
+
+        if self._cleanup_task:
+            self._cleanup_task.cancel()
+            try:
+                await self._cleanup_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                logger.warning(f"Cleanup task stop failed: {e}")
+            self._cleanup_task = None
+
+        while not self.browser_pool.empty():
+            try:
+                self.browser_pool.get_nowait()
+            except Exception:
+                break
+
+        for index, browser in enumerate(self._browsers, start=1):
+            await self._close_resource(browser, ("close", "stop"), f"browser-{index}")
+        self._browsers.clear()
+
+        await self._close_resource(self._playwright, ("stop", "close"), "playwright")
+        await self._close_resource(self._camoufox, ("stop", "close"), "camoufox")
+        self._playwright = None
+        self._camoufox = None
+        logger.info("Solver shutdown cleanup completed")
 
     async def _initialize_browser(self) -> None:
         """Initialize the browser and create the page pool."""
@@ -174,12 +239,14 @@ class TurnstileAPIServer:
                     "当前浏览器模式需要 patchright，但未安装。请执行: pip install patchright"
                 )
             playwright = await async_playwright().start()
+            self._playwright = playwright
         elif self.browser_type == "camoufox":
             if AsyncCamoufox is None:
                 raise RuntimeError(
                     "当前浏览器模式需要 camoufox，但未安装。请执行: pip install camoufox && python -m camoufox fetch"
                 )
             camoufox = AsyncCamoufox(headless=self.headless)
+            self._camoufox = camoufox
 
         browser_configs = []
         for _ in range(self.thread_count):
@@ -235,6 +302,7 @@ class TurnstileAPIServer:
                 browser = await camoufox.start()
 
             if browser:
+                self._browsers.append(browser)
                 await self.browser_pool.put((i+1, browser, config))
 
             if self.debug:
@@ -263,6 +331,8 @@ class TurnstileAPIServer:
                 deleted_count = await cleanup_old_results(days_old=7)
                 if deleted_count > 0:
                     logger.info(f"Cleaned up {deleted_count} old results")
+            except asyncio.CancelledError:
+                break
             except Exception as e:
                 logger.error(f"Error during periodic cleanup: {e}")
 
@@ -932,7 +1002,7 @@ class TurnstileAPIServer:
                     logger.warning(f"Browser {index}: Error closing context: {str(e)}")
             
             try:
-                if hasattr(browser, 'is_connected') and browser.is_connected():
+                if not self._shutting_down and hasattr(browser, 'is_connected') and browser.is_connected():
                     await self.browser_pool.put((index, browser, browser_config))
                     if self.debug:
                         logger.debug(f"Browser {index}: Browser returned to pool")
@@ -1091,22 +1161,32 @@ class TurnstileAPIServer:
         """
 
 
+def _default_thread_count() -> int:
+    try:
+        return max(1, int(os.getenv("SOLVER_THREAD", "1")))
+    except ValueError:
+        return 1
+
+
 def parse_args():
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser(description="Turnstile API Server")
+    default_thread = _default_thread_count()
 
     parser.add_argument('--no-headless', action='store_true', help='Run the browser with GUI (disable headless mode). By default, headless mode is enabled.')
     parser.add_argument('--useragent', type=str, help='User-Agent string (if not specified, random configuration is used)')
     parser.add_argument('--debug', action='store_true', help='Enable or disable debug mode for additional logging and troubleshooting information (default: False)')
     parser.add_argument('--browser_type', type=str, default='chromium', help='Specify the browser type for the solver. Supported options: chromium, chrome, msedge, camoufox (default: chromium)')
-    parser.add_argument('--thread', type=int, default=4, help='Set the number of browser threads to use for multi-threaded mode. Increasing this will speed up execution but requires more resources (default: 1)')
+    parser.add_argument('--thread', type=int, default=default_thread, help='Set the number of browser threads to use for multi-threaded mode. Increasing this will speed up execution but requires more resources (default: SOLVER_THREAD env or 1)')
     parser.add_argument('--proxy', action='store_true', help='Enable proxy support for the solver (Default: False)')
     parser.add_argument('--random', action='store_true', help='Use random User-Agent and Sec-CH-UA configuration from pool')
     parser.add_argument('--browser', type=str, help='Specify browser name to use (e.g., chrome, firefox)')
     parser.add_argument('--version', type=str, help='Specify browser version to use (e.g., 139, 141)')
     parser.add_argument('--host', type=str, default='0.0.0.0', help='Specify the IP address where the API solver runs. (Default: 0.0.0.0)')
     parser.add_argument('--port', type=str, default=os.getenv('SOLVER_PORT', '8889'), help='Set the port for the API solver to listen on. (Default: SOLVER_PORT env or 8889)')
-    return parser.parse_args()
+    args = parser.parse_args()
+    args.thread = max(1, args.thread)
+    return args
 
 
 def create_app(headless: bool, useragent: str, debug: bool, browser_type: str, thread: int, proxy_support: bool, use_random_config: bool, browser_name: str, browser_version: str) -> Quart:

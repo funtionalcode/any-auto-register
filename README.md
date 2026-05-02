@@ -354,6 +354,23 @@ docker compose up -d --build
 
 当前 Dockerfile 已改为通过固定直链安装 Camoufox，以避免构建时访问 GitHub Releases API 触发匿名限流。
 
+### Docker 代理配置
+
+如构建或容器运行时需要走代理，可复制 `.env.example` 为仓库根目录 `.env`，并按需填写代理地址：
+
+```env
+HTTP_PROXY=http://host.docker.internal:7890
+HTTPS_PROXY=http://host.docker.internal:7890
+ALL_PROXY=socks5://host.docker.internal:7890
+NO_PROXY=localhost,127.0.0.1,::1,app
+```
+
+Linux Docker 如无法解析 `host.docker.internal`，可改用宿主机网关地址，例如 `http://172.17.0.1:7890`。这些变量会同时传入：
+
+- `docker build` 的 Python runtime 阶段
+- `docker build` 的 Node 前端构建阶段
+- `docker compose up` 启动后的应用容器运行环境
+
 ### 访问
 
 ```text
@@ -510,6 +527,84 @@ http://localhost:8889/
 .\start_backend.ps1
 ```
 
+---
+
+## 邮箱服务配置
+
+> ⚠️ **Kiro 平台特别说明**
+>
+> Kiro 的风控策略较严格。当前版本实测：
+>
+> - **自建邮箱成功率：100%**
+> - **内置临时邮箱成功率：0%**
+>
+> 如需注册 Kiro 账号，建议只使用 **自建邮箱**。
+
+### 邮箱服务汇总
+
+| 服务名称           | 访问地址                                                       | 说明                             | 是否需要配置 |
+| -------------- | ---------------------------------------------------------- | ------------------------------ | ------ |
+| TempMail.lol   | <https://tempmail.lol>                                     | 自动生成邮箱，无需配置，CN IP 被封需代理。推荐默认使用 | 否（需代理） |
+| LuckMail       | <https://mails.luckyous.com>                               | ChatGPT 走购买邮箱，其他平台走订单接码        | 是      |
+| CF Worker 自建邮箱 | <https://github.com/dreamhunter2333/cloudflare_temp_email> | 基于 Cloudflare Worker 的自建临时邮箱   | 是（需自建） |
+| MoeMail        | <https://sall.cc>                                          | 自动注册账号并生成临时邮箱                  | 是      |
+| DuckMail       | <https://www.duckmail.sbs>                                 | 自动生成邮箱，随机创建账号                  | 是      |
+| Laoudo         | <https://laoudo.com>                                       | 固定邮箱，适合需要固定邮箱地址的场景             | 是      |
+| Freemail       | <https://github.com/idinging/freemail>                     | 基于 Cloudflare Worker 的自建邮箱服务   | 是（需自建） |
+
+### MoeMail
+
+推荐默认使用，系统会自动注册临时账号并生成邮箱。
+
+### Laoudo
+
+适合固定邮箱场景。
+
+| 参数       | 说明             |
+| ---------- | ---------------- |
+| 邮箱地址   | 完整邮箱地址     |
+| Account ID | 邮箱账号 ID      |
+| JWT Token  | 登录后的认证令牌 |
+
+### Cloudflare Worker 自建邮箱
+
+| 参数        | 说明                                                                                                                                  |
+| ----------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| API URL     | Worker API 地址（注意这是填写[cloudflare workers后端地址](https://temp-mail-docs.awsl.uk/zh/guide/ui/worker.html) !!不是pages前端地址） |
+| Admin Token | 管理员密码                                                                                                                            |
+| 域名        | 收件邮箱域名                                                                                                                          |
+| Fingerprint | 可选                                                                                                                                  |
+
+### DuckMail / Freemail
+
+适合临时邮箱场景，部分区域可能需要代理。
+
+---
+
+## 验证码服务配置
+
+| 服务        | 说明                                                             |
+| ----------- | ---------------------------------------------------------------- |
+| YesCaptcha  | 需填写 Client Key                                                |
+| 本地 Solver | 依赖 `camoufox` + `quart`，并要求后端运行在正确 conda 环境中 |
+
+---
+
+## 控制台密码本地重置
+
+控制台当前没有“忘记密码”自助找回流程。
+
+- 已有管理员可登录时：进入 `用户 / 角色`，编辑目标用户并填写新密码。
+- 唯一管理员无法登录时：在项目根目录本地执行重置脚本，直接改写当前 `DATABASE_URL` 对应数据库中的密码。
+
+```bash
+python3 scripts/reset_console_password.py --list
+python3 scripts/reset_console_password.py --username admin --role admin --enable --create
+```
+
+脚本默认会在终端安全输入新密码；也可以通过 `--password <new-password>` 直接传入。
+
+---
 ## 项目结构
 
 ```text

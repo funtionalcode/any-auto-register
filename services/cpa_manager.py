@@ -6,6 +6,11 @@ from dataclasses import dataclass
 from typing import Any
 
 import requests
+from sqlmodel import Session, select
+
+from core.db import AccountModel, engine
+from services.chatgpt_modules import is_chatgpt_module_enabled
+from services.cpa_target import resolve_cpa_api_key, resolve_cpa_api_url
 
 
 DEFAULT_INTERVAL_MINUTES = 60
@@ -81,25 +86,22 @@ def get_cpa_maintenance_config() -> CpaMaintenanceConfig:
 
 
 def get_cpa_maintenance_interval_seconds() -> int:
-    config_store = _get_config_store()
-    api_url = str(config_store.get("cpa_api_url", "") or "").strip()
+    api_url = resolve_cpa_api_url()
     config = get_cpa_maintenance_config()
-    if not config.enabled or not api_url:
+    if not config.enabled or not api_url or not is_chatgpt_module_enabled("cpa_cleanup"):
         return 0
     return config.interval_minutes * 60
 
 
 def _api_base(api_url: str | None = None) -> str:
-    config_store = _get_config_store()
-    base_url = str(api_url or config_store.get("cpa_api_url", "") or "").strip()
+    base_url = resolve_cpa_api_url(api_url)
     if not base_url:
         raise RuntimeError("CPA API URL 未配置")
     return base_url.rstrip("/")
 
 
 def _headers(api_key: str | None = None) -> dict[str, str]:
-    config_store = _get_config_store()
-    token = str(api_key or config_store.get("cpa_api_key", "") or "").strip()
+    token = resolve_cpa_api_key(api_key)
     headers = {"Accept": "application/json"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
@@ -161,6 +163,55 @@ def _error_names(files: list[dict[str, Any]]) -> list[str]:
     )
 
 
+def _extract_chatgpt_emails_from_auth_names(names: list[str]) -> list[str]:
+    emails: list[str] = []
+    seen = set()
+    for name in names:
+        raw = str(name or "").strip()
+        if not raw:
+            continue
+        filename = raw.rsplit("/", 1)[-1]
+        if filename.lower().endswith(".json"):
+            filename = filename[:-5]
+        email = filename.strip()
+        if "@" not in email:
+            continue
+        normalized = email.lower()
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        emails.append(email)
+    return emails
+
+
+def _delete_local_chatgpt_accounts_by_auth_names(names: list[str]) -> dict[str, Any]:
+    target_emails = _extract_chatgpt_emails_from_auth_names(names)
+    if not target_emails:
+        return {"deleted": 0, "emails": []}
+
+    target_email_set = {email.lower() for email in target_emails}
+    deleted_emails: list[str] = []
+
+    with Session(engine) as session:
+        rows = session.exec(
+            select(AccountModel).where(AccountModel.platform == "chatgpt")
+        ).all()
+        targets = [
+            row
+            for row in rows
+            if str(row.email or "").strip().lower() in target_email_set
+        ]
+        for row in targets:
+            deleted_emails.append(str(row.email or "").strip())
+            session.delete(row)
+        session.commit()
+
+    return {
+        "deleted": len(targets),
+        "emails": sorted({email for email in deleted_emails if email}),
+    }
+
+
 def _normalize_executor(executor: str | None) -> str:
     value = str(executor or "").strip()
     if value in {"protocol", "headless", "headed"}:
@@ -209,6 +260,9 @@ def _trigger_register(missing_count: int, *, config: CpaMaintenanceConfig, remai
 
 
 def maintain_cpa_credentials() -> dict[str, Any]:
+    if not is_chatgpt_module_enabled("cpa_cleanup"):
+        return {"ok": False, "reason": "module_disabled"}
+
     config = get_cpa_maintenance_config()
     if not config.enabled:
         return {"ok": False, "reason": "disabled"}
@@ -216,17 +270,38 @@ def maintain_cpa_credentials() -> dict[str, Any]:
     files = list_auth_files()
     error_names = _error_names(files)
     deleted_count = 0
+    synced_deleted_accounts = 0
+    synced_deleted_emails: list[str] = []
 
     if error_names:
         delete_auth_files(error_names)
-        deleted_count = len(error_names)
-        print(f"[CPA] 已删除 {deleted_count} 个 status=error 的凭证")
         files = list_auth_files()
+        remaining_names = {
+            str(item.get("name", "")).strip()
+            for item in files
+            if str(item.get("name", "")).strip()
+        }
+        deleted_names = [
+            name for name in error_names if str(name or "").strip() not in remaining_names
+        ]
+        deleted_count = len(deleted_names)
+        if deleted_count:
+            print(f"[CPA] 已删除 {deleted_count} 个 status=error 的凭证")
+            sync_result = _delete_local_chatgpt_accounts_by_auth_names(deleted_names)
+            synced_deleted_accounts = int(sync_result.get("deleted", 0) or 0)
+            synced_deleted_emails = list(sync_result.get("emails", []) or [])
+            if synced_deleted_accounts:
+                print(
+                    f"[CPA] Account Manager 同步删除 {synced_deleted_accounts} 个本地账号: "
+                    f"{', '.join(synced_deleted_emails)}"
+                )
 
     remaining_count = _count_remaining(files)
     result: dict[str, Any] = {
         "ok": True,
         "deleted": deleted_count,
+        "local_deleted": synced_deleted_accounts,
+        "local_deleted_emails": synced_deleted_emails,
         "remaining": remaining_count,
         "threshold": config.threshold,
     }

@@ -5,6 +5,7 @@
 
 import time
 import logging
+import traceback
 from datetime import datetime
 from typing import Optional, Callable
 
@@ -55,11 +56,30 @@ class AccessTokenOnlyRegistrationEngine:
         self.task_uuid = task_uuid
         self.max_retries = max(1, int(max_retries or 1))
         self.extra_config = dict(extra_config or {})
-        
+
         self.email = None
         self.password = None
         self.logs = []
-        
+
+    def _extract_email_address(self, email_data) -> Optional[str]:
+        if not email_data:
+            return None
+        if isinstance(email_data, dict):
+            value = email_data.get("email") or email_data.get("address")
+            return str(value).strip() if value else None
+        if isinstance(email_data, (list, tuple)):
+            for item in email_data:
+                candidate = self._extract_email_address(item)
+                if candidate:
+                    return candidate
+            return None
+        email_attr = getattr(email_data, "email", None)
+        if email_attr:
+            return str(email_attr).strip()
+        if isinstance(email_data, str):
+            return email_data.strip() or None
+        return None
+
     def _log(self, message: str, level: str = "info"):
         timestamp = datetime.now().strftime("%H:%M:%S")
         log_message = f"[{timestamp}] {message}"
@@ -104,6 +124,10 @@ class AccessTokenOnlyRegistrationEngine:
                         self._log("=" * 60)
                         self._log("开始注册流程 V2 (Session 复用直取 AccessToken)")
                         self._log(f"请求模式: {self.browser_mode}")
+                        if self.proxy_url:
+                            self._log(f"使用代理: {self.proxy_url}")
+                        else:
+                            self._log("未配置代理，直连注册")
                         self._log("=" * 60)
                     else:
                         self._log(f"整流程重试 {attempt + 1}/{self.max_retries} ...")
@@ -111,7 +135,7 @@ class AccessTokenOnlyRegistrationEngine:
 
                     # 1. 创建邮箱
                     email_data = self.email_service.create_email()
-                    email_addr = self.email or (email_data.get('email') if email_data else None)
+                    email_addr = self.email or self._extract_email_address(email_data)
                     if not email_addr:
                         result.error_message = "创建邮箱失败"
                         return result
@@ -200,13 +224,13 @@ class AccessTokenOnlyRegistrationEngine:
 
             result.error_message = last_error or "注册失败"
             return result
-                
+
         except TaskInterruption:
             raise
         except Exception as e:
-            self._log(f"无 RT 注册全流程执行异常: {e}", "error")
-            import traceback
-            traceback.print_exc()
+            self._log(f"V2 注册全流程执行异常: {e}", "error")
+            for line in traceback.format_exc().rstrip().splitlines():
+                self._log(line, "error")
             result.error_message = str(e)
             return result
 
