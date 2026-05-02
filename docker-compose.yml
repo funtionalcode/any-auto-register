@@ -1,15 +1,39 @@
+x-proxy-build-args: &proxy-build-args
+  HTTP_PROXY: ${HTTP_PROXY:-}
+  HTTPS_PROXY: ${HTTPS_PROXY:-}
+  ALL_PROXY: ${ALL_PROXY:-}
+  NO_PROXY: ${NO_PROXY:-}
+  http_proxy: ${http_proxy:-}
+  https_proxy: ${https_proxy:-}
+  all_proxy: ${all_proxy:-}
+  no_proxy: ${no_proxy:-}
+
+x-proxy-env: &proxy-env
+  HTTP_PROXY: ${HTTP_PROXY:-}
+  HTTPS_PROXY: ${HTTPS_PROXY:-}
+  ALL_PROXY: ${ALL_PROXY:-}
+  NO_PROXY: ${NO_PROXY:-}
+  http_proxy: ${http_proxy:-}
+  https_proxy: ${https_proxy:-}
+  all_proxy: ${all_proxy:-}
+  no_proxy: ${no_proxy:-}
+
 services:
   app:
     build:
       context: .
       dockerfile: Dockerfile
+      network: host
       args:
         CAMOUFOX_VERSION: ${CAMOUFOX_VERSION:-135.0.1}
         CAMOUFOX_RELEASE: ${CAMOUFOX_RELEASE:-beta.24}
+        <<: *proxy-build-args
     container_name: any-auto-register
     init: true
     restart: unless-stopped
     environment:
+      TZ: Asia/Shanghai
+      APP_TIMEZONE: Asia/Shanghai
       HOST: 0.0.0.0
       PORT: "8000"
       APP_RELOAD: "0"
@@ -17,10 +41,22 @@ services:
       APP_RUNTIME_DIR: /runtime
       APP_ENABLE_SOLVER: "1"
       SOLVER_PORT: "8889"
+      SOLVER_THREAD: ${SOLVER_THREAD:-1}
       SOLVER_BIND_HOST: 0.0.0.0
       LOCAL_SOLVER_URL: http://127.0.0.1:8889
+      INSIDE_DOCKER: "1"
+      EXTERNAL_APPS_HOST: ${EXTERNAL_APPS_HOST:-172.16.0.180}
+      EXTERNAL_APPS_SCHEME: ${EXTERNAL_APPS_SCHEME:-http}
+      GROK_HEADLESS: "1"
+      PLAYWRIGHT_BROWSERS_PATH: /ms-playwright
+      XDG_CACHE_HOME: /runtime/cache
+      UV_CACHE_DIR: /runtime/cache/uv
+      PIP_CACHE_DIR: /runtime/cache/pip
+      GOPATH: /runtime/go
+      GOMODCACHE: /runtime/go/pkg/mod
+      GOCACHE: /runtime/cache/go-build
       SOLVER_BROWSER_TYPE: ${SOLVER_BROWSER_TYPE:-camoufox}
-      PLAYWRIGHT_HEADLESS: ${PLAYWRIGHT_HEADLESS:-}
+      <<: *proxy-env
     ports:
       - "8000:8000"
       - "127.0.0.1:8889:8889"

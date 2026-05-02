@@ -354,6 +354,23 @@ docker compose up -d --build
 
 当前 Dockerfile 已改为通过固定直链安装 Camoufox，以避免构建时访问 GitHub Releases API 触发匿名限流。
 
+### Docker 代理配置
+
+如构建或容器运行时需要走代理，可复制 `.env.example` 为仓库根目录 `.env`，并按需填写代理地址：
+
+```env
+HTTP_PROXY=http://host.docker.internal:7890
+HTTPS_PROXY=http://host.docker.internal:7890
+ALL_PROXY=socks5://host.docker.internal:7890
+NO_PROXY=localhost,127.0.0.1,::1,app
+```
+
+Linux Docker 如无法解析 `host.docker.internal`，可改用宿主机网关地址，例如 `http://172.17.0.1:7890`。这些变量会同时传入：
+
+- `docker build` 的 Python runtime 阶段
+- `docker build` 的 Node 前端构建阶段
+- `docker compose up` 启动后的应用容器运行环境
+
 ### 访问
 
 ```text

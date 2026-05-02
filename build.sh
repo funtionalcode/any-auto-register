@@ -1,8 +1,8 @@
-  export HTTP_PROXY="http://172.17.224.1:7890"
-  export HTTPS_PROXY="http://172.17.224.1:7890"
+#!/usr/bin/env bash
+set -e
 
-  git fetch
-  git pull
-  docker-compose build
-  docker-compose down
-  docker-compose up -d
+git fetch
+git pull
+docker-compose build
+docker-compose down
+docker-compose up -d

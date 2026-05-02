@@ -1,5 +1,6 @@
 import {
   createContext,
+  memo,
   useCallback,
   useContext,
   useEffect,
@@ -88,6 +89,14 @@ interface RegisterTaskCenterContextValue {
   tasks: ManagedRegisterTask[]
   activeTask: ManagedRegisterTask | null
   completionVersion: number
+  launchTask: (payload: RegisterTaskRequestPayload) => Promise<string>
+  openTask: (taskId: string) => void
+  minimizeTask: (taskId: string) => void
+  dismissTask: (taskId: string) => void
+  refreshTask: (taskId: string) => Promise<void>
+}
+
+interface RegisterTaskActionsContextValue {
   launchTask: (payload: RegisterTaskRequestPayload) => Promise<string>
   openTask: (taskId: string) => void
   minimizeTask: (taskId: string) => void
@@ -218,7 +227,77 @@ function groupTasksByPlatform(tasks: ManagedRegisterTask[]) {
     .sort((a, b) => b.items.length - a.items.length || a.label.localeCompare(b.label))
 }
 
-function TaskStatusBlock({
+const LogPanel = memo(function LogPanel({
+  logs,
+  taskId,
+}: {
+  logs: string[]
+  taskId: string
+}) {
+  const { token } = theme.useToken()
+  if (logs.length === 0) {
+    return (
+      <div
+        className="log-panel"
+        style={{
+          overflow: 'auto',
+          background: token.colorBgContainer,
+          border: `1px solid ${token.colorBorder}`,
+          borderRadius: 12,
+          padding: 12,
+          fontFamily: 'monospace',
+          fontSize: 12,
+          minHeight: 220,
+          maxHeight: 420,
+          userSelect: 'text',
+          WebkitUserSelect: 'text',
+          cursor: 'text',
+          whiteSpace: 'pre-wrap',
+        }}
+      >
+        <div style={{ color: token.colorTextTertiary }}>等待任务日志...</div>
+      </div>
+    )
+  }
+  return (
+    <div
+      className="log-panel"
+      style={{
+        overflow: 'auto',
+        background: token.colorBgContainer,
+        border: `1px solid ${token.colorBorder}`,
+        borderRadius: 12,
+        padding: 12,
+        fontFamily: 'monospace',
+        fontSize: 12,
+        minHeight: 220,
+        maxHeight: 420,
+        userSelect: 'text',
+        WebkitUserSelect: 'text',
+        cursor: 'text',
+        whiteSpace: 'pre-wrap',
+      }}
+    >
+      {logs.map((line, index) => {
+        const positive = line.includes('\u2713') || line.includes('成功')
+        const negative = line.includes('\u2717') || line.includes('失败') || line.includes('错误')
+        return (
+          <div
+            key={`${taskId}-${index}`}
+            style={{
+              lineHeight: 1.5,
+              color: positive ? token.colorSuccess : negative ? token.colorError : token.colorText,
+            }}
+          >
+            {line}
+          </div>
+        )
+      })}
+    </div>
+  )
+})
+
+const TaskStatusBlock = memo(function TaskStatusBlockInner({
   task,
   onRefresh,
 }: {
@@ -364,7 +443,7 @@ function TaskStatusBlock({
       </div>
     </div>
   )
-}
+})
 
 export function RegisterTaskCenterProvider({ children }: { children: ReactNode }) {
   const [tasks, setTasks] = useState<ManagedRegisterTask[]>([])
@@ -376,6 +455,7 @@ export function RegisterTaskCenterProvider({ children }: { children: ReactNode }
   const tasksRef = useRef<ManagedRegisterTask[]>([])
   const activeTaskIdRef = useRef<string | null>(null)
   const streamRefs = useRef<Map<string, EventSource>>(new Map())
+  const pendingRefreshRef = useRef<Set<string>>(new Set())
 
   useEffect(() => {
     tasksRef.current = tasks
@@ -399,36 +479,42 @@ export function RegisterTaskCenterProvider({ children }: { children: ReactNode }
   }, [collapsedPlatforms])
 
   const refreshTask = useCallback(async (taskId: string) => {
-    const snapshot = (await apiFetch(`/tasks/${taskId}`)) as ServerRegisterTask
-    let becameTerminal = false
-    let completionTitle = ''
+    if (pendingRefreshRef.current.has(taskId)) return
+    pendingRefreshRef.current.add(taskId)
+    try {
+      const snapshot = (await apiFetch(`/tasks/${taskId}`)) as ServerRegisterTask
+      let becameTerminal = false
+      let completionTitle = ''
 
-    setTasks((current) => {
-      const previous = current.find((item) => item.id === taskId)
-      const logsLength = Array.isArray(snapshot.logs) ? snapshot.logs.length : (previous?.logs || []).length
-      const newLogCount = previous ? Math.max(0, logsLength - (previous.logs || []).length) : 0
-      const hidden = previous ? (previous.minimized || activeTaskIdRef.current !== taskId) : true
-      const next = createManagedTask(snapshot, previous, {
-        minimized: previous?.minimized ?? (activeTaskIdRef.current === taskId ? false : true),
-        unseenLogs: hidden ? (previous?.unseenLogs || 0) + newLogCount : 0,
+      setTasks((current) => {
+        const previous = current.find((item) => item.id === taskId)
+        const logsLength = Array.isArray(snapshot.logs) ? snapshot.logs.length : (previous?.logs || []).length
+        const newLogCount = previous ? Math.max(0, logsLength - (previous.logs || []).length) : 0
+        const hidden = previous ? (previous.minimized || activeTaskIdRef.current !== taskId) : true
+        const next = createManagedTask(snapshot, previous, {
+          minimized: previous?.minimized ?? (activeTaskIdRef.current === taskId ? false : true),
+          unseenLogs: hidden ? (previous?.unseenLogs || 0) + newLogCount : 0,
+        })
+
+        if (previous && !isTerminal(previous.status) && isTerminal(next.status)) {
+          becameTerminal = true
+          completionTitle = `${next.platformLabel} 注册${next.status === 'done' ? '完成' : '失败'}`
+        }
+
+        if (!previous) return sortTasks([next, ...current])
+        return sortTasks(current.map((item) => (item.id === taskId ? next : item)))
       })
 
-      if (previous && !isTerminal(previous.status) && isTerminal(next.status)) {
-        becameTerminal = true
-        completionTitle = `${next.platformLabel} 注册${next.status === 'done' ? '完成' : '失败'}`
+      if (becameTerminal) {
+        setCompletionVersion((value) => value + 1)
+        if (snapshot.status === 'done') {
+          message.success(completionTitle)
+        } else if (snapshot.status === 'failed') {
+          message.error(completionTitle)
+        }
       }
-
-      if (!previous) return sortTasks([next, ...current])
-      return sortTasks(current.map((item) => (item.id === taskId ? next : item)))
-    })
-
-    if (becameTerminal) {
-      setCompletionVersion((value) => value + 1)
-      if (snapshot.status === 'done') {
-        message.success(completionTitle)
-      } else if (snapshot.status === 'failed') {
-        message.error(completionTitle)
-      }
+    } finally {
+      pendingRefreshRef.current.delete(taskId)
     }
   }, [])
 
@@ -514,6 +600,8 @@ export function RegisterTaskCenterProvider({ children }: { children: ReactNode }
     }
   }, [])
 
+  // Polling fallback: only refresh tasks that don\'t have an active SSE stream.
+  // Tasks with SSE connections receive real-time updates, so they don\'t need polling.
   useEffect(() => {
     if (tasks.length === 0) return
 
@@ -521,9 +609,11 @@ export function RegisterTaskCenterProvider({ children }: { children: ReactNode }
       tasksRef.current
         .filter((item) => !isTerminal(item.status))
         .forEach((item) => {
-          refreshTask(item.id).catch(() => {})
+          if (!streamRefs.current.has(item.id)) {
+            refreshTask(item.id).catch(() => {})
+          }
         })
-    }, 5000)
+    }, 10000)
 
     return () => {
       window.clearInterval(timer)
@@ -555,13 +645,17 @@ export function RegisterTaskCenterProvider({ children }: { children: ReactNode }
             return
           }
 
-          if (typeof payload.line === 'string') {
-            const line = payload.line
-            const index = typeof payload.index === 'number' ? payload.index : null
-            setTasks((current) => current.map((task) => {
-              if (task.id !== item.id) return task
+          // Batch all updates from a single SSE message into one setTasks call
+          // to avoid cascading re-renders that freeze the UI.
+          setTasks((current) => {
+            const taskIndex = current.findIndex((t) => t.id === item.id)
+            if (taskIndex === -1) return current
+            let updated = { ...current[taskIndex] }
 
-              const previousLogs = Array.isArray(task.logs) ? task.logs : []
+            if (typeof payload.line === 'string') {
+              const line = payload.line
+              const index = typeof payload.index === 'number' ? payload.index : null
+              const previousLogs = Array.isArray(updated.logs) ? updated.logs : []
               const nextLogs = [...previousLogs]
               if (index !== null && index >= 0) {
                 nextLogs[index] = line
@@ -571,30 +665,31 @@ export function RegisterTaskCenterProvider({ children }: { children: ReactNode }
 
               const compactLogs = nextLogs.filter((value): value is string => typeof value === 'string')
               const newLogCount = Math.max(0, compactLogs.length - previousLogs.length)
-              const hidden = task.minimized || activeTaskIdRef.current !== task.id
+              const hidden = updated.minimized || activeTaskIdRef.current !== item.id
 
-              return {
-                ...task,
+              updated = {
+                ...updated,
                 logs: compactLogs,
-                unseenLogs: hidden ? (task.unseenLogs || 0) + newLogCount : 0,
+                unseenLogs: hidden ? (updated.unseenLogs || 0) + newLogCount : 0,
               }
-            }))
-          }
+            }
 
-          if (payload.snapshot && typeof payload.snapshot === 'object') {
-            const snapshot = payload.snapshot as ServerRegisterTask
-            setTasks((current) => current.map((task) => {
-              if (task.id !== item.id) return task
-              const previousLogsLength = Array.isArray(task.logs) ? task.logs.length : 0
+            if (payload.snapshot && typeof payload.snapshot === 'object') {
+              const snapshot = payload.snapshot as ServerRegisterTask
+              const previousLogsLength = Array.isArray(updated.logs) ? updated.logs.length : 0
               const snapshotLogsLength = Array.isArray(snapshot.logs) ? snapshot.logs.length : previousLogsLength
               const newLogCount = Math.max(0, snapshotLogsLength - previousLogsLength)
-              const hidden = task.minimized || activeTaskIdRef.current !== task.id
-              return createManagedTask(snapshot, task, {
-                minimized: task.minimized,
-                unseenLogs: hidden ? (task.unseenLogs || 0) + newLogCount : 0,
+              const hidden = updated.minimized || activeTaskIdRef.current !== item.id
+              updated = createManagedTask(snapshot, updated, {
+                minimized: updated.minimized,
+                unseenLogs: hidden ? (updated.unseenLogs || 0) + newLogCount : 0,
               })
-            }))
-          }
+            }
+
+            const next = current.slice()
+            next[taskIndex] = updated
+            return next
+          })
 
           if (payload.done) {
             stream.close()
@@ -624,7 +719,7 @@ export function RegisterTaskCenterProvider({ children }: { children: ReactNode }
       streams.forEach((stream) => stream.close())
       streams.clear()
     }
-  }, [refreshTask, tasks])
+  }, [refreshTask, tasks.length])
 
   useEffect(() => (
     () => {
