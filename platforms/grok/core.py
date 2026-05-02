@@ -8,13 +8,17 @@ Grok (x.ai) 自动注册
 4. 完成注册并接受 ToS
 5. 提取 sso / sso-rw cookie
 """
+
 import ctypes
-import os
 import random
 import string
 import time
-import traceback
-from typing import Callable, Optional, Tuple
+from typing import Any, Callable, Optional, Tuple
+
+from core.browser_runtime import (
+    ensure_browser_display_available,
+    resolve_browser_headless,
+)
 
 
 UA = (
@@ -38,7 +42,7 @@ class GrokRegister:
         yescaptcha_key: str = "",
         proxy=None,
         log_fn=print,
-        headless: Optional[bool] = None,
+        headless: bool = False,
     ):
         self.captcha_solver = captcha_solver
         self.key = yescaptcha_key
@@ -46,7 +50,13 @@ class GrokRegister:
         self.log = log_fn
         self.headless = headless
 
-    def _wait_until(self, fn: Callable[[], bool], timeout: float = 30.0, interval: float = 0.5, desc: str = ""):
+    def _wait_until(
+        self,
+        fn: Callable[[], bool],
+        timeout: float = 30.0,
+        interval: float = 0.5,
+        desc: str = "",
+    ):
         start = time.time()
         while time.time() - start < timeout:
             if fn():
@@ -58,71 +68,26 @@ class GrokRegister:
     def _has_auth_cookies(cookies: list) -> bool:
         return any(cookie.get("name") in {"sso", "sso-rw"} for cookie in cookies)
 
-    @staticmethod
-    def _is_missing_playwright_browser(exc: Exception) -> bool:
-        msg = str(exc)
-        return (
-            "Executable doesn't exist" in msg
-            or "Please run the following command to download new browsers" in msg
-        )
-
-    @staticmethod
-    def _build_missing_browser_error() -> RuntimeError:
-        install_cmd = "python -m playwright install chromium"
-        browser_path = os.getenv("PLAYWRIGHT_BROWSERS_PATH", "").strip()
-        extra_hint = ""
-        if os.getenv("INSIDE_DOCKER") == "1":
-            expected_path = browser_path or "/ms-playwright"
-            extra_hint = (
-                f" 当前为 Docker 环境，请确保 `PLAYWRIGHT_BROWSERS_PATH={expected_path}`，"
-                "然后重新构建容器。旧容器可先在容器内执行一次安装命令恢复。"
-            )
-        return RuntimeError(
-            f"Playwright Chromium 浏览器未安装，或浏览器缓存路径配置不正确。"
-            f" 请先执行: `{install_cmd}`。{extra_hint}"
-        )
-
-    def _resolve_headless(self) -> bool:
-        override = os.getenv("GROK_HEADLESS", "").strip().lower()
-        if override in {"1", "true", "yes", "on"}:
-            return True
-        if override in {"0", "false", "no", "off"}:
-            return False
-
-        requested = bool(self.headless)
-        missing_display = (
-            os.name != "nt"
-            and not os.getenv("DISPLAY")
-            and not os.getenv("WAYLAND_DISPLAY")
-        )
-        if os.getenv("INSIDE_DOCKER") == "1" or missing_display:
-            if not requested:
-                self.log("  当前环境无可用图形界面，Grok 浏览器自动切换为 headless")
-            return True
-        return requested
-
     def _launch_browser(self):
         from patchright.sync_api import sync_playwright
 
         playwright = sync_playwright().start()
-        headless = self._resolve_headless()
-        launch_kwargs = {
+        headless, reason = resolve_browser_headless(
+            self.headless, default_headless=False
+        )
+        ensure_browser_display_available(headless)
+        self.log(f"浏览器模式: {'headless' if headless else 'headed'} ({reason})")
+        launch_kwargs: dict[str, Any] = {
             "headless": headless,
+            "channel": "msedge",
         }
-        if not headless and os.name == "nt":
-            launch_kwargs["channel"] = "msedge"
         if self.proxy:
             launch_kwargs["proxy"] = {"server": self.proxy}
         try:
             browser = playwright.chromium.launch(**launch_kwargs)
-        except Exception as first_error:
+        except Exception:
             launch_kwargs.pop("channel", None)
-            try:
-                browser = playwright.chromium.launch(**launch_kwargs)
-            except Exception as second_error:
-                if self._is_missing_playwright_browser(first_error) or self._is_missing_playwright_browser(second_error):
-                    raise self._build_missing_browser_error() from second_error
-                raise
+            browser = playwright.chromium.launch(**launch_kwargs)
         return playwright, browser
 
     def _goto_email_signup(self, page) -> None:
@@ -158,10 +123,15 @@ class GrokRegister:
             return page.locator("input[name=code]").count() > 0
 
         try:
-            self._wait_until(_email_verify_ready, timeout=15, desc="等待邮箱验证码页超时")
+            self._wait_until(
+                _email_verify_ready, timeout=15, desc="等待邮箱验证码页超时"
+            )
         except Exception:
             body = page.locator("body").inner_text()
-            if any(x in body for x in ["域名", "已被拒绝", "其他邮箱地址", "disposable", "rejected"]):
+            if any(
+                x in body
+                for x in ["域名", "已被拒绝", "其他邮箱地址", "disposable", "rejected"]
+            ):
                 raise RuntimeError(f"邮箱域名被拒绝: {body[:200]}")
             raise RuntimeError(f"邮箱提交失败: {body[:200]}")
 
@@ -189,14 +159,18 @@ class GrokRegister:
         self._wait_until(_user_form_ready, timeout=20, desc="等待完成注册页超时")
         self.log("  已进入完成注册页")
 
-    def _fill_user_form(self, page, given_name: str, family_name: str, password: str) -> None:
+    def _fill_user_form(
+        self, page, given_name: str, family_name: str, password: str
+    ) -> None:
         self.log(f"Step4: 填写用户信息 {given_name} {family_name} ...")
         page.locator("input[name=givenName]").fill(given_name)
         page.locator("input[name=familyName]").fill(family_name)
         page.locator("input[name=password]").fill(password)
 
     @staticmethod
-    def _find_turnstile_widget(page) -> Tuple[object, Optional[dict]]:
+    def _find_turnstile_widget(
+        page,
+    ) -> Tuple[Optional[Any], Optional[dict[str, Any]]]:
         for frame in page.frames:
             if "challenges.cloudflare.com" not in frame.url:
                 continue
@@ -241,7 +215,13 @@ class GrokRegister:
 
     @staticmethod
     def _has_turnstile_error(page) -> bool:
-        keywords = ["验证失败", "故障排除", "verification failed", "troubleshoot", "try again"]
+        keywords = [
+            "验证失败",
+            "故障排除",
+            "verification failed",
+            "troubleshoot",
+            "try again",
+        ]
         texts = []
         try:
             texts.append(page.locator("body").inner_text(timeout=800))
@@ -293,7 +273,9 @@ class GrokRegister:
             )
         )
 
-    def _wait_turnstile_token(self, page, wait_rounds: int = 25, wait_ms: int = 500) -> str:
+    def _wait_turnstile_token(
+        self, page, wait_rounds: int = 25, wait_ms: int = 500
+    ) -> str:
         for _ in range(wait_rounds):
             token = self._read_turnstile_token(page)
             if token and len(token) > 20:
@@ -383,11 +365,16 @@ class GrokRegister:
 
             click_x = box["x"] + min(28, max(18, box["width"] * 0.08))
             click_y = box["y"] + box["height"] / 2
-            self.log(f"  Turnstile click #{attempt + 1}: ({click_x:.1f}, {click_y:.1f})")
+            self.log(
+                f"  Turnstile click #{attempt + 1}: ({click_x:.1f}, {click_y:.1f})"
+            )
             try:
                 if frame:
                     frame.locator("body").click(
-                        position={"x": min(28, max(18, box["width"] * 0.08)), "y": box["height"] / 2},
+                        position={
+                            "x": min(28, max(18, box["width"] * 0.08)),
+                            "y": box["height"] / 2,
+                        },
                         timeout=2500,
                     )
                     page.wait_for_timeout(120)
@@ -403,7 +390,9 @@ class GrokRegister:
                 last_error = str(e)
 
             try:
-                token = self._native_click_turnstile(page, box, min(28, max(18, box["width"] * 0.08)))
+                token = self._native_click_turnstile(
+                    page, box, min(28, max(18, box["width"] * 0.08))
+                )
                 if token:
                     self.log(f"  Turnstile token: {token[:40]}...")
                     return token
@@ -426,6 +415,7 @@ class GrokRegister:
 
     def _submit_register(self, page) -> None:
         self.log("Step6: 提交完成注册...")
+
         def _tos_or_account_ready() -> bool:
             url = page.url
             body = page.locator("body").inner_text()
@@ -501,14 +491,24 @@ class GrokRegister:
         def _account_ready() -> bool:
             url = page.url
             body = page.locator("body").inner_text()
-            return "/account" in url or "您的账户" in body or self._has_auth_cookies(page.context.cookies())
+            return (
+                "/account" in url
+                or "您的账户" in body
+                or self._has_auth_cookies(page.context.cookies())
+            )
 
         self._wait_until(_account_ready, timeout=20, desc="等待账户页超时")
         page.wait_for_timeout(1500)
 
     @staticmethod
     def _pick_cookie(cookies: list, name: str) -> str:
-        domains = [".x.ai", "accounts.x.ai", ".grok.com", ".grokusercontent.com", ".grokipedia.com"]
+        domains = [
+            ".x.ai",
+            "accounts.x.ai",
+            ".grok.com",
+            ".grokusercontent.com",
+            ".grokipedia.com",
+        ]
         for domain in domains:
             for cookie in cookies:
                 if cookie.get("name") == name and cookie.get("domain") == domain:
@@ -518,7 +518,12 @@ class GrokRegister:
                 return cookie.get("value", "")
         return ""
 
-    def register(self, email: str, password: str = None, otp_callback: Optional[Callable[[], str]] = None) -> dict:
+    def register(
+        self,
+        email: str,
+        password: Optional[str] = None,
+        otp_callback: Optional[Callable[[], str]] = None,
+    ) -> dict:
         if not password:
             password = _rand_password()
         given_name = _rand_name()
@@ -527,24 +532,17 @@ class GrokRegister:
         playwright = None
         browser = None
         context = None
-        page = None
-        current_step = "初始化"
         try:
-            current_step = "启动浏览器"
             playwright, browser = self._launch_browser()
-            current_step = "创建浏览器上下文"
             context = browser.new_context(
                 viewport={"width": 1400, "height": 1200},
                 user_agent=UA,
             )
             page = context.new_page()
 
-            current_step = "打开注册页"
             self._goto_email_signup(page)
-            current_step = "提交邮箱"
             self._submit_email(page, email)
 
-            current_step = "获取邮箱验证码"
             if not otp_callback:
                 code = input("验证码: ").strip()
             else:
@@ -553,18 +551,12 @@ class GrokRegister:
             if not code:
                 raise RuntimeError("未获取到验证码")
 
-            current_step = "提交邮箱验证码"
             self._submit_otp(page, code)
-            current_step = "填写用户信息"
             self._fill_user_form(page, given_name, family_name, password)
-            current_step = "通过 Turnstile"
             self._solve_turnstile_on_page(page)
-            current_step = "提交注册"
             self._submit_register(page)
-            current_step = "接受 ToS"
             self._accept_tos_if_needed(page)
 
-            current_step = "提取认证 Cookie"
             cookies = context.cookies()
             if not self._has_auth_cookies(cookies):
                 page.wait_for_timeout(5000)
@@ -585,25 +577,6 @@ class GrokRegister:
                 "sso_rw": sso_rw,
                 "cookies": cookies,
             }
-        except Exception as e:
-            self.log(f"[Grok][ERROR] 当前步骤: {current_step}")
-            self.log(f"[Grok][ERROR] 错误: {e}")
-            if page is not None:
-                try:
-                    self.log(f"[Grok][ERROR] 当前 URL: {page.url}")
-                except Exception:
-                    pass
-                try:
-                    body = page.locator("body").inner_text(timeout=1500)
-                    body_preview = " ".join(str(body or "").split())[:500]
-                    if body_preview:
-                        self.log(f"[Grok][ERROR] 页面片段: {body_preview}")
-                except Exception:
-                    pass
-            tb_lines = traceback.format_exc().strip().splitlines()
-            for line in tb_lines:
-                self.log(f"[Grok][TRACE] {line}")
-            raise
         finally:
             try:
                 if context:

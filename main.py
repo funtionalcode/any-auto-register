@@ -1,12 +1,12 @@
 """account_manager - 多平台账号管理后台"""
-import logging
 import os
 import sys
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi import HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from core.db import init_db
 from core.registry import load_all
 from api.accounts import router as accounts_router
@@ -14,20 +14,14 @@ from api.tasks import router as tasks_router
 from api.platforms import router as platforms_router
 from api.proxies import router as proxies_router
 from api.config import router as config_router
-from api.mailbox import router as mailbox_router
 from api.actions import router as actions_router
 from api.integrations import router as integrations_router
 from api.auth import router as auth_router
-from api.sk_keys import router as sk_keys_router, openai_router, anthropic_apps_router
-from core.log_utils import configure_app_logging, configure_request_logging, read_app_log, read_request_log
-from core.request_logging import RequestLoggingMiddleware
-from core.runtime_timezone import configure_timezone
+from api.mail_imports import router as mail_imports_router
+from api.outlook import router as outlook_router
+from api.contribution import router as contribution_router
 
 EXPECTED_CONDA_ENV = os.getenv("APP_CONDA_ENV", "any-auto-register")
-APP_LOG_PATH = configure_app_logging()
-REQUEST_LOG_PATH = configure_request_logging()
-configure_timezone()
-logger = logging.getLogger(__name__)
 
 
 def _detect_conda_env() -> str:
@@ -45,20 +39,19 @@ def _detect_conda_env() -> str:
 
 def _print_runtime_info() -> None:
     current_env = _detect_conda_env()
-    logger.info("[Runtime] Python: %s", sys.executable)
-    logger.info("[Runtime] Conda Env: %s", current_env or "未检测到")
+    print(f"[Runtime] Python: {sys.executable}")
+    print(f"[Runtime] Conda Env: {current_env or '未检测到'}")
     if EXPECTED_CONDA_ENV == "docker":
         return
     if current_env and current_env != EXPECTED_CONDA_ENV:
-        logger.warning(
-            "当前环境为 '%s'，推荐使用 '%s' 启动，否则 Turnstile Solver 可能因依赖缺失而无法启动。",
-            current_env,
-            EXPECTED_CONDA_ENV,
+        print(
+            f"[WARN] 当前环境为 '{current_env}'，推荐使用 '{EXPECTED_CONDA_ENV}' 启动，"
+            "否则 Turnstile Solver 可能因依赖缺失而无法启动。"
         )
     elif not current_env:
-        logger.warning(
-            "未检测到 conda 环境，推荐使用 '%s' 启动，否则 Turnstile Solver 可能因依赖缺失而无法启动。",
-            EXPECTED_CONDA_ENV,
+        print(
+            f"[WARN] 未检测到 conda 环境，推荐使用 '{EXPECTED_CONDA_ENV}' 启动，"
+            "否则 Turnstile Solver 可能因依赖缺失而无法启动。"
         )
 
 
@@ -66,13 +59,10 @@ def _print_runtime_info() -> None:
 async def lifespan(app: FastAPI):
     _print_runtime_info()
     init_db()
-    from services.external_apps import ensure_managed_services_async
-
-    ensure_managed_services_async()
     load_all()
-    logger.info("[OK] 数据库初始化完成")
+    print("[OK] 数据库初始化完成")
     from core.registry import list_platforms
-    logger.info("[OK] 已加载平台: %s", [p["name"] for p in list_platforms()])
+    print(f"[OK] 已加载平台: {[p['name'] for p in list_platforms()]}")
     from core.scheduler import scheduler
     scheduler.start()
     from services.solver_manager import start_async
@@ -86,66 +76,58 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Account Manager", version="1.0.0", lifespan=lifespan)
 
+
+@app.middleware("http")
+async def auth_middleware(request: Request, call_next):
+    path = request.url.path
+    if path.startswith("/api/auth/") or not path.startswith("/api/"):
+        return await call_next(request)
+    from core.config_store import config_store as _cs
+    if not _cs.get("auth_password_hash", ""):
+        return await call_next(request)
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Bearer "):
+        return JSONResponse({"detail": "未认证，请先登录"}, status_code=401)
+    try:
+        from api.auth import verify_token
+        verify_token(auth_header[7:])
+    except HTTPException as e:
+        return JSONResponse({"detail": e.detail}, status_code=e.status_code)
+    return await call_next(request)
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
-app.add_middleware(RequestLoggingMiddleware)
 
 app.include_router(accounts_router, prefix="/api")
 app.include_router(tasks_router, prefix="/api")
 app.include_router(platforms_router, prefix="/api")
 app.include_router(proxies_router, prefix="/api")
 app.include_router(config_router, prefix="/api")
-app.include_router(mailbox_router, prefix="/api")
 app.include_router(actions_router, prefix="/api")
 app.include_router(integrations_router, prefix="/api")
 app.include_router(auth_router, prefix="/api")
-app.include_router(sk_keys_router, prefix="/api")
-app.include_router(openai_router)
-app.include_router(anthropic_apps_router)
+app.include_router(mail_imports_router, prefix="/api")
+app.include_router(outlook_router, prefix="/api")
+app.include_router(contribution_router, prefix="/api")
 
 
 @app.get("/api/solver/status")
 def solver_status():
-    from services.solver_manager import status
-
-    return status()
-
-
-@app.get("/api/solver/logs")
-def solver_logs(lines: int = 400):
-    from services.solver_manager import read_log
-
-    return read_log(max_lines=max(50, min(int(lines or 400), 2000)))
+    from services.solver_manager import is_running
+    return {"running": is_running()}
 
 
 @app.post("/api/solver/restart")
 def solver_restart():
-    from services.solver_manager import restart_async, status
-
-    restart_async()
-    data = status()
-    data["message"] = "重启中"
-    return data
-
-
-@app.get("/api/runtime/logs")
-def runtime_logs(lines: int = 400):
-    data = read_app_log(max_lines=max(50, min(int(lines or 400), 2000)))
-    data["label"] = "后端应用日志"
-    data["path"] = str(APP_LOG_PATH)
-    return data
-
-
-@app.get("/api/request/logs")
-def request_logs(lines: int = 400):
-    data = read_request_log(max_lines=max(50, min(int(lines or 400), 2000)))
-    data["label"] = "接口请求日志"
-    data["path"] = str(REQUEST_LOG_PATH)
-    return data
+    from services.solver_manager import stop, start_async
+    stop()
+    start_async()
+    return {"message": "重启中"}
 
 
 _static_dir = os.path.join(os.path.dirname(__file__), "static")

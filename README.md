@@ -8,6 +8,12 @@
 
 > ⚠️ 免责声明：本项目仅供学习与研究使用，不得用于任何商业用途。使用本项目所产生的一切后果由使用者自行承担。
 
+<p align="center">
+  <a href="README.md">中文</a> |
+  <a href="README_en.md">English</a> |
+  <a href="README_vi.md">Tiếng Việt</a>
+</p>
+
 多平台账号自动注册与管理系统，支持插件化扩展、Web UI 管理、批量注册、状态同步，以及本地 Turnstile Solver 自动拉起。
 
 ## 目录
@@ -15,6 +21,8 @@
 - [项目简介](#项目简介)
 - [当前界面与实际平台展示](#当前界面与实际平台展示)
 - [功能特性](#功能特性)
+- [自营产品](#自营产品)
+- [赞助商目录](#赞助商目录)
 - [界面预览](#界面预览)
 - [技术栈](#技术栈)
 - [环境要求](#环境要求)
@@ -26,8 +34,10 @@
 - [常见问题排查](#常见问题排查)
 - [项目结构](#项目结构)
 - [Electron 开发说明](#electron-开发说明)
-- [License](#license)
+- [用户讨论群](#用户讨论群)
+- [打赏博主](#赞助支持)
 - [Star History](#star-history)
+- [License](#license)
 
 ## 项目简介
 
@@ -56,6 +66,25 @@
 - **实时日志**：前端实时查看注册日志
 - **任务历史管理**：支持历史记录查看与批量删除
 - **插件化扩展**：可按需接入外部服务和独立管理端
+
+## 自营产品
+
+感谢以下自营产品对 any-auto-register 的支持。
+
+| Logo | 名称 | 介绍 | 官网 |
+| --- | --- | --- | --- |
+| <a href="https://faka.gsyun.cloud/" target="_blank"><img src="frontend/public/logo.png" alt="阿晨小铺" width="140" /></a> | 阿晨小铺 | 本人经营gpt等虚拟产品,诚信稳定，有保障 | [https://faka.gsyun.cloud/](https://faka.gsyun.cloud/) |
+
+## 赞助商目录
+
+感谢以下朋友与伙伴对 any-auto-register 的支持。
+
+| Logo | 名称 | 介绍 | 官网 |
+| --- | --- | --- | --- |
+| <a href="https://bestproxy.com/?keyword=hv0mj0wa" target="_blank"><img src="frontend/public/bestproxy.jpg" alt="bestproxy" width="140" /></a> | bestproxy | 提供高纯度住宅IP，支持一号一IP独享，结合真实家庭网络与指纹隔离，可实现链路环境隔离，降低关联风控概率，适配批量注册与账号养护场景。<br><br>**折扣：10%**<br>**券码（送500M）：ZCTYUH90** | [https://bestproxy.com/?keyword=hv0mj0wa](https://bestproxy.com/?keyword=hv0mj0wa) |
+| <a href="https://pay.ldxp.cn/shop/plus7" target="_blank"><img src="frontend/public/zhz7.jpg" alt="plus7卡网" width="140" /></a> | plus7卡网 | 提供稳定、低价的 GPT Plus 开通与相关服务，适合有日常使用和持续订阅需求的用户。可前往官网查看最新方案与说明。 | [https://pay.ldxp.cn/shop/plus7](https://pay.ldxp.cn/shop/plus7) |
+| <a href="https://gzxsy.vip" target="_blank"><img src="frontend/public/gzxsylogo.jpg" alt="星思研中转站" width="140" /></a> | 星思研中转站 | 为 Claude Code、Codex 等模型调用场景提供稳定中转与配套服务，适合需要高可用接口、便捷接入和持续交付支持的开发者与团队。可前往官网了解最新方案。 | [https://gzxsy.vip](https://gzxsy.vip) |
+| <a href="https://ai.xiaoye.io/" target="_blank"><img src="frontend/public/xiaoyelogo.jpg" alt="小野API中转站" width="140" /></a> | 小野API中转站 | 为 Claude Code、Codex 等模型调用场景提供稳定中转与配套服务，适合需要高可用接口、便捷接入和持续交付支持的开发者与团队。可前往官网了解最新方案。 | [https://ai.xiaoye.io/](https://ai.xiaoye.io/) |
 
 ## 界面预览
 
@@ -124,11 +153,12 @@
 
 | 服务名称 | 标识 | 说明 |
 | --- | --- | --- |
-| LuckMail | `luckmail` | 可免费领取 **125 个邮箱**用于测试，且**每天签到还能继续领取邮箱**；可通过 [https://mails.luckyous.com/9331211B](https://mails.luckyous.com/9331211B) 进入，支持博主获得少量赏金，用于维持开源测试 |
+| LuckMail | `luckmail` | 可免费领取用于测试，且**每天签到还能继续领取邮箱** |
 | MoeMail | `moemail` | 默认常用方案，自动注册账号并生成邮箱 |
 | TempMail.lol | `tempmail_lol` | 临时邮箱方案，部分地区可能需要代理 |
 | SkyMail (CloudMail) | `skymail` | 通过 API / Token / 域名使用 |
 | YYDS Mail / MaliAPI | `maliapi` | 支持域名与自动域名策略 |
+| GPTMail | `gptmail` | 基于 GPTMail API 生成临时邮箱并轮询邮件，支持已知域名时本地拼装随机地址 |
 | DuckMail | `duckmail` | 临时邮箱方案 |
 | Freemail | `freemail` | 自建邮箱服务 |
 | Laoudo | `laoudo` | 固定邮箱方案 |
@@ -402,6 +432,9 @@ CAMOUFOX_VERSION=135.0.1 CAMOUFOX_RELEASE=beta.24 docker compose build app
 | grok2api | Grok token 管理、回填、聊天/API 服务 | `https://github.com/chenyme/grok2api.git` |
 | kiro-account-manager | Kiro 账号管理相关插件 | `https://github.com/hj01857655/kiro-account-manager.git` |
 
+插件页中的 **“安装最新版 / 更新到最新版”** 会同步仓库最新代码，且已支持 **卸载**（会先停止服务，再删除本地插件目录）。
+默认按 **最新 semver tag** 更新；你也可以在“设置 → 插件 → 安装/更新策略”切回 **分支 HEAD** 模式。
+
 如果你后续要改成 `ghproxy`、`gitclone`、企业 Git 镜像或其他代理地址，需要同步修改：
 
 ```text
@@ -592,9 +625,15 @@ Electron 开发模式不会自动启动 Python 后端。
 
 然后再运行 Electron。
 
-## License
+## 用户讨论群
 
-MIT License — 仅供学习研究，禁止商业使用。
+- QQ群：**1065114376**（any-auto-register 注册机用户讨论群）
+
+## 赞助支持
+
+如果这个项目对你有帮助，欢迎赞助支持项目继续维护与更新。
+
+![打赏码](docs/images/dashang.JPG)
 
 ## Star History
 
@@ -605,3 +644,7 @@ MIT License — 仅供学习研究，禁止商业使用。
    <img alt="Star History Chart" src="https://api.star-history.com/image?repos=zc-zhangchen/any-auto-register&type=date&legend=top-left" />
  </picture>
 </a>
+
+## License
+
+MIT License — 仅供学习研究，禁止商业使用。

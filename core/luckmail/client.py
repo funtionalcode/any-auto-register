@@ -80,6 +80,7 @@ class LuckMailClient:
         api_secret: Optional[str] = None,
         timeout: float = 30.0,
         use_hmac: bool = False,
+        proxy_url: Optional[str] = None,
     ):
         self._http = LuckMailHttpClient(
             base_url=base_url,
@@ -87,6 +88,7 @@ class LuckMailClient:
             api_secret=api_secret,
             timeout=timeout,
             use_hmac=use_hmac,
+            proxy_url=proxy_url,
         )
         # 用户端 API
         self.user = UserAPI(self._http)

@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useRef } from 'react'
+import { useEffect, useState, useCallback } from 'react'
 import { useParams } from 'react-router-dom'
 import {
   Table,
@@ -15,22 +15,23 @@ import {
   Dropdown,
   Typography,
   Alert,
+  DatePicker,
+  theme,
 } from 'antd'
 import type { MenuProps } from 'antd'
 import {
   ReloadOutlined,
   CopyOutlined,
+  LinkOutlined,
   PlusOutlined,
   DownloadOutlined,
   UploadOutlined,
   MoreOutlined,
   DeleteOutlined,
-  SafetyOutlined,
-  MessageOutlined,
-  ApiOutlined,
+  SyncOutlined,
 } from '@ant-design/icons'
 import { ChatGPTRegistrationModeSwitch } from '@/components/ChatGPTRegistrationModeSwitch'
-import { useRegisterTaskCenter } from '@/components/RegisterTaskCenter'
+import { TaskLogPanel } from '@/components/TaskLogPanel'
 import { usePersistentChatGPTRegistrationMode } from '@/hooks/usePersistentChatGPTRegistrationMode'
 import { parseBooleanConfigValue } from '@/lib/configValueParsers'
 import { buildChatGPTRegistrationRequestAdapter } from '@/lib/chatgptRegistrationRequestAdapter'
@@ -38,7 +39,6 @@ import { apiFetch } from '@/lib/utils'
 import { normalizeExecutorForPlatform } from '@/lib/platformExecutorOptions'
 
 const { Text } = Typography
-const CHATGPT_OFFICIAL_QUOTA_MENU_KEY = '__chatgpt_official_quota__'
 
 const STATUS_COLORS: Record<string, string> = {
   registered: 'default',
@@ -46,96 +46,6 @@ const STATUS_COLORS: Record<string, string> = {
   subscribed: 'success',
   expired: 'warning',
   invalid: 'error',
-}
-
-const DEFAULT_ACCOUNT_PAGE_SIZE = 20
-const ACCOUNT_PAGE_SIZE_OPTIONS = [20, 50, 100, 200]
-const ACCOUNT_PAGE_SIZE_STORAGE_PREFIX = 'accounts.pageSize.'
-
-interface AccountCheckItem {
-  id: number
-  platform: string
-  email: string
-  valid: boolean
-  status: 'valid' | 'invalid' | 'error'
-  message: string
-  used_proxy?: string
-}
-
-interface AccountBatchCheckResponse {
-  total_requested: number
-  tested: number
-  valid: number
-  invalid: number
-  error: number
-  invalid_ids: number[]
-  error_ids: number[]
-  not_found: number[]
-  items: AccountCheckItem[]
-}
-
-interface AccountBatchCheckTaskSnapshot extends AccountBatchCheckResponse {
-  id: string
-  status: 'pending' | 'running' | 'done' | 'failed' | string
-  message?: string
-  error_message?: string
-  created_at: number
-  updated_at: number
-  finished_at?: number | null
-}
-
-interface ActiveAccountBatchCheckTask extends AccountBatchCheckTaskSnapshot {
-  scope: 'page' | 'selected' | number
-  title: string
-}
-
-interface CpaBackfillTaskSnapshot {
-  id: string
-  status: 'pending' | 'running' | 'done' | 'failed' | string
-  message?: string
-  error?: string
-  total: number
-  target_total: number
-  success: number
-  failed: number
-  skipped: number
-  items: any[]
-  logs?: string[]
-  reused?: boolean
-}
-
-interface ActiveCpaBackfillTask extends CpaBackfillTaskSnapshot {
-  mode: 'pending' | 'selected'
-}
-
-interface OfficialQuotaSnapshot {
-  account_id?: string
-  account_structure?: string
-  subscription_plan?: string
-  has_active_subscription?: boolean | null
-  remaining_value?: unknown
-  remaining_display?: string
-  remaining_path?: string
-  response_status_code?: number
-  fetched_at?: string
-}
-
-function getCheckStatusMeta(status: AccountCheckItem['status']) {
-  if (status === 'valid') return { color: 'success', label: '通过' }
-  if (status === 'invalid') return { color: 'error', label: '失败' }
-  return { color: 'warning', label: '异常' }
-}
-
-function readPersistedAccountPageSize(platform: string) {
-  if (typeof window === 'undefined') return DEFAULT_ACCOUNT_PAGE_SIZE
-  const raw = window.localStorage.getItem(`${ACCOUNT_PAGE_SIZE_STORAGE_PREFIX}${platform}`)
-  const value = Number(raw || DEFAULT_ACCOUNT_PAGE_SIZE)
-  return ACCOUNT_PAGE_SIZE_OPTIONS.includes(value) ? value : DEFAULT_ACCOUNT_PAGE_SIZE
-}
-
-function persistAccountPageSize(platform: string, pageSize: number) {
-  if (typeof window === 'undefined') return
-  window.localStorage.setItem(`${ACCOUNT_PAGE_SIZE_STORAGE_PREFIX}${platform}`, String(pageSize))
 }
 
 function parseExtraJson(raw: string | undefined) {
@@ -152,9 +62,10 @@ function normalizeAccount(account: any) {
   const extra = parseExtraJson(account.extra_json)
   const syncStatuses = extra.sync_statuses && typeof extra.sync_statuses === 'object' ? extra.sync_statuses : {}
   const cpaSync = syncStatuses.cpa && typeof syncStatuses.cpa === 'object' ? syncStatuses.cpa : {}
-  const officialQuota =
-    extra.official_quota && typeof extra.official_quota === 'object' ? (extra.official_quota as OfficialQuotaSnapshot) : null
-  return { ...account, extra, cpaSync, officialQuota }
+  const sub2apiSync = syncStatuses.sub2api && typeof syncStatuses.sub2api === 'object' ? syncStatuses.sub2api : {}
+  const cliproxySync = syncStatuses.cliproxyapi && typeof syncStatuses.cliproxyapi === 'object' ? syncStatuses.cliproxyapi : {}
+  const chatgptLocal = extra.chatgpt_local && typeof extra.chatgpt_local === 'object' ? extra.chatgpt_local : {}
+  return { ...account, extra, cpaSync, sub2apiSync, cliproxySync, chatgptLocal }
 }
 
 function formatSyncTime(value?: string) {
@@ -163,82 +74,309 @@ function formatSyncTime(value?: string) {
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString()
 }
 
-function formatOfficialQuotaResult(data: any) {
-  const quota = data?.official_quota && typeof data.official_quota === 'object' ? data.official_quota : {}
-  const lines: string[] = []
-  lines.push(`套餐: ${String(quota.subscription_plan || '未识别')}`)
-  lines.push(`官方剩余: ${String(quota.remaining_display || '未返回')}`)
-  lines.push(`账号结构: ${String(quota.account_structure || '-')}`)
-  if (quota.remaining_path) {
-    lines.push(`解析字段: ${String(quota.remaining_path)}`)
+function formatCreatedAt(value?: string) {
+  if (!value) return { date: '-', time: '' }
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) {
+    return { date: value, time: '' }
   }
-  if (quota.fetched_at) {
-    lines.push(`更新时间: ${formatSyncTime(String(quota.fetched_at))}`)
+  return {
+    date: date.toLocaleDateString(),
+    time: date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
   }
-
-  return lines.join('\n').trim()
 }
 
-function formatActionErrorText(result: any) {
-  const data = result?.data
-  const candidates = [
-    result?.error,
-    result?.message,
-    typeof data === 'string' ? data : '',
-    data && typeof data === 'object' ? data.message : '',
-    data && typeof data === 'object' ? data.error : '',
-  ]
-
-  for (const candidate of candidates) {
-    const text = String(candidate || '').trim()
-    if (text) return text
+function authStateMeta(state?: string) {
+  switch (state) {
+    case 'access_token_valid':
+      return { color: 'success', label: 'AT有效' }
+    case 'account_deactivated':
+      return { color: 'error', label: '已失效' }
+    case 'access_token_invalidated':
+      return { color: 'error', label: 'AT失效' }
+    case 'unauthorized':
+      return { color: 'error', label: '未授权' }
+    case 'missing_access_token':
+      return { color: 'default', label: '缺少AT' }
+    case 'banned_like':
+      return { color: 'error', label: '疑似封禁' }
+    case 'probe_failed':
+      return { color: 'warning', label: '探测失败' }
+    default:
+      return { color: 'default', label: '未探测' }
   }
+}
 
-  if (data && typeof data === 'object') {
+function codexStateMeta(state?: string) {
+  switch (state) {
+    case 'usable':
+      return { color: 'success', label: '可用' }
+    case 'account_deactivated':
+      return { color: 'error', label: '已失效' }
+    case 'access_token_invalidated':
+      return { color: 'error', label: 'AT失效' }
+    case 'unauthorized':
+      return { color: 'error', label: '未授权' }
+    case 'payment_required':
+      return { color: 'warning', label: '需付费/权限' }
+    case 'quota_exhausted':
+      return { color: 'warning', label: '额度耗尽' }
+    case 'skipped_auth_invalid':
+      return { color: 'default', label: '未测' }
+    case 'probe_failed':
+      return { color: 'warning', label: '探测失败' }
+    default:
+      return { color: 'default', label: '未探测' }
+  }
+}
+
+function planMeta(plan?: string) {
+  switch ((plan || '').toLowerCase()) {
+    case 'plus':
+      return { color: 'success', label: 'Plus' }
+    case 'team':
+      return { color: 'processing', label: 'Team' }
+    case 'enterprise':
+      return { color: 'processing', label: 'Enterprise' }
+    case 'pro':
+      return { color: 'processing', label: 'Pro' }
+    case 'free':
+      return { color: 'default', label: 'Free' }
+    default:
+      return { color: 'default', label: '未知' }
+  }
+}
+
+function formatStructuredText(value?: string) {
+  if (!value) return ''
+  const trimmed = String(value).trim()
+  if (!trimmed) return ''
+  if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
     try {
-      return JSON.stringify(data, null, 2)
+      return JSON.stringify(JSON.parse(trimmed), null, 2)
     } catch {
-      return String(data)
+      return trimmed
     }
   }
-
-  return '操作失败'
+  return trimmed
 }
 
-function buildCpaFailureLines(result: any) {
-  return (result.items || [])
-    .flatMap((item: any) =>
-      (item.results || []).map((syncResult: any) => ({
-        email: item.email,
-        platform: item.platform,
-        ok: Boolean(syncResult.ok),
-        name: syncResult.name || 'CPA',
-        msg: syncResult.msg || '',
-      })),
-    )
-    .filter((item: any) => !item.ok)
-    .map((item: any) => `[${item.platform}] ${item.email || '-'} / ${item.name}: ${item.msg || '失败'}`)
+function SummaryField({
+  label,
+  value,
+  code = false,
+}: {
+  label: string
+  value?: string
+  code?: boolean
+}) {
+  const { token } = theme.useToken()
+  if (!value) return null
+
+  const content = code ? formatStructuredText(value) : value
+  const isBlock = code || content.length > 96 || content.includes('\n')
+
+  return (
+    <div
+      style={{
+        display: 'grid',
+        gridTemplateColumns: '104px minmax(0, 1fr)',
+        gap: 12,
+        alignItems: 'start',
+      }}
+    >
+      <Text type="secondary" style={{ fontSize: 12, lineHeight: '20px' }}>
+        {label}
+      </Text>
+      {isBlock ? (
+        <pre
+          style={{
+            margin: 0,
+            padding: code ? '8px 10px' : 0,
+            borderRadius: code ? token.borderRadius : 0,
+            border: code ? `1px solid ${token.colorBorder}` : 'none',
+            background: code ? token.colorBgElevated : 'transparent',
+            color: code ? token.colorText : token.colorTextSecondary,
+            fontFamily: code ? 'SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace' : 'inherit',
+            fontSize: 12,
+            lineHeight: 1.6,
+            whiteSpace: 'pre-wrap',
+            wordBreak: 'break-word',
+            overflowWrap: 'anywhere',
+            maxHeight: code ? 160 : 'none',
+            overflow: code ? 'auto' : 'visible',
+          }}
+        >
+          {content}
+        </pre>
+      ) : (
+        <Text style={{ display: 'block', color: token.colorTextSecondary, lineHeight: '20px' }}>
+          {content}
+        </Text>
+      )}
+    </div>
+  )
 }
 
-function ActionMenu({ acc, onRefresh }: { acc: any; onRefresh: () => void }) {
-  const [actions, setActions] = useState<any[]>([])
+function DetailSection({ title, children }: { title: string; children: React.ReactNode }) {
+  const { token } = theme.useToken()
+
+  return (
+    <div
+      style={{
+        marginTop: 16,
+        padding: 14,
+        borderRadius: token.borderRadiusLG,
+        border: `1px solid ${token.colorBorder}`,
+        background: token.colorFillAlter,
+      }}
+    >
+      <div style={{ marginBottom: 10, fontWeight: 600, color: token.colorText }}>{title}</div>
+      {children}
+    </div>
+  )
+}
+
+function LocalProbeSummary({ probe }: { probe: any }) {
+  const checkedAt = probe?.checked_at || probe?.auth?.checked_at || probe?.subscription?.checked_at || probe?.codex?.checked_at
+  const auth = probe?.auth || {}
+  const subscription = probe?.subscription || {}
+  const codex = probe?.codex || {}
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+        <Tag color={authStateMeta(auth.state).color}>认证: {authStateMeta(auth.state).label}</Tag>
+        <Tag color={planMeta(subscription.plan).color}>订阅: {planMeta(subscription.plan).label}</Tag>
+        <Tag color={codexStateMeta(codex.state).color}>Codex: {codexStateMeta(codex.state).label}</Tag>
+      </div>
+      <SummaryField label="探测时间" value={checkedAt ? formatSyncTime(checkedAt) : ''} />
+      <SummaryField label="认证信息" value={auth.message} code />
+      <SummaryField label="工作区套餐" value={subscription.workspace_plan_type} />
+      <SummaryField label="Codex 信息" value={codex.message} code />
+    </div>
+  )
+}
+
+function cliproxyStateMeta(sync: any) {
+  if (!sync || Object.keys(sync).length === 0) {
+    return { color: 'default', label: '未同步' }
+  }
+  if (sync.remote_state === 'unreachable') {
+    return { color: 'error', label: '不可连接' }
+  }
+  if (sync.remote_state === 'not_found') {
+    return { color: 'default', label: '远端未发现' }
+  }
+  if (!sync.uploaded) {
+    return { color: 'default', label: '未发现' }
+  }
+  if (sync.remote_state === 'usable') {
+    return { color: 'success', label: '远端可用' }
+  }
+  if (sync.remote_state === 'account_deactivated') {
+    return { color: 'error', label: '远端已失效' }
+  }
+  if (sync.remote_state === 'access_token_invalidated') {
+    return { color: 'error', label: '远端AT失效' }
+  }
+  if (sync.remote_state === 'unauthorized') {
+    return { color: 'error', label: '远端未授权' }
+  }
+  if (sync.remote_state === 'payment_required') {
+    return { color: 'warning', label: '远端需付费/权限' }
+  }
+  if (sync.remote_state === 'quota_exhausted') {
+    return { color: 'warning', label: '远端额度耗尽' }
+  }
+  if (sync.status === 'active') {
+    return { color: 'processing', label: '远端Active' }
+  }
+  if (sync.status === 'refreshing') {
+    return { color: 'processing', label: '远端刷新中' }
+  }
+  if (sync.status === 'pending') {
+    return { color: 'default', label: '远端待处理' }
+  }
+  if (sync.status === 'error') {
+    return { color: 'error', label: '远端错误' }
+  }
+  if (sync.status === 'disabled') {
+    return { color: 'default', label: '远端禁用' }
+  }
+  return { color: 'default', label: '未同步' }
+}
+
+function uploadSyncMeta(sync: any) {
+  if (!sync || Object.keys(sync).length === 0) {
+    return { color: 'default', label: '未上传' }
+  }
+  if (sync.uploaded || sync.uploaded_at) {
+    return { color: 'success', label: '已上传' }
+  }
+  if (sync.last_attempt_ok === false) {
+    return { color: 'error', label: '失败' }
+  }
+  if (sync.last_attempt_ok === true || sync.last_attempt_at) {
+    return { color: 'processing', label: '已尝试' }
+  }
+  return { color: 'default', label: '未上传' }
+}
+
+function uploadSyncTitle(name: string, sync: any) {
+  if (!sync || Object.keys(sync).length === 0) {
+    return `${name} 未上传`
+  }
+
+  const parts: string[] = []
+  if (sync.uploaded_at) {
+    parts.push(`成功时间: ${formatSyncTime(sync.uploaded_at)}`)
+  }
+  if (sync.last_attempt_at) {
+    parts.push(`最近尝试: ${formatSyncTime(sync.last_attempt_at)}`)
+  }
+  if (sync.last_message) {
+    parts.push(`结果: ${sync.last_message}`)
+  }
+  return parts.join('\n') || `${name} 已记录状态`
+}
+
+function CliproxySyncSummary({ sync }: { sync: any }) {
+  const meta = cliproxyStateMeta(sync)
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+        <Tag color={meta.color}>{meta.label}</Tag>
+        {sync?.status ? <Tag>{`status: ${sync.status}`}</Tag> : null}
+      </div>
+      <SummaryField label="状态信息" value={sync?.status_message} code />
+      <SummaryField label="auth-file" value={sync?.name} />
+      <SummaryField label="API URL" value={sync?.base_url} />
+      <SummaryField label="同步时间" value={sync?.last_synced_at ? formatSyncTime(sync.last_synced_at) : ''} />
+      <SummaryField label="远端刷新时间" value={sync?.last_refresh ? formatSyncTime(sync.last_refresh) : ''} />
+      <SummaryField label="下次重试时间" value={sync?.next_retry_after ? formatSyncTime(sync.next_retry_after) : ''} />
+      <SummaryField label="探测信息" value={sync?.last_probe_message} code />
+    </div>
+  )
+}
+
+function ActionMenu({ acc, onRefresh, actions }: { acc: any; onRefresh: () => void; actions: any[] }) {
   const [resultOpen, setResultOpen] = useState(false)
   const [resultTitle, setResultTitle] = useState('')
   const [resultStatus, setResultStatus] = useState<'success' | 'error'>('success')
   const [resultText, setResultText] = useState('')
   const [resultUrl, setResultUrl] = useState('')
+  const [resultProbe, setResultProbe] = useState<any>(null)
+  const [resultCliproxySync, setResultCliproxySync] = useState<any>(null)
+  const [runningActionId, setRunningActionId] = useState<string | null>(null)
 
-  useEffect(() => {
-    apiFetch(`/actions/${acc.platform}`)
-      .then((d) => setActions(d.actions || []))
-      .catch(() => {})
-  }, [acc.platform])
-
-  const showResult = (title: string, status: 'success' | 'error', text: string, url = '') => {
+  const showResult = (title: string, status: 'success' | 'error', text: string, url = '', probe: any = null, cliproxySync: any = null) => {
     setResultTitle(title)
     setResultStatus(status)
     setResultText(text)
     setResultUrl(url)
+    setResultProbe(probe)
+    setResultCliproxySync(cliproxySync)
     setResultOpen(true)
   }
 
@@ -253,7 +391,11 @@ function ActionMenu({ acc, onRefresh }: { acc: any; onRefresh: () => void }) {
   }
 
   const handleAction = async (actionId: string) => {
+    if (runningActionId) return
     const actionLabel = actions.find((item) => item.id === actionId)?.label || actionId
+    const toastKey = `account-action:${acc?.id}:${actionId}`
+    setRunningActionId(actionId)
+    message.loading({ content: `${actionLabel}运行中...`, key: toastKey, duration: 0 })
 
     try {
       const r = await apiFetch(`/actions/${acc.platform}/${acc.id}/${actionId}`, {
@@ -261,87 +403,67 @@ function ActionMenu({ acc, onRefresh }: { acc: any; onRefresh: () => void }) {
         body: JSON.stringify({ params: {} }),
       })
       if (!r.ok) {
-        const detail = formatActionErrorText(r)
-        message.error(detail)
-        showResult(actionLabel, 'error', detail)
+        const data = r.data || {}
+        const probe = typeof data === 'object' && data ? data.probe || null : null
+        const cliproxySync = typeof data === 'object' && data ? data.sync || null : null
+        message.error({ content: `${actionLabel}失败`, key: toastKey })
+        showResult(actionLabel, 'error', r.error || data.message || '操作失败', '', probe, cliproxySync)
         onRefresh()
         return
       }
       const data = r.data || {}
       if (data.url || data.checkout_url || data.cashier_url) {
         const targetUrl = data.url || data.checkout_url || data.cashier_url
-        message.success('链接已生成')
+        message.success({ content: `${actionLabel}完成`, key: toastKey })
         showResult(actionLabel, 'success', '操作成功，请在弹窗中打开或复制链接。', targetUrl)
       } else {
-        message.success(data.message || '操作成功')
+        message.success({ content: data.message || `${actionLabel}完成`, key: toastKey })
+        const probe = typeof data === 'object' && data ? data.probe || null : null
+        const cliproxySync = typeof data === 'object' && data ? data.sync || null : null
         const text =
-          typeof data === 'string'
+          probe
+            ? String(data.message || '操作成功')
+            : cliproxySync
+            ? String(data.message || '操作成功')
+            : typeof data === 'string'
             ? data
             : Object.keys(data).length > 0
               ? JSON.stringify(data, null, 2)
               : '操作成功'
-        showResult(actionLabel, 'success', text)
+        showResult(actionLabel, 'success', text, '', probe, cliproxySync)
       }
       onRefresh()
     } catch (e: any) {
       const detail = e?.message ? String(e.message) : '请求失败'
-      message.error(detail)
+      message.error({ content: detail, key: toastKey })
       showResult(actionLabel, 'error', detail)
+    } finally {
+      setRunningActionId(null)
     }
   }
 
-  const handleOfficialQuota = async () => {
-    const messageKey = `official-quota-${acc.id}`
-    message.loading({ content: '正在查询官方配额...', key: messageKey, duration: 0 })
-    try {
-      const data = await apiFetch(`/accounts/${acc.id}/chatgpt/quota`, {
-        method: 'POST',
-        body: JSON.stringify({}),
-      })
-      message.success({ content: data?.message || '官方配额查询成功', key: messageKey })
-      showResult('官方配额', 'success', formatOfficialQuotaResult(data))
-      onRefresh()
-    } catch (e: any) {
-      const detail = e?.message ? String(e.message) : '官方配额查询失败'
-      message.error({ content: detail, key: messageKey })
-      showResult('官方配额', 'error', detail)
-    }
-  }
-
-  const menuItems: MenuProps['items'] = []
-  if (acc.platform === 'chatgpt') {
-    menuItems.push({
-      key: CHATGPT_OFFICIAL_QUOTA_MENU_KEY,
-      label: '查询官方配额',
-      icon: <ApiOutlined />,
-    })
-  }
-  if (menuItems.length > 0 && actions.length > 0) {
-    menuItems.push({ type: 'divider' })
-  }
-  menuItems.push(...actions.map((a) => ({
+  const menuItems: MenuProps['items'] = actions.map((a) => ({
     key: a.id,
-    label: a.label,
-  })))
+    label: runningActionId === a.id ? `${a.label}（运行中）` : a.label,
+    disabled: Boolean(runningActionId),
+  }))
 
-  if (menuItems.length === 0) return null
+  if (actions.length === 0) return null
 
   return (
     <>
       <Dropdown
         menu={{
           items: menuItems,
-          onClick: ({ key }) => {
-            const actionKey = String(key)
-            if (actionKey === CHATGPT_OFFICIAL_QUOTA_MENU_KEY) {
-              handleOfficialQuota()
-              return
-            }
-            handleAction(actionKey)
-          },
+          onClick: ({ key }) => handleAction(String(key)),
         }}
       >
-        <Button type="link" size="small" icon={<MoreOutlined />} />
+        <Button
+          type="link"
+          size="small"
+          icon={<MoreOutlined />}
+          loading={Boolean(runningActionId)}
+        />
       </Dropdown>
       <Modal
         title={resultTitle}
@@ -374,6 +496,16 @@ function ActionMenu({ acc, onRefresh }: { acc: any; onRefresh: () => void }) {
           message={resultStatus === 'success' ? '操作完成' : '操作失败'}
           style={{ marginBottom: 12 }}
         />
+        {resultProbe ? (
+          <div style={{ marginBottom: 12 }}>
+            <LocalProbeSummary probe={resultProbe} />
+          </div>
+        ) : null}
+        {resultCliproxySync ? (
+          <div style={{ marginBottom: 12 }}>
+            <CliproxySyncSummary sync={resultCliproxySync} />
+          </div>
+        ) : null}
         {resultUrl ? (
           <Space direction="vertical" style={{ width: '100%' }}>
             <Text copyable={{ text: resultUrl }} style={{ wordBreak: 'break-all' }}>
@@ -400,21 +532,19 @@ function ActionMenu({ acc, onRefresh }: { acc: any; onRefresh: () => void }) {
 }
 
 export default function Accounts() {
-  const { launchTask, completionVersion } = useRegisterTaskCenter()
   const { platform } = useParams<{ platform: string }>()
-  const exportFrameRef = useRef<HTMLIFrameElement | null>(null)
-  const exportResetTimerRef = useRef<number | null>(null)
-  const cpaTaskPollTimerRef = useRef<number | null>(null)
-  const batchCheckTaskPollTimerRef = useRef<number | null>(null)
-  const [currentPlatform, setCurrentPlatform] = useState(platform || 'trae')
+  const { token } = theme.useToken()
+  const [currentPlatform, setCurrentPlatform] = useState(platform || 'chatgpt')
   const [accounts, setAccounts] = useState<any[]>([])
+  const [platformActions, setPlatformActions] = useState<any[]>([])
   const [total, setTotal] = useState(0)
+  const [page, setPage] = useState(1)
+  const [pageSize, setPageSize] = useState(50)
   const [loading, setLoading] = useState(false)
-  const [exportLoading, setExportLoading] = useState(false)
   const [search, setSearch] = useState('')
   const [filterStatus, setFilterStatus] = useState('')
-  const [page, setPage] = useState(1)
-  const [pageSize, setPageSize] = useState(() => readPersistedAccountPageSize(platform || 'trae'))
+  const [createdAtStart, setCreatedAtStart] = useState('')
+  const [createdAtEnd, setCreatedAtEnd] = useState('')
   const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([])
 
   const [registerModalOpen, setRegisterModalOpen] = useState(false)
@@ -430,105 +560,138 @@ export default function Accounts() {
     usePersistentChatGPTRegistrationMode()
   const [importText, setImportText] = useState('')
   const [importLoading, setImportLoading] = useState(false)
+  const [taskId, setTaskId] = useState<string | null>(null)
   const [registerLoading, setRegisterLoading] = useState(false)
   const [cpaSyncLoading, setCpaSyncLoading] = useState<'pending' | 'selected' | ''>('')
-  const [cpaTask, setCpaTask] = useState<ActiveCpaBackfillTask | null>(null)
-  const [testing, setTesting] = useState<'page' | 'selected' | number | null>(null)
-  const [batchCheckTask, setBatchCheckTask] = useState<ActiveAccountBatchCheckTask | null>(null)
-  const [testDeleting, setTestDeleting] = useState(false)
-  const [testResult, setTestResult] = useState<{
-    open: boolean
-    title: string
-    data: AccountBatchCheckResponse | null
-  }>({
-    open: false,
-    title: '',
-    data: null,
-  })
+  const [cpaUploadLoading, setCpaUploadLoading] = useState<'all' | 'selected' | ''>('')
+  const [statusSyncLoading, setStatusSyncLoading] = useState<'probe_selected' | 'probe_all' | 'remote_selected' | 'remote_all' | ''>('')
 
   useEffect(() => {
     if (platform) setCurrentPlatform(platform)
   }, [platform])
 
   useEffect(() => {
-    return () => {
-      if (exportResetTimerRef.current !== null) {
-        window.clearTimeout(exportResetTimerRef.current)
-      }
-      if (cpaTaskPollTimerRef.current !== null) {
-        window.clearInterval(cpaTaskPollTimerRef.current)
-      }
-      if (batchCheckTaskPollTimerRef.current !== null) {
-        window.clearInterval(batchCheckTaskPollTimerRef.current)
-      }
-    }
-  }, [])
-
-  useEffect(() => {
-    setPage(1)
-    setPageSize(readPersistedAccountPageSize(currentPlatform))
-    setSelectedRowKeys([])
-  }, [currentPlatform])
+    if (!detailModalOpen || !currentAccount) return
+    detailForm.setFieldsValue({
+      status: currentAccount.status,
+      token: currentAccount.token,
+    })
+  }, [detailModalOpen, currentAccount, detailForm])
 
   const load = useCallback(async () => {
+    if (createdAtStart && createdAtEnd && new Date(createdAtStart).getTime() > new Date(createdAtEnd).getTime()) {
+      message.warning('开始时间不能晚于结束时间')
+      setAccounts([])
+      setTotal(0)
+      return
+    }
+
     setLoading(true)
     try {
-      const params = new URLSearchParams({
-        platform: currentPlatform,
-        page: String(page),
-        page_size: String(pageSize),
-      })
+      const params = new URLSearchParams({ platform: currentPlatform, page: String(page), page_size: String(pageSize) })
       if (search) params.set('email', search)
       if (filterStatus) params.set('status', filterStatus)
+      if (createdAtStart) params.set('created_at_start', createdAtStart)
+      if (createdAtEnd) params.set('created_at_end', createdAtEnd)
       const data = await apiFetch(`/accounts?${params}`)
-      const nextTotal = Number(data.total || 0)
-      const maxPage = Math.max(1, Math.ceil(nextTotal / pageSize))
-      if (page > maxPage) {
-        setPage(maxPage)
-        return
-      }
       setAccounts((data.items || []).map(normalizeAccount))
-      setTotal(nextTotal)
+      setTotal(data.total)
     } finally {
       setLoading(false)
     }
-  }, [currentPlatform, filterStatus, page, pageSize, search])
+  }, [currentPlatform, search, filterStatus, createdAtStart, createdAtEnd, page, pageSize])
 
   useEffect(() => {
     load()
   }, [load])
 
   useEffect(() => {
-    if (completionVersion === 0) return
-    load()
-  }, [completionVersion, load])
+    apiFetch(`/actions/${currentPlatform}`)
+      .then((data) => setPlatformActions(data.actions || []))
+      .catch(() => setPlatformActions([]))
+  }, [currentPlatform])
 
   const copyText = (text: string) => {
     navigator.clipboard.writeText(text)
     message.success('已复制')
   }
 
+  const getRefreshToken = (record: any): string => {
+    try {
+      const extra = JSON.parse(record.extra_json || '{}')
+      return extra.refresh_token || extra.refreshToken || ''
+    } catch {
+      return ''
+    }
+  }
+
   const exportCsv = () => {
-    if (exportLoading) return
-    const params = new URLSearchParams()
-    params.set('platform', currentPlatform)
-    if (filterStatus) params.set('status', filterStatus)
-    params.set('_ts', String(Date.now()))
-
-    setExportLoading(true)
-    if (exportResetTimerRef.current !== null) {
-      window.clearTimeout(exportResetTimerRef.current)
+    const quoteCsv = (value: any) => {
+      const text = value == null ? '' : String(value)
+      return `"${text.replace(/"/g, '""')}"`
     }
-    exportResetTimerRef.current = window.setTimeout(() => {
-      setExportLoading(false)
-      exportResetTimerRef.current = null
-    }, 1500)
 
-    const targetUrl = `/api/accounts/export?${params.toString()}`
-    if (exportFrameRef.current) {
-      exportFrameRef.current.src = targetUrl
+    const downloadCsv = (content: string) => {
+      const blob = new Blob([`\uFEFF${content}`], { type: 'text/csv;charset=utf-8;' })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `${currentPlatform}_accounts.csv`
+      a.click()
+      URL.revokeObjectURL(url)
     }
-    message.success('已开始导出，界面可继续操作')
+
+    if (currentPlatform === 'kiro') {
+      const header = ['邮箱', '昵称', '登录方式', 'RefreshToken', 'ClientId', 'ClientSecret', 'Region']
+      const rows = accounts.map((a) => {
+        const nickname = a.extra?.name || String(a.email || '').split('@')[0] || ''
+        const provider = a.extra?.provider || 'BuilderId'
+        const refreshToken = a.extra?.refreshToken || ''
+        const clientId = a.extra?.clientId || ''
+        const clientSecret = a.extra?.clientSecret || ''
+        const region = a.extra?.region || 'us-east-1'
+
+        return [
+          a.email || '',
+          nickname,
+          provider,
+          refreshToken,
+          clientId,
+          clientSecret,
+          region,
+        ].map(quoteCsv).join(',')
+      })
+
+      downloadCsv([header.map(quoteCsv).join(','), ...rows].join('\r\n'))
+      return
+    }
+
+    const header = ['email', 'password', 'status', 'region', 'cashier_url', 'created_at']
+    if (currentPlatform === 'kiro') {
+      header.push('accessToken', 'refreshToken', 'clientId', 'clientSecret')
+    } else if (currentPlatform === 'chatgpt') {
+      header.push('token', 'refresh_token')
+    } else {
+      header.push('token')
+    }
+
+    const rows = accounts.map((a) => {
+      const baseRow = [a.email, a.password, a.status, a.region, a.cashier_url, a.created_at].map(quoteCsv)
+      if (currentPlatform === 'kiro') {
+        baseRow.push(quoteCsv(a.extra?.accessToken || a.extra?.webAccessToken || a.token))
+        baseRow.push(quoteCsv(a.extra?.refreshToken))
+        baseRow.push(quoteCsv(a.extra?.clientId))
+        baseRow.push(quoteCsv(a.extra?.clientSecret))
+      } else if (currentPlatform === 'chatgpt') {
+        baseRow.push(quoteCsv(a.token))
+        baseRow.push(quoteCsv(getRefreshToken(a)))
+      } else {
+        baseRow.push(quoteCsv(a.token))
+      }
+      return baseRow.join(',')
+    })
+
+    downloadCsv([header.map(quoteCsv).join(','), ...rows].join('\r\n'))
   }
 
   const handleDelete = async (id: number) => {
@@ -587,19 +750,33 @@ export default function Accounts() {
       const cfg = await apiFetch('/config')
       const executorType = normalizeExecutorForPlatform(currentPlatform, cfg.default_executor)
       const registerExtra = {
-        mail_provider: cfg.mail_provider || 'laoudo',
+        mail_provider: cfg.mail_provider || 'luckmail',
+        applemail_base_url: cfg.applemail_base_url,
+        applemail_pool_dir: cfg.applemail_pool_dir,
+        applemail_pool_file: cfg.applemail_pool_file,
+        applemail_mailboxes: cfg.applemail_mailboxes,
         laoudo_auth: cfg.laoudo_auth,
         laoudo_email: cfg.laoudo_email,
         laoudo_account_id: cfg.laoudo_account_id,
+        gptmail_base_url: cfg.gptmail_base_url,
+        gptmail_api_key: cfg.gptmail_api_key,
+        gptmail_domain: cfg.gptmail_domain,
         maliapi_base_url: cfg.maliapi_base_url,
         maliapi_api_key: cfg.maliapi_api_key,
         maliapi_domain: cfg.maliapi_domain,
         maliapi_auto_domain_strategy: cfg.maliapi_auto_domain_strategy,
         yescaptcha_key: cfg.yescaptcha_key,
         moemail_api_url: cfg.moemail_api_url,
+        moemail_api_key: cfg.moemail_api_key,
         skymail_api_base: cfg.skymail_api_base,
         skymail_token: cfg.skymail_token,
         skymail_domain: cfg.skymail_domain,
+        cloudmail_api_base: cfg.cloudmail_api_base,
+        cloudmail_admin_email: cfg.cloudmail_admin_email,
+        cloudmail_admin_password: cfg.cloudmail_admin_password,
+        cloudmail_domain: cfg.cloudmail_domain,
+        cloudmail_subdomain: cfg.cloudmail_subdomain,
+        cloudmail_timeout: cfg.cloudmail_timeout,
         duckmail_address: cfg.duckmail_address,
         duckmail_password: cfg.duckmail_password,
         duckmail_api_url: cfg.duckmail_api_url,
@@ -609,12 +786,14 @@ export default function Accounts() {
         freemail_admin_token: cfg.freemail_admin_token,
         freemail_username: cfg.freemail_username,
         freemail_password: cfg.freemail_password,
+        freemail_domain: cfg.freemail_domain,
         cfworker_api_url: cfg.cfworker_api_url,
         cfworker_admin_token: cfg.cfworker_admin_token,
         cfworker_custom_auth: cfg.cfworker_custom_auth,
         cfworker_domain: cfg.cfworker_domain,
         cfworker_subdomain: cfg.cfworker_subdomain,
         cfworker_random_subdomain: parseBooleanConfigValue(cfg.cfworker_random_subdomain),
+        cfworker_random_name_subdomain: parseBooleanConfigValue(cfg.cfworker_random_name_subdomain),
         cfworker_fingerprint: cfg.cfworker_fingerprint,
         smstome_cookie: cfg.smstome_cookie,
         smstome_country_slugs: cfg.smstome_country_slugs,
@@ -636,20 +815,20 @@ export default function Accounts() {
         ? chatgptRegistrationRequestAdapter.extendExtra(registerExtra)
         : registerExtra
 
-      await launchTask({
-        platform: currentPlatform,
-        count: values.count,
-        concurrency: values.concurrency,
-        register_delay_seconds: values.register_delay_seconds || 0,
-        executor_type: executorType,
-        captcha_solver: cfg.default_captcha_solver || 'yescaptcha',
-        proxy: null,
-        extra: adaptedRegisterExtra,
+      const res = await apiFetch('/tasks/register', {
+        method: 'POST',
+        body: JSON.stringify({
+          platform: currentPlatform,
+          count: values.count,
+          concurrency: values.concurrency,
+          register_delay_seconds: values.register_delay_seconds || 0,
+          executor_type: executorType,
+          captcha_solver: cfg.default_captcha_solver || 'yescaptcha',
+          proxy: null,
+          extra: adaptedRegisterExtra,
+        }),
       })
-      message.success('注册任务已启动，可最小化到右下角后台执行')
-      setRegisterModalOpen(false)
-    } catch (e: any) {
-      message.error(`启动注册任务失败: ${e?.message || e || '未知错误'}`)
+      setTaskId(res.task_id)
     } finally {
       setRegisterLoading(false)
     }
@@ -667,13 +846,24 @@ export default function Accounts() {
   }
 
   const showCpaSyncResult = (title: string, result: any) => {
-    const lines = buildCpaFailureLines(result)
+    const lines = (result.items || [])
+      .flatMap((item: any) =>
+        (item.results || []).map((syncResult: any) => ({
+          email: item.email,
+          platform: item.platform,
+          ok: Boolean(syncResult.ok),
+          name: syncResult.name || 'CPA',
+          msg: syncResult.msg || '',
+        })),
+      )
+      .filter((item: any) => !item.ok)
+      .map((item: any) => `[${item.platform}] ${item.email || '-'} / ${item.name}: ${item.msg || '失败'}`)
+
     if (lines.length === 0) return
 
-    Modal.error({
+    Modal.info({
       title,
       width: 760,
-      okText: '关闭',
       content: (
         <pre
           style={{
@@ -695,117 +885,35 @@ export default function Accounts() {
     })
   }
 
-  const stopCpaTaskPolling = () => {
-    if (cpaTaskPollTimerRef.current !== null) {
-      window.clearInterval(cpaTaskPollTimerRef.current)
-      cpaTaskPollTimerRef.current = null
-    }
-  }
+  const showBatchActionResult = (title: string, result: any) => {
+    const lines = (result.items || [])
+      .filter((item: any) => !item.ok)
+      .map((item: any) => `[${item.id || '-'}] ${item.email || '-'}: ${item.message || '失败'}`)
 
-  const stopBatchCheckTaskPolling = () => {
-    if (batchCheckTaskPollTimerRef.current !== null) {
-      window.clearInterval(batchCheckTaskPollTimerRef.current)
-      batchCheckTaskPollTimerRef.current = null
-    }
-  }
+    if (lines.length === 0) return
 
-  const finalizeCpaTask = async (snapshot: ActiveCpaBackfillTask) => {
-    stopCpaTaskPolling()
-    setCpaSyncLoading('')
-
-    const actionLabel = snapshot.mode === 'selected' ? '所选账号 CPA 上传' : '未上传账号 CPA 补传'
-    const failureLines = buildCpaFailureLines(snapshot)
-
-    if (snapshot.status === 'failed') {
-      message.error(snapshot.error || `${actionLabel}失败`)
-    } else if (!snapshot.total) {
-      message.info('没有可处理的账号')
-    } else if (!snapshot.failed) {
-      message.success(`${actionLabel}完成：成功 ${snapshot.success} / ${snapshot.total}`)
-    } else if (!snapshot.success) {
-      message.error(failureLines[0] || `${actionLabel}失败：成功 ${snapshot.success} / ${snapshot.total}`)
-    } else {
-      message.warning(failureLines[0] || `${actionLabel}部分完成：成功 ${snapshot.success} / ${snapshot.total}`)
-    }
-
-    showCpaSyncResult(`${actionLabel}结果`, snapshot)
-    await load()
-  }
-
-  const pollCpaTask = async (taskId: string, mode: 'pending' | 'selected') => {
-    try {
-      const snapshot = await apiFetch(`/integrations/backfill/tasks/${taskId}`) as CpaBackfillTaskSnapshot
-      const nextTask: ActiveCpaBackfillTask = { ...snapshot, mode }
-      setCpaTask(nextTask)
-
-      if (snapshot.status === 'done' || snapshot.status === 'failed') {
-        await finalizeCpaTask(nextTask)
-      }
-      return snapshot
-    } catch (e: any) {
-      stopCpaTaskPolling()
-      setCpaSyncLoading('')
-      message.error(`获取 CPA 后台任务状态失败: ${e?.message || e || '未知错误'}`)
-      return null
-    }
-  }
-
-  const finalizeBatchCheckTask = async (snapshot: ActiveAccountBatchCheckTask) => {
-    stopBatchCheckTaskPolling()
-    setTesting(null)
-    setBatchCheckTask(null)
-
-    const result: AccountBatchCheckResponse = {
-      total_requested: snapshot.total_requested,
-      tested: snapshot.tested,
-      valid: snapshot.valid,
-      invalid: snapshot.invalid,
-      error: snapshot.error,
-      invalid_ids: snapshot.invalid_ids,
-      error_ids: snapshot.error_ids,
-      not_found: snapshot.not_found,
-      items: snapshot.items,
-    }
-
-    if (snapshot.status === 'failed') {
-      message.error(snapshot.error_message || '账号测试失败')
-    } else if (result.invalid === 0 && result.error === 0) {
-      message.success(`测试完成：${result.valid} 个通过`)
-    } else if (result.error === 0) {
-      message.warning(`测试完成：通过 ${result.valid}，失败 ${result.invalid}`)
-    } else {
-      message.warning(`测试完成：通过 ${result.valid}，失败 ${result.invalid}，异常 ${result.error}`)
-    }
-
-    setTestResult({
-      open: true,
-      title: snapshot.title,
-      data: result,
+    Modal.info({
+      title,
+      width: 760,
+      content: (
+        <pre
+          style={{
+            margin: 0,
+            maxHeight: 360,
+            overflow: 'auto',
+            padding: 12,
+            borderRadius: 8,
+            background: 'rgba(127,127,127,0.08)',
+            fontSize: 12,
+            lineHeight: 1.5,
+            whiteSpace: 'pre-wrap',
+            wordBreak: 'break-word',
+          }}
+        >
+          {lines.join('\n')}
+        </pre>
+      ),
     })
-    await load()
-  }
-
-  const pollBatchCheckTask = async (
-    taskId: string,
-    scope: 'page' | 'selected' | number,
-    title: string,
-  ) => {
-    try {
-      const snapshot = await apiFetch(`/accounts/batch-check/tasks/${taskId}`) as AccountBatchCheckTaskSnapshot
-      const nextTask: ActiveAccountBatchCheckTask = { ...snapshot, scope, title }
-      setBatchCheckTask(nextTask)
-
-      if (snapshot.status === 'done' || snapshot.status === 'failed') {
-        await finalizeBatchCheckTask(nextTask)
-      }
-      return snapshot
-    } catch (e: any) {
-      stopBatchCheckTaskPolling()
-      setTesting(null)
-      setBatchCheckTask(null)
-      message.error(`获取账号测试任务状态失败: ${e?.message || e || '未知错误'}`)
-      return null
-    }
   }
 
   const handleCpaBackfill = async (mode: 'pending' | 'selected') => {
@@ -833,320 +941,426 @@ export default function Accounts() {
 
     setCpaSyncLoading(mode)
     try {
-      const task = await apiFetch('/integrations/backfill/async', {
+      const result = await apiFetch('/integrations/backfill', {
         method: 'POST',
         body: JSON.stringify(body),
-      }) as CpaBackfillTaskSnapshot
+      })
 
-      const nextTask: ActiveCpaBackfillTask = { ...task, mode }
-      setCpaTask(nextTask)
-      message.success(task.reused ? '已有 CPA 后台任务在执行，已切换到该任务' : 'CPA 上传已转入后台执行')
-
-      stopCpaTaskPolling()
-      const snapshot = await pollCpaTask(task.id, mode)
-      if (snapshot && snapshot.status !== 'done' && snapshot.status !== 'failed') {
-        cpaTaskPollTimerRef.current = window.setInterval(() => {
-          void pollCpaTask(task.id, mode)
-        }, 2000)
+      const actionLabel = mode === 'selected' ? '所选账号远端补传' : '远端未发现账号补传'
+      if (!result.total) {
+        message.info('没有可处理的账号')
+      } else if (!result.failed && !result.skipped) {
+        message.success(`${actionLabel}完成：成功 ${result.success} / ${result.total}`)
+      } else if (!result.failed) {
+        message.success(`${actionLabel}完成：成功 ${result.success}，跳过 ${result.skipped} / ${result.total}`)
+      } else if (!result.success) {
+        message.error(`${actionLabel}失败：成功 ${result.success}，跳过 ${result.skipped} / ${result.total}`)
+      } else {
+        message.warning(`${actionLabel}部分完成：成功 ${result.success}，跳过 ${result.skipped} / ${result.total}`)
       }
-    } catch (e: any) {
-      stopCpaTaskPolling()
-      message.error(`CPA 上传失败: ${e.message}`)
-      setCpaSyncLoading('')
-    } finally {
-      if (!cpaTaskPollTimerRef.current) {
-        setCpaSyncLoading('')
-      }
-    }
-  }
 
-  const runBatchCheck = async (
-    ids: React.Key[],
-    scope: 'page' | 'selected' | number,
-    title: string,
-  ) => {
-    const normalizedIds = Array.from(new Set(
-      ids
-        .map((value) => Number(value))
-        .filter((value) => Number.isInteger(value) && value > 0),
-    ))
-
-    if (normalizedIds.length === 0) {
-      message.warning('没有可测试的账号')
-      return
-    }
-    if (testing !== null) {
-      message.info('已有账号测试任务正在执行')
-      return
-    }
-
-    setTesting(scope)
-    try {
-      const task = await apiFetch('/accounts/batch-check/async', {
-        method: 'POST',
-        body: JSON.stringify({ ids: normalizedIds }),
-      }) as AccountBatchCheckTaskSnapshot
-
-      setBatchCheckTask({ ...task, scope, title })
-      message.success('账号测试已转入后台执行')
-
-      stopBatchCheckTaskPolling()
-      const snapshot = await pollBatchCheckTask(task.id, scope, title)
-      if (snapshot && snapshot.status !== 'done' && snapshot.status !== 'failed') {
-        batchCheckTaskPollTimerRef.current = window.setInterval(() => {
-          void pollBatchCheckTask(task.id, scope, title)
-        }, 2000)
-      }
-    } catch (e: any) {
-      message.error(`测试失败: ${e?.message || e || '未知错误'}`)
-      setTesting(null)
-      setBatchCheckTask(null)
-    } finally {
-      if (!batchCheckTaskPollTimerRef.current) {
-        setTesting(null)
-      }
-    }
-  }
-
-  const handleDeleteInvalidFromTest = async () => {
-    const invalidIds = testResult.data?.invalid_ids || []
-    if (invalidIds.length === 0) return
-
-    setTestDeleting(true)
-    try {
-      const result = await apiFetch('/accounts/batch-delete', {
-        method: 'POST',
-        body: JSON.stringify({ ids: invalidIds }),
-      }) as { deleted: number }
-
-      message.success(`已删除 ${result.deleted} 个测试失败账号`)
-      setSelectedRowKeys((current) => current.filter((key) => !invalidIds.includes(Number(key))))
-      setTestResult({ open: false, title: '', data: null })
+      showCpaSyncResult(`${actionLabel}结果`, result)
       await load()
     } catch (e: any) {
-      message.error(`删除失败账号失败: ${e?.message || e || '未知错误'}`)
+      message.error(`CPA 上传失败: ${e.message}`)
     } finally {
-      setTestDeleting(false)
+      setCpaSyncLoading('')
     }
+  }
+
+  const handleBatchStatusSync = async (kind: 'probe' | 'remote', scope: 'selected' | 'all') => {
+    if (currentPlatform !== 'chatgpt') return
+
+    const loadingKey = `${kind}_${scope}` as typeof statusSyncLoading
+    const actionId = kind === 'probe' ? 'probe_local_status' : 'sync_cliproxyapi_status'
+    const actionLabel = kind === 'probe' ? '本地状态同步' : 'CLIProxyAPI 状态同步'
+    const scopeLabel = scope === 'selected' ? '所选账号' : '当前筛选账号'
+    const toastKey = `status-sync:${loadingKey}`
+
+    const body: Record<string, unknown> = {
+      params: {},
+    }
+
+    if (scope === 'selected') {
+      const accountIds = Array.from(selectedRowKeys)
+        .map((value) => Number(value))
+        .filter((value) => Number.isInteger(value) && value > 0)
+
+      if (accountIds.length === 0) {
+        message.warning('请先选择要同步的账号')
+        return
+      }
+      body.account_ids = accountIds
+    } else {
+      body.all_filtered = true
+      if (search) body.email = search
+      if (filterStatus) body.status = filterStatus
+    }
+
+    setStatusSyncLoading(loadingKey)
+    message.loading({ content: `${scopeLabel}${actionLabel}进行中...`, key: toastKey, duration: 0 })
+    try {
+      const result = await apiFetch(`/actions/${currentPlatform}/${actionId}/batch`, {
+        method: 'POST',
+        body: JSON.stringify(body),
+      })
+
+      if (!result.total) {
+        message.info({ content: '没有可处理的账号', key: toastKey })
+      } else if (!result.failed) {
+        message.success({ content: `${scopeLabel}${actionLabel}完成：成功 ${result.success} / ${result.total}`, key: toastKey })
+      } else if (!result.success) {
+        message.error({ content: `${scopeLabel}${actionLabel}失败：成功 ${result.success} / ${result.total}`, key: toastKey })
+      } else {
+        message.warning({ content: `${scopeLabel}${actionLabel}部分完成：成功 ${result.success} / ${result.total}`, key: toastKey })
+      }
+
+      showBatchActionResult(`${scopeLabel}${actionLabel}结果`, result)
+      await load()
+    } catch (e: any) {
+      message.error({ content: `${actionLabel}失败: ${e.message}`, key: toastKey })
+    } finally {
+      setStatusSyncLoading('')
+    }
+  }
+
+  const handleBatchUploadCpa = async (scope: 'selected' | 'all') => {
+    const toastKey = `batch-upload-cpa:${scope}`
+    const scopeLabel = scope === 'selected' ? '所选账号' : '当前筛选账号'
+
+    const body: Record<string, unknown> = {
+      params: {},
+    }
+
+    if (scope === 'selected') {
+      const accountIds = Array.from(selectedRowKeys)
+        .map((value) => Number(value))
+        .filter((value) => Number.isInteger(value) && value > 0)
+
+      if (accountIds.length === 0) {
+        message.warning('请先选择要导入 CPA 的账号')
+        return
+      }
+      body.account_ids = accountIds
+    } else {
+      body.all_filtered = true
+      if (search) body.email = search
+      if (filterStatus) body.status = filterStatus
+    }
+
+    setCpaUploadLoading(scope)
+    message.loading({ content: `${scopeLabel}导入 CPA 进行中...`, key: toastKey, duration: 0 })
+    try {
+      const result = await apiFetch(`/actions/${currentPlatform}/upload_cpa/batch`, {
+        method: 'POST',
+        body: JSON.stringify(body),
+      })
+
+      if (!result.total) {
+        message.info({ content: '没有可处理的账号', key: toastKey })
+      } else if (!result.failed) {
+        message.success({ content: `${scopeLabel}导入 CPA 完成：成功 ${result.success} / ${result.total}`, key: toastKey })
+      } else if (!result.success) {
+        message.error({ content: `${scopeLabel}导入 CPA 失败：成功 ${result.success} / ${result.total}`, key: toastKey })
+      } else {
+        message.warning({ content: `${scopeLabel}导入 CPA 部分完成：成功 ${result.success} / ${result.total}`, key: toastKey })
+      }
+
+      showBatchActionResult(`${scopeLabel}导入 CPA 结果`, result)
+      await load()
+    } catch (e: any) {
+      message.error({ content: `导入 CPA 失败: ${e.message}`, key: toastKey })
+    } finally {
+      setCpaUploadLoading('')
+    }
+  }
+
+  const getStatusSyncScope = (): 'selected' | 'all' => (selectedRowKeys.length > 0 ? 'selected' : 'all')
+
+  const getBackfillScope = (): 'selected' | 'pending' => (selectedRowKeys.length > 0 ? 'selected' : 'pending')
+
+  const getUploadCpaScope = (): 'selected' | 'all' => (selectedRowKeys.length > 0 ? 'selected' : 'all')
+
+  const backfillButtonLabel = () => {
+    const scope = getBackfillScope()
+    const count = scope === 'selected' ? selectedRowKeys.length : total
+    return scope === 'selected' ? `补传所选远端未发现 (${count})` : `补传远端未发现 (${count})`
+  }
+
+  const uploadCpaButtonLabel = () => {
+    const scope = getUploadCpaScope()
+    const count = scope === 'selected' ? selectedRowKeys.length : total
+    return scope === 'selected' ? `导入所选 CPA (${count})` : `导入筛选 CPA (${count})`
+  }
+
+  const isChatgptPlatform = currentPlatform === 'chatgpt'
+  const hasUploadCpaAction = platformActions.some((item) => item?.id === 'upload_cpa')
+  const monospaceStyle: React.CSSProperties = {
+    fontFamily: 'SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace',
+    fontSize: 12,
+  }
+  const secondaryTextStyle: React.CSSProperties = {
+    fontSize: 12,
+    color: token.colorTextSecondary,
+  }
+  const cellStackStyle: React.CSSProperties = {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 6,
+    minWidth: 0,
+  }
+  const secretPreviewStyle: React.CSSProperties = {
+    ...monospaceStyle,
+    filter: 'blur(4px)',
+    whiteSpace: 'nowrap',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    maxWidth: '100%',
+    opacity: 0.9,
+  }
+  const compactPanelStyle: React.CSSProperties = {
+    padding: '8px 10px',
+    borderRadius: token.borderRadiusLG,
+    border: `1px solid ${token.colorBorder}`,
+    background: token.colorFillAlter,
   }
 
   const columns: any[] = [
     {
-      title: 'ID',
-      dataIndex: 'id',
-      key: 'id',
-      width: 88,
-      render: (value: number) => (
-        <Text copyable={{ text: String(value) }} style={{ fontFamily: 'monospace', fontSize: 12 }}>
-          {value}
-        </Text>
-      ),
-    },
-    {
       title: '邮箱',
       dataIndex: 'email',
       key: 'email',
-      render: (text: string) => (
-        <Text copyable={{ text }} style={{ fontFamily: 'monospace', fontSize: 12 }}>
-          {text}
-        </Text>
+      width: 260,
+      render: (text: string, record: any) => (
+        <div style={cellStackStyle}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+            <Text
+              style={{ ...monospaceStyle, flex: 1, minWidth: 0, whiteSpace: 'nowrap' }}
+              ellipsis={{ tooltip: text }}
+            >
+              {text}
+            </Text>
+            <Button type="text" size="small" icon={<CopyOutlined />} onClick={() => copyText(text)} />
+          </div>
+          <Text type="secondary" style={secondaryTextStyle} ellipsis={{ tooltip: record.user_id || `账号 #${record.id}` }}>
+            {record.user_id ? `UID: ${record.user_id}` : `账号 #${record.id}`}
+          </Text>
+        </div>
       ),
     },
     {
       title: '密码',
       dataIndex: 'password',
       key: 'password',
+      width: 150,
       render: (text: string) => (
-        <Space>
-          <Text style={{ fontFamily: 'monospace', fontSize: 12, filter: 'blur(4px)' }}>{text}</Text>
+        <Space size={6} style={{ width: '100%', justifyContent: 'space-between' }}>
+          <Text style={{ ...secretPreviewStyle, maxWidth: 90 }} title={text}>
+            {text}
+          </Text>
           <Button type="text" size="small" icon={<CopyOutlined />} onClick={() => copyText(text)} />
         </Space>
       ),
     },
     {
+      title: 'RT',
+      key: 'refresh_token',
+      width: 120,
+      render: (_: any, record: any) => {
+        const rt = getRefreshToken(record)
+        if (!rt) return <span style={{ color: '#ccc' }}>-</span>
+        return (
+          <Space size={6} style={{ width: '100%', justifyContent: 'space-between' }}>
+            <Text style={{ ...secretPreviewStyle, fontSize: 11, maxWidth: 58 }} title={rt}>
+              {rt}
+            </Text>
+            <Button type="text" size="small" icon={<CopyOutlined />} onClick={() => copyText(rt)} />
+          </Space>
+        )
+      },
+    },
+    {
       title: '状态',
       dataIndex: 'status',
       key: 'status',
+      width: 110,
       render: (status: string) => <Tag color={STATUS_COLORS[status] || 'default'}>{status}</Tag>,
     },
+  ]
+
+  if (isChatgptPlatform) {
+    columns.push(
+      {
+        title: '本地状态',
+        key: 'chatgpt_local_state',
+        width: 320,
+        render: (_: any, record: any) => {
+          const auth = record.chatgptLocal?.auth || {}
+          const subscription = record.chatgptLocal?.subscription || {}
+          const codex = record.chatgptLocal?.codex || {}
+          const cpaSync = record.cpaSync || {}
+          const sub2apiSync = record.sub2apiSync || {}
+          const authMeta = authStateMeta(auth.state)
+          const planTag = planMeta(subscription.plan)
+          const codexMeta = codexStateMeta(codex.state)
+          const cpaMeta = uploadSyncMeta(cpaSync)
+          const sub2apiMeta = uploadSyncMeta(sub2apiSync)
+
+          return (
+            <div style={{ ...cellStackStyle, ...compactPanelStyle }}>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                <Tag color={authMeta.color}>{authMeta.label}</Tag>
+                <Tag color={planTag.color}>{planTag.label}</Tag>
+                <Tag color={codexMeta.color}>Codex {codexMeta.label}</Tag>
+              </div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                <Tag color={cpaMeta.color} title={uploadSyncTitle('CPA', cpaSync)}>
+                  CPA {cpaMeta.label}
+                </Tag>
+                <Tag color={sub2apiMeta.color} title={uploadSyncTitle('Sub2API', sub2apiSync)}>
+                  Sub2API {sub2apiMeta.label}
+                </Tag>
+              </div>
+            </div>
+          )
+        },
+      },
+      {
+        title: 'CLIProxyAPI',
+        key: 'cliproxy_sync',
+        width: 170,
+        render: (_: any, record: any) => {
+          const sync = record.cliproxySync || {}
+          const meta = cliproxyStateMeta(sync)
+
+          return (
+            <div style={{ ...cellStackStyle, ...compactPanelStyle }}>
+              <Tag color={meta.color}>{meta.label}</Tag>
+            </div>
+          )
+        },
+      },
+    )
+  } else {
+    if (hasUploadCpaAction) {
+      columns.push({
+        title: 'CPA',
+        key: 'cpa_sync',
+        width: 120,
+        render: (_: any, record: any) => {
+          const cpaMeta = uploadSyncMeta(record.cpaSync || {})
+          return (
+            <Tag color={cpaMeta.color} title={uploadSyncTitle('CPA', record.cpaSync || {})}>
+              {cpaMeta.label}
+            </Tag>
+          )
+        },
+      })
+    }
+
+    columns.push(
+      {
+        title: '地区',
+        dataIndex: 'region',
+        key: 'region',
+        width: 100,
+        render: (text: string) => text || '-',
+      },
+      {
+        title: '试用链接',
+        dataIndex: 'cashier_url',
+        key: 'cashier_url',
+        width: 120,
+        render: (url: string) =>
+          url ? (
+            <Space size={0}>
+              <Button type="text" size="small" icon={<CopyOutlined />} onClick={() => copyText(url)} />
+              <Button type="text" size="small" icon={<LinkOutlined />} onClick={() => window.open(url, '_blank')} />
+            </Space>
+          ) : (
+            '-'
+          ),
+      },
+    )
+  }
+
+  columns.push(
     {
       title: '注册时间',
       dataIndex: 'created_at',
       key: 'created_at',
-      render: (text: string) => (text ? new Date(text).toLocaleDateString() : '-'),
+      width: 132,
+      render: (text: string) => {
+        const formatted = formatCreatedAt(text)
+        return (
+          <div style={cellStackStyle}>
+            <Text style={{ fontSize: 13 }}>{formatted.date}</Text>
+            {formatted.time ? <Text type="secondary" style={secondaryTextStyle}>{formatted.time}</Text> : null}
+          </div>
+        )
+      },
     },
     {
       title: '操作',
       key: 'action',
+      width: 150,
+      fixed: isChatgptPlatform ? 'right' : undefined,
       render: (_: any, record: any) => (
-        <Space>
-          {currentPlatform === 'chatgpt' ? (
-            <Button
-              type="link"
-              size="small"
-              icon={<MessageOutlined />}
-              onClick={() => window.open(`/accounts/chatgpt/${record.id}/conversation`, '_blank', 'noopener,noreferrer')}
-            >
-              对话
-            </Button>
-          ) : null}
-          <Button
-            type="link"
-            size="small"
-            loading={testing === record.id}
-            disabled={testing !== null && testing !== record.id}
-            onClick={() => runBatchCheck([record.id], record.id, `${record.email} 测试结果`)}
-          >
-            测试
-          </Button>
+        <Space size={4} wrap>
           <Button type="link" size="small" onClick={() => { setCurrentAccount(record); setDetailModalOpen(true); }}>
             详情
           </Button>
-          <Popconfirm title="确认删除？" onConfirm={() => handleDelete(record.id)}>
+          <Popconfirm
+            title="确认删除该账号吗？"
+            onConfirm={() => handleDelete(record.id)}
+            okText="删除"
+            cancelText="取消"
+            okButtonProps={{ danger: true }}
+          >
             <Button type="link" size="small" danger>
               删除
             </Button>
           </Popconfirm>
-          <ActionMenu acc={record} onRefresh={load} />
+          <ActionMenu acc={record} onRefresh={load} actions={platformActions} />
         </Space>
       ),
     },
+  )
+
+  const statusSyncMenuItems: MenuProps['items'] = [
+    {
+      key: `probe:${getStatusSyncScope()}`,
+      label:
+        getStatusSyncScope() === 'selected'
+          ? `同步所选本地状态 (${selectedRowKeys.length})`
+          : `同步当前筛选本地状态 (${total})`,
+      disabled: getStatusSyncScope() === 'selected' ? selectedRowKeys.length === 0 : total === 0,
+    },
+    {
+      key: `remote:${getStatusSyncScope()}`,
+      label:
+        getStatusSyncScope() === 'selected'
+          ? `同步所选 CLIProxyAPI 状态 (${selectedRowKeys.length})`
+          : `同步当前筛选 CLIProxyAPI 状态 (${total})`,
+      disabled: getStatusSyncScope() === 'selected' ? selectedRowKeys.length === 0 : total === 0,
+    },
   ]
-
-  if (currentPlatform === 'chatgpt') {
-    columns.splice(4, 0, {
-      title: 'CPA',
-      key: 'cpa_sync',
-      render: (_: any, record: any) => {
-        const sync = record.cpaSync || {}
-        const uploaded = Boolean(sync.uploaded || sync.uploaded_at)
-        const attempted = Boolean(sync.last_attempt_at)
-        const color = uploaded ? 'success' : attempted ? 'error' : 'default'
-        const label = uploaded ? '已上传' : attempted ? '最近失败' : '未上传'
-        const time = uploaded ? sync.uploaded_at : sync.last_attempt_at
-
-        return (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 4, minWidth: 140 }}>
-            <Tag color={color}>{label}</Tag>
-            {time ? (
-              <Text type="secondary" style={{ fontSize: 12 }}>
-                {formatSyncTime(time)}
-              </Text>
-            ) : null}
-            {sync.last_message ? (
-              <Text type="secondary" ellipsis={{ tooltip: sync.last_message }} style={{ maxWidth: 220, fontSize: 12 }}>
-                {sync.last_message}
-              </Text>
-            ) : null}
-          </div>
-        )
-      },
-    })
-    columns.splice(5, 0, {
-      title: '官方额度',
-      key: 'official_quota',
-      render: (_: any, record: any) => {
-        const quota = record.officialQuota as OfficialQuotaSnapshot | null
-        if (!quota) {
-          return <Text type="secondary">未查询</Text>
-        }
-
-        const remaining = String(quota.remaining_display || '未返回')
-        const plan = String(quota.subscription_plan || '未识别')
-        return (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 4, minWidth: 150 }}>
-            <Tag color={remaining === '未返回' ? 'default' : 'processing'}>{plan}</Tag>
-            <Text>{remaining}</Text>
-            {quota.fetched_at ? (
-              <Text type="secondary" style={{ fontSize: 12 }}>
-                {formatSyncTime(quota.fetched_at)}
-              </Text>
-            ) : null}
-          </div>
-        )
-      },
-    })
-  }
 
   return (
     <div>
-      <iframe ref={exportFrameRef} title="accounts-export" style={{ display: 'none' }} />
-      {currentPlatform === 'chatgpt' && cpaTask && (
-        <Alert
-          showIcon
-          closable={cpaTask.status === 'done' || cpaTask.status === 'failed'}
-          onClose={() => setCpaTask(null)}
-          type={
-            cpaTask.status === 'failed'
-              ? 'error'
-              : cpaTask.status === 'done'
-                ? (cpaTask.failed > 0 ? 'warning' : 'success')
-                : 'info'
-          }
-          style={{ marginBottom: 12 }}
-          message={
-            cpaTask.status === 'failed'
-              ? 'CPA 后台任务失败'
-              : cpaTask.status === 'done'
-                ? 'CPA 后台任务已完成'
-                : 'CPA 后台任务运行中'
-          }
-          description={
-            [
-              cpaTask.message || '',
-              `进度 ${cpaTask.total}/${cpaTask.target_total || cpaTask.total || 0}`,
-              `成功 ${cpaTask.success}，失败 ${cpaTask.failed}，跳过 ${cpaTask.skipped}`,
-            ].filter(Boolean).join(' · ')
-          }
-        />
-      )}
-      {batchCheckTask && (
-        <Alert
-          showIcon
-          type={
-            batchCheckTask.status === 'failed'
-              ? 'error'
-              : batchCheckTask.status === 'done'
-                ? (batchCheckTask.invalid > 0 || batchCheckTask.error > 0 ? 'warning' : 'success')
-                : 'info'
-          }
-          style={{ marginBottom: 12 }}
-          message={
-            batchCheckTask.status === 'failed'
-              ? '账号测试后台任务失败'
-              : batchCheckTask.status === 'done'
-                ? '账号测试后台任务已完成'
-                : '账号测试后台任务运行中'
-          }
-          description={
-            [
-              batchCheckTask.title,
-              batchCheckTask.message || '',
-              `进度 ${batchCheckTask.tested}/${batchCheckTask.total_requested || 0}`,
-              `通过 ${batchCheckTask.valid}，失败 ${batchCheckTask.invalid}，异常 ${batchCheckTask.error}`,
-            ].filter(Boolean).join(' · ')
-          }
-        />
-      )}
       <div style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 }}>
         <Space>
           <Input.Search
             placeholder="搜索邮箱..."
             allowClear
-            onSearch={(value) => {
-              setSearch(value)
-              setPage(1)
-            }}
+            onSearch={(v) => { setPage(1); setSearch(v) }}
             style={{ width: 200 }}
           />
           <Select
             placeholder="状态筛选"
             allowClear
             style={{ width: 120 }}
-            onChange={(value) => {
-              setFilterStatus(value || '')
-              setPage(1)
-            }}
+            onChange={(v) => { setPage(1); setFilterStatus(v) }}
             options={[
               { value: 'registered', label: '已注册' },
               { value: 'trial', label: '试用中' },
@@ -1155,59 +1369,97 @@ export default function Accounts() {
               { value: 'invalid', label: '已失效' },
             ]}
           />
+          <DatePicker
+            showTime
+            allowClear
+            placeholder="开始时间"
+            onChange={(value) => { setPage(1); setCreatedAtStart(value ? value.toISOString() : '') }}
+          />
+          <DatePicker
+            showTime
+            allowClear
+            placeholder="结束时间"
+            onChange={(value) => { setPage(1); setCreatedAtEnd(value ? value.toISOString() : '') }}
+          />
           <Text type="secondary">{total} 个账号</Text>
           {selectedRowKeys.length > 0 && (
             <Text type="success">已选 {selectedRowKeys.length} 个</Text>
           )}
         </Space>
         <Space>
-          {selectedRowKeys.length > 0 && (
-            <Button
-              icon={<SafetyOutlined />}
-              loading={testing === 'selected'}
-              disabled={testing !== null && testing !== 'selected'}
-              onClick={() => runBatchCheck(selectedRowKeys, 'selected', '所选账号测试结果')}
+          {currentPlatform === 'chatgpt' && (
+            <Dropdown
+              trigger={['click']}
+              menu={{
+                items: statusSyncMenuItems,
+                onClick: ({ key }) => {
+                  const [kind, scope] = String(key).split(':') as ['probe' | 'remote', 'selected' | 'all']
+                  handleBatchStatusSync(kind, scope)
+                },
+              }}
             >
-              测试所选
-            </Button>
-          )}
-          <Button
-            icon={<SafetyOutlined />}
-            loading={testing === 'page'}
-            disabled={(testing !== null && testing !== 'page') || accounts.length === 0}
-            onClick={() => runBatchCheck(accounts.map((item) => item.id), 'page', `${currentPlatform} 当前页测试结果`)}
-          >
-            测试当前页
-          </Button>
-          {currentPlatform === 'chatgpt' && selectedRowKeys.length > 0 && (
-            <Popconfirm
-              title={`确认上传选中的 ${selectedRowKeys.length} 个账号到 CPA？`}
-              onConfirm={() => handleCpaBackfill('selected')}
-            >
-              <Button loading={cpaSyncLoading === 'selected'} icon={<UploadOutlined />}>
-                上传所选 CPA
+              <Button
+                icon={<SyncOutlined />}
+                loading={statusSyncLoading !== ''}
+                disabled={total === 0}
+              >
+                状态同步
               </Button>
-            </Popconfirm>
+            </Dropdown>
           )}
           {currentPlatform === 'chatgpt' && (
             <Popconfirm
-              title="确认补传当前筛选范围内尚未成功上传 CPA 的账号？"
-              onConfirm={() => handleCpaBackfill('pending')}
+              title={
+                getBackfillScope() === 'selected'
+                  ? `确认补传所选 ${selectedRowKeys.length} 个账号中远端未发现的 auth-file？`
+                  : '确认补传当前筛选范围内远端未发现且本地状态有效的账号？'
+              }
+              onConfirm={() => handleCpaBackfill(getBackfillScope())}
+              okText="确认"
+              cancelText="取消"
             >
-              <Button loading={cpaSyncLoading === 'pending'} icon={<UploadOutlined />} disabled={total === 0}>
-                补传未上传 CPA
+              <Button
+                loading={cpaSyncLoading === 'pending' || cpaSyncLoading === 'selected'}
+                icon={<UploadOutlined />}
+                disabled={getBackfillScope() === 'selected' ? selectedRowKeys.length === 0 : total === 0}
+              >
+                {backfillButtonLabel()}
+              </Button>
+            </Popconfirm>
+          )}
+          {currentPlatform !== 'chatgpt' && hasUploadCpaAction && (
+            <Popconfirm
+              title={
+                getUploadCpaScope() === 'selected'
+                  ? `确认导入所选 ${selectedRowKeys.length} 个账号到 CPA？`
+                  : `确认导入当前筛选范围内 ${total} 个账号到 CPA？`
+              }
+              onConfirm={() => handleBatchUploadCpa(getUploadCpaScope())}
+              okText="确认"
+              cancelText="取消"
+            >
+              <Button
+                loading={cpaUploadLoading === 'selected' || cpaUploadLoading === 'all'}
+                icon={<UploadOutlined />}
+                disabled={getUploadCpaScope() === 'selected' ? selectedRowKeys.length === 0 : total === 0}
+              >
+                {uploadCpaButtonLabel()}
               </Button>
             </Popconfirm>
           )}
           {selectedRowKeys.length > 0 && (
-            <Popconfirm title={`确认删除选中的 ${selectedRowKeys.length} 个账号？`} onConfirm={handleBatchDelete}>
+            <Popconfirm
+              title={`确认删除选中的 ${selectedRowKeys.length} 个账号？`}
+              onConfirm={handleBatchDelete}
+              okText="删除"
+              cancelText="取消"
+              okButtonProps={{ danger: true }}
+            >
               <Button danger icon={<DeleteOutlined />}>删除 {selectedRowKeys.length} 个</Button>
             </Popconfirm>
           )}
           <Button icon={<UploadOutlined />} onClick={() => setImportModalOpen(true)}>导入</Button>
-          <Button icon={<DownloadOutlined />} onClick={exportCsv} disabled={accounts.length === 0} loading={exportLoading}>
-            导出
-          </Button>
+          <Button icon={<DownloadOutlined />} onClick={exportCsv} disabled={accounts.length === 0}>导出</Button>
           <Button icon={<PlusOutlined />} onClick={() => setAddModalOpen(true)}>新增</Button>
           <Button type="primary" icon={<PlusOutlined />} onClick={() => setRegisterModalOpen(true)}>注册</Button>
           <Button icon={<ReloadOutlined spin={loading} />} onClick={load} />
@@ -1219,28 +1471,13 @@ export default function Accounts() {
         columns={columns}
         dataSource={accounts}
         loading={loading}
+        size="middle"
         rowSelection={{
           selectedRowKeys,
           onChange: setSelectedRowKeys,
         }}
-        pagination={{
-          current: page,
-          pageSize,
-          total,
-          showSizeChanger: true,
-          pageSizeOptions: ACCOUNT_PAGE_SIZE_OPTIONS.map(String),
-          showTotal: (count) => `共 ${count} 个账号`,
-          onChange: (nextPage, nextPageSize) => {
-            const normalizedPageSize = nextPageSize || pageSize
-            if (normalizedPageSize !== pageSize) {
-              persistAccountPageSize(currentPlatform, normalizedPageSize)
-              setPageSize(normalizedPageSize)
-              setPage(1)
-            } else {
-              setPage(nextPage)
-            }
-          },
-        }}
+        pagination={{ total, current: page, pageSize, showSizeChanger: true, pageSizeOptions: ['20', '50', '100'], onChange: (p, ps) => { setPage(p); setPageSize(ps) } }}
+        scroll={{ x: isChatgptPlatform ? 1440 : 980 }}
         onRow={(record) => ({
           onDoubleClick: () => {
             setCurrentAccount(record)
@@ -1252,42 +1489,39 @@ export default function Accounts() {
       <Modal
         title={`注册 ${currentPlatform}`}
         open={registerModalOpen}
-        onCancel={() => setRegisterModalOpen(false)}
+        onCancel={() => { setRegisterModalOpen(false); setTaskId(null); registerForm.resetFields(); }}
         footer={null}
         width={500}
         maskClosable={false}
       >
-        <Alert
-          type="info"
-          showIcon
-          style={{ marginBottom: 16 }}
-          message="启动后会进入右下角任务托盘"
-          description="任务支持最小化、恢复查看日志，并且可以继续发起新的批量注册。"
-        />
-        <Form form={registerForm} layout="vertical" onFinish={handleRegister}>
-          <Form.Item name="count" label="注册数量" initialValue={1} rules={[{ required: true }]}>
-            <Input type="number" min={1} max={99} />
-          </Form.Item>
-          <Form.Item name="concurrency" label="并发数" initialValue={1} rules={[{ required: true }]}>
-            <Input type="number" min={1} max={5} />
-          </Form.Item>
-          <Form.Item name="register_delay_seconds" label="每个注册延迟(秒)" initialValue={0}>
-            <InputNumber min={0} precision={1} step={0.5} style={{ width: '100%' }} placeholder="0 = 不延迟" />
-          </Form.Item>
-          {currentPlatform === 'chatgpt' && (
-            <Form.Item label="ChatGPT Token 方案">
-              <ChatGPTRegistrationModeSwitch
-                mode={chatgptRegistrationMode}
-                onChange={setChatgptRegistrationMode}
-              />
+        {!taskId ? (
+          <Form form={registerForm} layout="vertical" onFinish={handleRegister}>
+            <Form.Item name="count" label="注册数量" initialValue={1} rules={[{ required: true }]}>
+              <Input type="number" min={1} />
             </Form.Item>
-          )}
-          <Form.Item>
-            <Button type="primary" htmlType="submit" block loading={registerLoading}>
-              启动后台注册
-            </Button>
-          </Form.Item>
-        </Form>
+            <Form.Item name="concurrency" label="并发数" initialValue={1} rules={[{ required: true }]}>
+              <Input type="number" min={1} />
+            </Form.Item>
+            <Form.Item name="register_delay_seconds" label="每个注册延迟(秒)" initialValue={0}>
+              <InputNumber min={0} precision={1} step={0.5} style={{ width: '100%' }} placeholder="0 = 不延迟" />
+            </Form.Item>
+            {currentPlatform === 'chatgpt' && (
+              <Form.Item label="ChatGPT Token 方案">
+                <ChatGPTRegistrationModeSwitch
+                  mode={chatgptRegistrationMode}
+                  onChange={setChatgptRegistrationMode}
+                />
+              </Form.Item>
+            )}
+            <Form.Item>
+              <Button type="primary" htmlType="submit" block loading={registerLoading}>
+                开始注册
+              </Button>
+            </Form.Item>
+          </Form>
+        ) : (
+          <TaskLogPanel taskId={taskId} onDone={() => { load(); }} />
+        )}
       </Modal>
 
       <Modal
@@ -1295,6 +1529,8 @@ export default function Accounts() {
         open={addModalOpen}
         onCancel={() => { setAddModalOpen(false); addForm.resetFields(); }}
         onOk={handleAdd}
+        okText="确定"
+        cancelText="取消"
         maskClosable={false}
       >
         <Form form={addForm} layout="vertical">
@@ -1305,6 +1541,9 @@ export default function Accounts() {
             <Input.Password />
           </Form.Item>
           <Form.Item name="token" label="Token">
+            <Input />
+          </Form.Item>
+          <Form.Item name="cashier_url" label="试用链接">
             <Input />
           </Form.Item>
           <Form.Item name="status" label="状态" initialValue="registered">
@@ -1324,11 +1563,13 @@ export default function Accounts() {
         open={importModalOpen}
         onCancel={() => { setImportModalOpen(false); setImportText(''); }}
         onOk={handleImport}
+        okText="确定"
+        cancelText="取消"
         confirmLoading={importLoading}
         maskClosable={false}
       >
         <p style={{ marginBottom: 8, fontSize: 12, color: '#7a8ba3' }}>
-          每行格式: <code style={{ background: 'rgba(255,255,255,0.1)', padding: '2px 4px', borderRadius: 4 }}>email password [extra_json]</code>
+          每行格式: <code style={{ background: 'rgba(255,255,255,0.1)', padding: '2px 4px', borderRadius: 4 }}>email password [cashier_url]</code>
         </p>
         <Input.TextArea
           value={importText}
@@ -1343,117 +1584,83 @@ export default function Accounts() {
         open={detailModalOpen}
         onCancel={() => setDetailModalOpen(false)}
         onOk={handleDetailSave}
+        okText="保存"
+        cancelText="取消"
         maskClosable={false}
+        width={760}
+        styles={{ body: { maxHeight: '72vh', overflowY: 'auto' } }}
       >
         {currentAccount && (
-          <Form form={detailForm} layout="vertical" initialValues={currentAccount}>
-            <Form.Item name="status" label="状态">
-              <Select
-                options={[
-                  { value: 'registered', label: '已注册' },
-                  { value: 'trial', label: '试用中' },
-                  { value: 'subscribed', label: '已订阅' },
-                  { value: 'expired', label: '已过期' },
-                  { value: 'invalid', label: '已失效' },
-                ]}
-              />
-            </Form.Item>
-            <Form.Item name="token" label="Access Token">
-              <Input.TextArea rows={2} style={{ fontFamily: 'monospace' }} />
-            </Form.Item>
-          </Form>
-        )}
-      </Modal>
-
-      <Modal
-        open={testResult.open}
-        title={testResult.title || '账号测试结果'}
-        onCancel={() => setTestResult({ open: false, title: '', data: null })}
-        width={760}
-        footer={[
-          testResult.data && testResult.data.invalid_ids.length > 0 ? (
-            <Popconfirm
-              key="delete-invalid"
-              title={`确认删除 ${testResult.data.invalid_ids.length} 个测试失败账号？`}
-              onConfirm={handleDeleteInvalidFromTest}
-            >
-              <Button danger loading={testDeleting} icon={<DeleteOutlined />}>
-                一键删除失败账号
-              </Button>
-            </Popconfirm>
-          ) : null,
-          <Button
-            key="close"
-            type="primary"
-            onClick={() => setTestResult({ open: false, title: '', data: null })}
-          >
-            关闭
-          </Button>,
-        ].filter(Boolean)}
-        maskClosable={false}
-      >
-        {testResult.data ? (
-          <Space direction="vertical" size={12} style={{ width: '100%' }}>
-            <Alert
-              type={testResult.data.invalid > 0 || testResult.data.error > 0 ? 'warning' : 'success'}
-              showIcon
-              message={
-                testResult.data.invalid > 0 || testResult.data.error > 0
-                  ? `测试完成：通过 ${testResult.data.valid}，失败 ${testResult.data.invalid}，异常 ${testResult.data.error}`
-                  : `测试完成：${testResult.data.valid} 个账号全部通过`
-              }
-              description={
-                testResult.data.invalid_ids.length > 0
-                  ? '“一键删除失败账号”仅删除已判定无效的账号，不会删除检测异常的账号。'
-                  : undefined
-              }
-            />
-
-            <Space size={8} wrap>
-              <Tag color="success">通过 {testResult.data.valid}</Tag>
-              <Tag color="error">失败 {testResult.data.invalid}</Tag>
-              <Tag color="warning">异常 {testResult.data.error}</Tag>
-              {testResult.data.not_found.length > 0 ? (
-                <Tag>未找到 {testResult.data.not_found.length}</Tag>
-              ) : null}
-            </Space>
-
-            <div
-              style={{
-                maxHeight: 360,
-                overflow: 'auto',
-                display: 'flex',
-                flexDirection: 'column',
-                gap: 8,
-                paddingRight: 4,
-              }}
-            >
-              {testResult.data.items.map((item) => {
-                const meta = getCheckStatusMeta(item.status)
-                return (
+          <>
+            <Form form={detailForm} layout="vertical" initialValues={currentAccount}>
+              <Form.Item name="status" label="状态">
+                <Select
+                  options={[
+                    { value: 'registered', label: '已注册' },
+                    { value: 'trial', label: '试用中' },
+                    { value: 'subscribed', label: '已订阅' },
+                    { value: 'expired', label: '已过期' },
+                    { value: 'invalid', label: '已失效' },
+                  ]}
+                />
+              </Form.Item>
+              <Form.Item name="token" label="Access Token">
+                <Input.TextArea rows={2} style={{ fontFamily: 'monospace' }} />
+              </Form.Item>
+            </Form>
+            {(() => {
+              const rt = getRefreshToken(currentAccount)
+              if (!rt) return null
+              return (
+                <div style={{ marginTop: 8 }}>
+                  <div style={{ marginBottom: 4, fontWeight: 500, fontSize: 13 }}>Refresh Token</div>
                   <div
-                    key={`${item.id}-${item.status}`}
                     style={{
-                      border: '1px solid rgba(127,127,127,0.15)',
-                      borderRadius: 10,
-                      padding: 12,
+                      display: 'flex',
+                      alignItems: 'flex-start',
+                      gap: 8,
+                      background: token.colorFillAlter,
+                      border: `1px solid ${token.colorBorder}`,
+                      borderRadius: token.borderRadius,
+                      padding: '8px 10px',
                     }}
                   >
-                    <Space direction="vertical" size={6} style={{ width: '100%' }}>
-                      <Space size={8} wrap>
-                        <Tag color={meta.color}>{meta.label}</Tag>
-                        <Text style={{ fontFamily: 'monospace' }}>{item.email}</Text>
-                        <Text type="secondary">#{item.id}</Text>
-                        {item.used_proxy ? <Tag color="processing">代理: {item.used_proxy}</Tag> : null}
-                      </Space>
-                      <Text type="secondary">{item.message || '-'}</Text>
-                    </Space>
+                    <Text
+                      style={{ fontFamily: 'monospace', fontSize: 11, wordBreak: 'break-all', flex: 1, userSelect: 'text' }}
+                      copyable={{ text: rt, tooltips: ['复制 RT', '已复制'] }}
+                    >
+                      {rt}
+                    </Text>
                   </div>
-                )
-              })}
-            </div>
-          </Space>
-        ) : null}
+                </div>
+              )
+            })()}
+            {currentPlatform === 'kiro' && currentAccount?.extra ? (
+              <DetailSection title="Kiro 客户端信息">
+                <SummaryField label="Client ID" value={currentAccount.extra?.clientId} code />
+                <SummaryField label="Client Secret" value={currentAccount.extra?.clientSecret} code />
+              </DetailSection>
+            ) : null}
+            {currentPlatform === 'chatgpt' ? (
+              <DetailSection title="本地真实状态">
+                {currentAccount.chatgptLocal && Object.keys(currentAccount.chatgptLocal).length > 0 ? (
+                  <LocalProbeSummary probe={currentAccount.chatgptLocal} />
+                ) : (
+                  <Text type="secondary">尚未探测。可在操作菜单中点击“探测本地状态”。</Text>
+                )}
+              </DetailSection>
+            ) : null}
+            {currentPlatform === 'chatgpt' ? (
+              <DetailSection title="CLIProxyAPI 状态">
+                {currentAccount.cliproxySync && Object.keys(currentAccount.cliproxySync).length > 0 ? (
+                  <CliproxySyncSummary sync={currentAccount.cliproxySync} />
+                ) : (
+                  <Text type="secondary">尚未同步。可在操作菜单中点击“同步 CLIProxyAPI 状态”。</Text>
+                )}
+              </DetailSection>
+            ) : null}
+          </>
+        )}
       </Modal>
     </div>
   )

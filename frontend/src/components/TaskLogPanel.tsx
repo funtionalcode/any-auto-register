@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Button, message, Space } from 'antd'
+import { Button, message, Space, Tag } from 'antd'
 import { CopyOutlined, FastForwardOutlined, StopOutlined } from '@ant-design/icons'
 
 import { API_BASE, apiFetch, getToken } from '@/lib/utils'
@@ -11,17 +11,46 @@ interface TaskLogPanelProps {
 
 type TaskTerminalStatus = 'idle' | 'done' | 'failed' | 'stopped'
 
+interface RegisterSummary {
+  success: number
+  registered: number
+  total: number
+}
+
+function parseCounter(value: unknown): number {
+  const n = Number(value || 0)
+  if (!Number.isFinite(n) || n < 0) return 0
+  return Math.floor(n)
+}
+
+function normalizeSummary(next: RegisterSummary): RegisterSummary {
+  const success = parseCounter(next.success)
+  const registered = Math.max(parseCounter(next.registered), success)
+  const total = Math.max(parseCounter(next.total), registered)
+  return { success, registered, total }
+}
+
+function mergeSummary(previous: RegisterSummary, incoming: Partial<RegisterSummary>): RegisterSummary {
+  return normalizeSummary({
+    success: incoming.success ?? previous.success,
+    registered: incoming.registered ?? previous.registered,
+    total: incoming.total ?? previous.total,
+  })
+}
+
 export function TaskLogPanel({ taskId, onDone }: TaskLogPanelProps) {
   const [lines, setLines] = useState<string[]>([])
+  const [summary, setSummary] = useState<RegisterSummary>({ success: 0, registered: 0, total: 0 })
   const [error, setError] = useState('')
   const [terminalStatus, setTerminalStatus] = useState<TaskTerminalStatus>('idle')
   const [skipLoading, setSkipLoading] = useState(false)
   const [stopLoading, setStopLoading] = useState(false)
-  const bottomRef = useRef<HTMLDivElement>(null)
+  const [stopRequested, setStopRequested] = useState(false)
+  const panelRef = useRef<HTMLDivElement>(null)
   const onDoneRef = useRef(onDone)
   const nextSinceRef = useRef(0)
 
-  const isFinished = terminalStatus !== 'idle'
+  const isFinished = terminalStatus !== 'idle' || stopRequested
 
   const handleCopyAll = async () => {
     try {
@@ -36,8 +65,15 @@ export function TaskLogPanel({ taskId, onDone }: TaskLogPanelProps) {
     if (isFinished) return
     setSkipLoading(true)
     try {
-      await apiFetch(`/tasks/${taskId}/skip-current`, { method: 'POST' })
-      message.success('已发送跳过当前账号请求')
+      const response = await apiFetch(`/tasks/${taskId}/skip-current`, { method: 'POST' }) as {
+        control?: { targeted_skip_attempts?: number }
+      }
+      const targeted = Number(response.control?.targeted_skip_attempts || 0)
+      message.success(
+        targeted > 1
+          ? `已发送跳过 ${targeted} 个进行中账号请求`
+          : '已发送跳过当前账号请求',
+      )
     } catch (error_: unknown) {
       const detail = error_ instanceof Error ? error_.message : '请求失败'
       message.error(detail)
@@ -51,7 +87,8 @@ export function TaskLogPanel({ taskId, onDone }: TaskLogPanelProps) {
     setStopLoading(true)
     try {
       await apiFetch(`/tasks/${taskId}/stop`, { method: 'POST' })
-      message.success('已发送停止任务请求')
+      setStopRequested(true)
+      message.success('已发送停止任务请求，正在停止进行中的线程')
     } catch (error_: unknown) {
       const detail = error_ instanceof Error ? error_.message : '请求失败'
       message.error(detail)
@@ -72,11 +109,51 @@ export function TaskLogPanel({ taskId, onDone }: TaskLogPanelProps) {
     const maxRetryMs = 8000
     nextSinceRef.current = 0
     setLines([])
+    setSummary({ success: 0, registered: 0, total: 0 })
     setError('')
     setTerminalStatus('idle')
+    setStopRequested(false)
 
     const sleep = async (ms: number) =>
       new Promise((resolve) => setTimeout(resolve, ms))
+
+    const initSnapshot = async (): Promise<boolean> => {
+      try {
+        const snapshot = await apiFetch(`/tasks/${taskId}`) as {
+          logs?: string[]
+          status?: TaskTerminalStatus | string
+          success?: number
+          registered?: number
+          total?: number
+          control?: { stop_requested?: boolean }
+        }
+        if (cancelled) return true
+
+        const snapshotLines = Array.isArray(snapshot.logs) ? snapshot.logs : []
+        setLines(snapshotLines)
+        setSummary((previous) =>
+          mergeSummary(previous, {
+            success: snapshot.success,
+            registered: snapshot.registered,
+            total: snapshot.total,
+          }),
+        )
+        nextSinceRef.current = snapshotLines.length
+        setStopRequested(Boolean(snapshot.control?.stop_requested))
+
+        if (snapshot.status === 'done' || snapshot.status === 'failed' || snapshot.status === 'stopped') {
+          setTerminalStatus(snapshot.status)
+          onDoneRef.current?.()
+          return true
+        }
+      } catch (error_: unknown) {
+        if (!cancelled) {
+          const detail = error_ instanceof Error ? error_.message : '获取任务快照失败'
+          setError(detail)
+        }
+      }
+      return false
+    }
 
     const connectStreamOnce = async (): Promise<boolean> => {
       try {
@@ -121,7 +198,17 @@ export function TaskLogPanel({ taskId, onDone }: TaskLogPanelProps) {
                 line?: string
                 done?: boolean
                 status?: TaskTerminalStatus
+                success?: number
+                registered?: number
+                total?: number
               }
+              setSummary((previous) =>
+                mergeSummary(previous, {
+                  success: payload.success,
+                  registered: payload.registered,
+                  total: payload.total,
+                }),
+              )
               if (payload.line) {
                 nextSinceRef.current += 1
                 setLines((previous) => [...previous, payload.line!])
@@ -147,6 +234,9 @@ export function TaskLogPanel({ taskId, onDone }: TaskLogPanelProps) {
     }
 
     const connectStream = async () => {
+      const shouldStopImmediately = await initSnapshot()
+      if (shouldStopImmediately || cancelled) return
+
       let retryCount = 0
       while (!cancelled) {
         const shouldStop = await connectStreamOnce()
@@ -168,7 +258,8 @@ export function TaskLogPanel({ taskId, onDone }: TaskLogPanelProps) {
   }, [taskId])
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
+    if (!panelRef.current) return
+    panelRef.current.scrollTop = panelRef.current.scrollHeight
   }, [lines])
 
   const footerText =
@@ -182,6 +273,12 @@ export function TaskLogPanel({ taskId, onDone }: TaskLogPanelProps) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+      <Space wrap style={{ marginBottom: 8 }}>
+        <Tag color="green">注册成功：{summary.success}</Tag>
+        <Tag color="blue">已注册：{summary.registered}</Tag>
+        <Tag color="default">总共注册：{summary.total}</Tag>
+      </Space>
+
       <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
         <Space>
           <Button
@@ -210,22 +307,25 @@ export function TaskLogPanel({ taskId, onDone }: TaskLogPanelProps) {
       </div>
 
       <div
+        ref={panelRef}
         className="log-panel"
         style={{
           flex: 1,
-          overflow: 'auto',
+          overflowY: 'auto',
+          overflowX: 'hidden',
           background: '#ffffff',
           border: '1px solid #e5e7eb',
           borderRadius: 8,
           padding: 12,
           fontFamily: 'monospace',
           fontSize: 12,
-          minHeight: 220,
-          maxHeight: 420,
+          minHeight: 320,
+          maxHeight: '65vh',
           userSelect: 'text',
           WebkitUserSelect: 'text',
           cursor: 'text',
           whiteSpace: 'pre-wrap',
+          wordBreak: 'break-word',
         }}
       >
         {lines.length === 0 && !error && <div style={{ color: '#9ca3af' }}>等待日志...</div>}
@@ -248,7 +348,6 @@ export function TaskLogPanel({ taskId, onDone }: TaskLogPanelProps) {
             {line}
           </div>
         ))}
-        <div ref={bottomRef} />
       </div>
 
       {footerText ? (

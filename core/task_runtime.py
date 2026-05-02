@@ -63,6 +63,9 @@ class RegisterTaskControl:
         self._lock = threading.Lock()
         self._stop_requested = False
         self._pending_skip_requests = 0
+        self._next_attempt_id = 1
+        self._active_attempt_ids: set[int] = set()
+        self._skip_active_attempt_ids: set[int] = set()
 
     def request_stop(self) -> None:
         with self._lock:
@@ -70,15 +73,44 @@ class RegisterTaskControl:
 
     def request_skip_current(self) -> None:
         with self._lock:
-            self._pending_skip_requests += 1
+            if self._active_attempt_ids:
+                self._skip_active_attempt_ids.update(self._active_attempt_ids)
+            else:
+                self._pending_skip_requests += 1
 
-    def checkpoint(self, *, consume_skip: bool = True) -> None:
+    def start_attempt(self) -> int:
+        with self._lock:
+            attempt_id = self._next_attempt_id
+            self._next_attempt_id += 1
+            self._active_attempt_ids.add(attempt_id)
+            return attempt_id
+
+    def finish_attempt(self, attempt_id: int | None) -> None:
+        if attempt_id is None:
+            return
+        with self._lock:
+            self._active_attempt_ids.discard(attempt_id)
+            self._skip_active_attempt_ids.discard(attempt_id)
+
+    def checkpoint(
+        self,
+        *,
+        consume_skip: bool = True,
+        attempt_id: int | None = None,
+    ) -> None:
         with self._lock:
             if self._stop_requested:
                 raise StopTaskRequested()
-            if consume_skip and self._pending_skip_requests > 0:
-                self._pending_skip_requests -= 1
-                raise SkipCurrentAttemptRequested()
+            if consume_skip:
+                if (
+                    attempt_id is not None
+                    and attempt_id in self._skip_active_attempt_ids
+                ):
+                    self._skip_active_attempt_ids.discard(attempt_id)
+                    raise SkipCurrentAttemptRequested()
+                if self._pending_skip_requests > 0:
+                    self._pending_skip_requests -= 1
+                    raise SkipCurrentAttemptRequested()
 
     def is_stop_requested(self) -> bool:
         with self._lock:
@@ -89,6 +121,8 @@ class RegisterTaskControl:
             return {
                 "stop_requested": self._stop_requested,
                 "pending_skip_requests": self._pending_skip_requests,
+                "active_attempts": len(self._active_attempt_ids),
+                "targeted_skip_attempts": len(self._skip_active_attempt_ids),
             }
 
 
@@ -103,6 +137,7 @@ class RegisterTaskRecord:
     progress: str = "0/0"
     logs: list[str] = field(default_factory=list)
     success: int = 0
+    registered: int = 0
     skipped: int = 0
     errors: list[str] = field(default_factory=list)
     cashier_urls: list[str] = field(default_factory=list)
@@ -121,12 +156,16 @@ class RegisterTaskRecord:
             "platform": self.platform,
             "source": self.source,
             "meta": dict(self.meta),
+            "total": self.total,
             "progress": self.progress,
             "logs": list(self.logs),
             "success": self.success,
+            "registered": self.registered,
             "skipped": self.skipped,
             "errors": list(self.errors),
             "control": self.control.snapshot(),
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
         }
         if self.cashier_urls:
             data["cashier_urls"] = list(self.cashier_urls)
@@ -231,12 +270,28 @@ class RegisterTaskStore:
             record.cashier_urls.append(cashier_url)
             record.updated_at = time.time()
 
+    def update_counters(
+        self,
+        task_id: str,
+        *,
+        success: int | None = None,
+        registered: int | None = None,
+    ) -> None:
+        with self._lock:
+            record = self._records[task_id]
+            if success is not None:
+                record.success = max(0, int(success))
+            if registered is not None:
+                record.registered = max(0, int(registered))
+            record.updated_at = time.time()
+
     def finish(
         self,
         task_id: str,
         *,
         status: str,
         success: int,
+        registered: int | None = None,
         skipped: int,
         errors: list[str],
         error: str = "",
@@ -245,6 +300,10 @@ class RegisterTaskStore:
             record = self._records[task_id]
             record.status = status
             record.success = success
+            if registered is None:
+                record.registered = max(success + skipped + len(errors), 0)
+            else:
+                record.registered = max(0, int(registered))
             record.skipped = skipped
             record.errors = list(errors)
             record.error = error

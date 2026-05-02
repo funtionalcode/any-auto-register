@@ -52,9 +52,33 @@ class ChatGPTPlatform(BasePlatform):
         except Exception:
             max_retries = 3
 
+        def _resolve_mailbox_timeout(requested_timeout: int) -> int:
+            candidates = (
+                extra_config.get("mailbox_otp_timeout_seconds"),
+                extra_config.get("email_otp_timeout_seconds"),
+                extra_config.get("otp_timeout"),
+                requested_timeout,
+            )
+            for value in candidates:
+                if value in (None, ""):
+                    continue
+                try:
+                    seconds = int(value)
+                except (TypeError, ValueError):
+                    continue
+                if seconds > 0:
+                    return seconds
+            return requested_timeout
+
         if self.mailbox:
             _mailbox = self.mailbox
             _fixed_email = email
+
+            def _resolve_email(candidate_email: str = "") -> str:
+                resolved_email = str(_fixed_email or candidate_email or "").strip()
+                if not resolved_email:
+                    raise RuntimeError("custom_provider 返回空邮箱地址")
+                return resolved_email
 
             class GenericEmailService:
                 service_type = type("ST", (), {"value": "custom_provider"})()
@@ -62,15 +86,22 @@ class ChatGPTPlatform(BasePlatform):
                 def __init__(self):
                     self._acct = None
                     self._email = _fixed_email
+                    self._before_ids = set()
 
                 def create_email(self, config=None):
                     if self._email and self._acct and _fixed_email:
                         return {"email": self._email, "service_id": self._acct.account_id, "token": ""}
                     self._acct = _mailbox.get_email()
+                    get_current_ids = getattr(_mailbox, "get_current_ids", None)
+                    if callable(get_current_ids):
+                        self._before_ids = set(get_current_ids(self._acct) or [])
+                    else:
+                        self._before_ids = set()
+                    generated_email = getattr(self._acct, "email", "")
                     if not self._email:
-                        self._email = self._acct.email
+                        self._email = _resolve_email(generated_email)
                     elif not _fixed_email:
-                        self._email = self._acct.email
+                        self._email = _resolve_email(generated_email)
                     return {"email": self._email, "service_id": self._acct.account_id, "token": ""}
 
                 def get_verification_code(
@@ -87,7 +118,8 @@ class ChatGPTPlatform(BasePlatform):
                     return _mailbox.wait_for_code(
                         self._acct,
                         keyword="",
-                        timeout=timeout,
+                        timeout=_resolve_mailbox_timeout(timeout),
+                        before_ids=self._before_ids,
                         otp_sent_at=otp_sent_at,
                         exclude_codes=exclude_codes,
                     )
@@ -109,10 +141,18 @@ class ChatGPTPlatform(BasePlatform):
             class TempMailEmailService:
                 service_type = type("ST", (), {"value": "tempmail_lol"})()
 
+                def __init__(self):
+                    self._acct = None
+                    self._before_ids = set()
+
                 def create_email(self, config=None):
                     acct = _tmail.get_email()
                     self._acct = acct
-                    return {"email": acct.email, "service_id": acct.account_id, "token": acct.account_id}
+                    self._before_ids = set(_tmail.get_current_ids(acct) or [])
+                    resolved_email = str(getattr(acct, "email", "") or "").strip()
+                    if not resolved_email:
+                        raise RuntimeError("tempmail_lol 返回空邮箱地址")
+                    return {"email": resolved_email, "service_id": acct.account_id, "token": acct.account_id}
 
                 def get_verification_code(
                     self,
@@ -126,7 +166,8 @@ class ChatGPTPlatform(BasePlatform):
                     return _tmail.wait_for_code(
                         self._acct,
                         keyword="",
-                        timeout=timeout,
+                        timeout=_resolve_mailbox_timeout(timeout),
+                        before_ids=self._before_ids,
                         otp_sent_at=otp_sent_at,
                         exclude_codes=exclude_codes,
                     )

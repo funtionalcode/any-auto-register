@@ -1,43 +1,67 @@
 import { BrowserRouter, Routes, Route, useLocation, useNavigate } from 'react-router-dom'
 import { useState, useEffect } from 'react'
-import { ConfigProvider, Layout, Menu, Button, Card, Typography } from 'antd'
+import { App as AntdApp, ConfigProvider, Layout, Menu, Button, Spin } from 'antd'
 import {
   DashboardOutlined,
   UserOutlined,
   GlobalOutlined,
   HistoryOutlined,
   SettingOutlined,
-  SafetyCertificateOutlined,
   SunOutlined,
   MoonOutlined,
   LogoutOutlined,
-  MenuFoldOutlined,
-  MenuUnfoldOutlined,
+  PlayCircleOutlined,
 } from '@ant-design/icons'
 import zhCN from 'antd/locale/zh_CN'
 import Dashboard from '@/pages/Dashboard'
 import Accounts from '@/pages/Accounts'
-import ChatGPTConversation from '@/pages/ChatGPTConversation'
 import RegisterTaskPage from '@/pages/RegisterTaskPage'
 import Proxies from '@/pages/Proxies'
 import Settings from '@/pages/Settings'
 import TaskHistory from '@/pages/TaskHistory'
-import AccessControl from '@/pages/AccessControl'
-import AuthPortal from '@/pages/AuthPortal'
+import RunningTasks from '@/pages/RunningTasks'
+import Login from '@/pages/Login'
 import { darkTheme, lightTheme } from './theme'
-import { RegisterTaskCenterProvider } from '@/components/RegisterTaskCenter'
-import { AuthProvider, useAuth } from '@/components/AuthProvider'
+import { apiFetch, clearToken, getToken } from '@/lib/utils'
 
 const { Sider, Content } = Layout
-const { Title, Paragraph } = Typography
+
+function ProtectedLayout() {
+  const navigate = useNavigate()
+  const [ready, setReady] = useState(false)
+
+  useEffect(() => {
+    fetch('/api/auth/status')
+      .then(r => r.json())
+      .then(s => {
+        const token = getToken()
+        if (s.has_password && !token) {
+          navigate('/login', { replace: true })
+        } else {
+          setReady(true)
+        }
+      })
+      .catch(() => setReady(true))
+  }, [])
+
+  if (!ready) {
+    return (
+      <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+        <Spin size="large" />
+      </div>
+    )
+  }
+
+  return <AppContent />
+}
 
 function AppContent() {
-  const { loading, user, logout } = useAuth()
   const [themeMode, setThemeMode] = useState<'dark' | 'light'>(() =>
     (localStorage.getItem('theme') as 'dark' | 'light') || 'dark'
   )
   const [collapsed, setCollapsed] = useState(false)
   const [platforms, setPlatforms] = useState<{ key: string; label: string }[]>([])
+  const [hasPassword, setHasPassword] = useState(false)
   const location = useLocation()
   const navigate = useNavigate()
 
@@ -51,62 +75,28 @@ function AppContent() {
   }, [themeMode])
 
   useEffect(() => {
-    if (!user || user.role !== 'admin') return
-    fetch('/api/platforms')
-      .then(r => r.json())
+    fetch('/api/auth/status').then(r => r.json()).then(s => setHasPassword(s.has_password)).catch(() => {})
+  }, [])
+
+  useEffect(() => {
+    apiFetch('/platforms')
       .then(d => setPlatforms((d || [])
         .filter((p: any) => !['tavily', 'cursor'].includes(p.name))
         .map((p: any) => ({ key: p.name, label: p.display_name }))))
-  }, [user])
+      .catch(() => {})
+  }, [])
 
   const isLight = themeMode === 'light'
   const currentTheme = isLight ? lightTheme : darkTheme
 
-  if (loading) {
-    return (
-      <ConfigProvider theme={currentTheme} locale={zhCN}>
-        <div style={{ minHeight: '100vh', display: 'grid', placeItems: 'center' }}>Loading...</div>
-      </ConfigProvider>
-    )
-  }
-
-  if (!user) {
-    return (
-      <ConfigProvider theme={currentTheme} locale={zhCN}>
-        <AuthPortal />
-      </ConfigProvider>
-    )
-  }
-
-  if (user.role !== 'admin') {
-    return (
-      <ConfigProvider theme={currentTheme} locale={zhCN}>
-        <div style={{ minHeight: '100vh', display: 'grid', placeItems: 'center', padding: 24 }}>
-          <Card bordered={false} style={{ width: 'min(560px, 100%)' }}>
-            <Title level={3}>禁止访问</Title>
-            <Paragraph>普通用户不允许访问管理控制台页面。</Paragraph>
-            <Button danger onClick={logout}>退出登录</Button>
-          </Card>
-        </div>
-      </ConfigProvider>
-    )
-  }
-
   const getSelectedKey = () => {
     const path = location.pathname
     if (path === '/') return ['/']
-    if (path === '/accounts') return ['/accounts']
-    if (path.startsWith('/accounts/')) {
-      const parts = path.split('/').filter(Boolean)
-      if (parts.length >= 2) {
-        return [`/accounts/${parts[1]}`]
-      }
-      return ['/accounts']
-    }
+    if (path.startsWith('/accounts')) return [path]
     if (path === '/history') return ['/history']
     if (path === '/proxies') return ['/proxies']
     if (path === '/settings') return ['/settings']
-    if (path === '/access') return ['/access']
+    if (path === '/running-tasks') return ['/running-tasks']
     return ['/']
   }
 
@@ -117,13 +107,20 @@ function AppContent() {
       label: '仪表盘',
     },
     {
+      key: '/running-tasks',
+      icon: <PlayCircleOutlined />,
+      label: '任务运行',
+    },
+    {
       key: '/accounts',
       icon: <UserOutlined />,
       label: '平台管理',
-      children: platforms.map(p => ({
-        key: `/accounts/${p.key}`,
-        label: p.label,
-      })),
+      children: [
+        ...platforms.map(p => ({
+          key: `/accounts/${p.key}`,
+          label: p.label,
+        })),
+      ],
     },
     {
       key: '/history',
@@ -140,165 +137,128 @@ function AppContent() {
       icon: <SettingOutlined />,
       label: '全局配置',
     },
-    {
-      key: '/access',
-      icon: <SafetyCertificateOutlined />,
-      label: '访问控制',
-    },
   ]
 
   return (
     <ConfigProvider theme={currentTheme} locale={zhCN}>
-      <RegisterTaskCenterProvider>
-        <Layout style={{ minHeight: '100vh' }}>
-          <Sider
-            collapsible
-            collapsed={collapsed}
-            onCollapse={setCollapsed}
-            trigger={null}
+      <AntdApp>
+      <Layout style={{ minHeight: '100vh' }}>
+        <Sider
+          collapsible
+          collapsed={collapsed}
+          onCollapse={setCollapsed}
+          style={{
+            background: currentTheme.token?.colorBgContainer,
+            borderRight: `1px solid ${currentTheme.token?.colorBorder}`,
+          }}
+          width={220}
+        >
+          <div
             style={{
+              height: 64,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              borderBottom: `1px solid ${currentTheme.token?.colorBorder}`,
+            }}
+          >
+            <DashboardOutlined style={{ fontSize: 20, color: currentTheme.token?.colorPrimary }} />
+            {!collapsed && (
+              <span
+                style={{
+                  marginLeft: 8,
+                  fontWeight: 600,
+                  fontSize: 14,
+                  color: currentTheme.token?.colorText,
+                }}
+              >
+                Account Manager
+              </span>
+            )}
+          </div>
+          <Menu
+            mode="inline"
+            selectedKeys={getSelectedKey()}
+            defaultOpenKeys={['/accounts']}
+            items={menuItems}
+            onClick={({ key }) => navigate(key)}
+            style={{
+              borderRight: 0,
+              background: 'transparent',
+            }}
+          />
+          <div
+            style={{
+              position: 'absolute',
+              bottom: 56,
+              left: 0,
+              right: 0,
+              padding: '0 16px',
               display: 'flex',
               flexDirection: 'column',
-              background: currentTheme.token?.colorBgContainer,
-              borderRight: `1px solid ${currentTheme.token?.colorBorder}`,
+              gap: 8,
             }}
-            width={220}
           >
-            <div
+            <Button
+              block
+              icon={isLight ? <SunOutlined /> : <MoonOutlined />}
+              onClick={() => setThemeMode(isLight ? 'dark' : 'light')}
               style={{
-                height: 64,
                 display: 'flex',
                 alignItems: 'center',
-                justifyContent: 'center',
-                borderBottom: `1px solid ${currentTheme.token?.colorBorder}`,
+                justifyContent: collapsed ? 'center' : 'space-between',
               }}
             >
-              <DashboardOutlined style={{ fontSize: 20, color: currentTheme.token?.colorPrimary }} />
-              {!collapsed && (
-                <span
-                  style={{
-                    marginLeft: 8,
-                    fontWeight: 600,
-                    fontSize: 14,
-                    color: currentTheme.token?.colorText,
-                  }}
-                >
-                  Account Manager
-                </span>
-              )}
-            </div>
-            <div
-              style={{
-                flex: 1,
-                minHeight: 0,
-                overflowY: 'auto',
-                overflowX: 'hidden',
-              }}
-            >
-              <Menu
-                mode="inline"
-                selectedKeys={getSelectedKey()}
-                defaultOpenKeys={['/accounts']}
-                items={menuItems}
-                onClick={({ key }) => navigate(key)}
+              {!collapsed && (isLight ? '亮色模式' : '暗色模式')}
+            </Button>
+            {hasPassword && (
+              <Button
+                block
+                danger
+                icon={<LogoutOutlined />}
+                onClick={() => { clearToken(); navigate('/login') }}
                 style={{
-                  borderRight: 0,
-                  background: 'transparent',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: collapsed ? 'center' : 'space-between',
                 }}
-              />
-            </div>
-            <div
-              style={{
-                marginTop: 'auto',
-                padding: '12px 16px 16px',
-                borderTop: `1px solid ${currentTheme.token?.colorBorder}`,
-              }}
-            >
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                {!collapsed ? (
-                  <div
-                    style={{
-                      padding: '10px 12px',
-                      borderRadius: 12,
-                      border: `1px solid ${currentTheme.token?.colorBorder}`,
-                      background: currentTheme.token?.colorBgLayout,
-                    }}
-                  >
-                    <div style={{ fontWeight: 600, fontSize: 13 }}>{user.username}</div>
-                    <div style={{ fontSize: 12, opacity: 0.72 }}>{user.role}</div>
-                  </div>
-                ) : null}
-                <Button
-                  block
-                  icon={collapsed ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />}
-                  onClick={() => setCollapsed((current) => !current)}
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: collapsed ? 'center' : 'space-between',
-                  }}
-                >
-                  {!collapsed && '收起侧栏'}
-                </Button>
-                <Button
-                  block
-                  icon={isLight ? <SunOutlined /> : <MoonOutlined />}
-                  onClick={() => setThemeMode(isLight ? 'dark' : 'light')}
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: collapsed ? 'center' : 'space-between',
-                  }}
-                >
-                  {!collapsed && (isLight ? '亮色模式' : '暗色模式')}
-                </Button>
-                <Button
-                  block
-                  icon={<LogoutOutlined />}
-                  onClick={logout}
-                  danger
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: collapsed ? 'center' : 'space-between',
-                  }}
-                >
-                  {!collapsed && '退出登录'}
-                </Button>
-              </div>
-            </div>
-          </Sider>
-          <Content
-            style={{
-              padding: 24,
-              overflow: 'auto',
-              background: currentTheme.token?.colorBgLayout,
-            }}
-          >
-            <Routes>
-              <Route path="/" element={<Dashboard />} />
-              <Route path="/accounts" element={<Accounts />} />
-              <Route path="/accounts/chatgpt/:accountId/conversation" element={<ChatGPTConversation />} />
-              <Route path="/accounts/:platform" element={<Accounts />} />
-              <Route path="/register" element={<RegisterTaskPage />} />
-              <Route path="/history" element={<TaskHistory />} />
-              <Route path="/proxies" element={<Proxies />} />
-              <Route path="/settings" element={<Settings />} />
-              <Route path="/access" element={<AccessControl />} />
-            </Routes>
-          </Content>
-        </Layout>
-      </RegisterTaskCenterProvider>
+              >
+                {!collapsed && '退出登录'}
+              </Button>
+            )}
+          </div>
+        </Sider>
+        <Content
+          style={{
+            padding: 24,
+            overflow: 'auto',
+            background: currentTheme.token?.colorBgLayout,
+          }}
+        >
+          <Routes>
+            <Route path="/" element={<Dashboard />} />
+            <Route path="/accounts" element={<Accounts />} />
+            <Route path="/accounts/:platform" element={<Accounts />} />
+            <Route path="/register" element={<RegisterTaskPage />} />
+            <Route path="/running-tasks" element={<RunningTasks />} />
+            <Route path="/history" element={<TaskHistory />} />
+            <Route path="/proxies" element={<Proxies />} />
+            <Route path="/settings" element={<Settings />} />
+          </Routes>
+        </Content>
+      </Layout>
+      </AntdApp>
     </ConfigProvider>
   )
 }
 
 export default function App() {
   return (
-    <AuthProvider>
-      <BrowserRouter>
-        <AppContent />
-      </BrowserRouter>
-    </AuthProvider>
+    <BrowserRouter>
+      <Routes>
+        <Route path="/login" element={<Login />} />
+        <Route path="/*" element={<ProtectedLayout />} />
+      </Routes>
+    </BrowserRouter>
   )
 }

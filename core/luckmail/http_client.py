@@ -18,6 +18,7 @@ from urllib.parse import urlencode
 from curl_cffi import requests as curl_requests
 
 from .exceptions import APIError, AuthError, NetworkError
+from ..proxy_utils import normalize_proxy_url, build_requests_proxy_config
 
 
 def _is_async_context() -> bool:
@@ -95,6 +96,7 @@ class LuckMailHttpClient:
         timeout: float = 30.0,
         use_hmac: bool = False,
         impersonate: str = "chrome",
+        proxy_url: Optional[str] = None,
     ):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
@@ -102,6 +104,8 @@ class LuckMailHttpClient:
         self.timeout = timeout
         self.use_hmac = use_hmac and api_secret is not None
         self.impersonate = impersonate
+        self.proxy_url = normalize_proxy_url(proxy_url)
+        self._proxy_config = build_requests_proxy_config(self.proxy_url)
 
         # 同步 Session（延迟初始化）
         self._sync_session: Optional[curl_requests.Session] = None
@@ -111,19 +115,49 @@ class LuckMailHttpClient:
     def _get_sync_session(self) -> curl_requests.Session:
         """获取或创建同步 Session"""
         if self._sync_session is None:
-            self._sync_session = curl_requests.Session(
-                impersonate=self.impersonate,
-                timeout=self.timeout,
-            )
+            session_kwargs = {
+                "impersonate": self.impersonate,
+                "timeout": self.timeout,
+            }
+            if self.proxy_url:
+                try:
+                    self._sync_session = curl_requests.Session(
+                        proxy=self.proxy_url,
+                        **session_kwargs,
+                    )
+                except TypeError:
+                    self._sync_session = curl_requests.Session(**session_kwargs)
+            else:
+                self._sync_session = curl_requests.Session(**session_kwargs)
+            if self._proxy_config and self._sync_session is not None:
+                try:
+                    self._sync_session.proxies = dict(self._proxy_config)
+                except Exception:
+                    pass
         return self._sync_session
 
     async def _get_async_session(self):
         """获取或创建异步 Session"""
         if self._async_session is None:
-            self._async_session = curl_requests.AsyncSession(
-                impersonate=self.impersonate,
-                timeout=self.timeout,
-            )
+            session_kwargs = {
+                "impersonate": self.impersonate,
+                "timeout": self.timeout,
+            }
+            if self.proxy_url:
+                try:
+                    self._async_session = curl_requests.AsyncSession(
+                        proxy=self.proxy_url,
+                        **session_kwargs,
+                    )
+                except TypeError:
+                    self._async_session = curl_requests.AsyncSession(**session_kwargs)
+            else:
+                self._async_session = curl_requests.AsyncSession(**session_kwargs)
+            if self._proxy_config and self._async_session is not None:
+                try:
+                    self._async_session.proxies = dict(self._proxy_config)
+                except Exception:
+                    pass
         return self._async_session
 
     def _build_headers(self) -> Dict[str, str]:

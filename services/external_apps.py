@@ -3,19 +3,17 @@
 from __future__ import annotations
 
 import os
+import re
+import stat
 import shutil
 import subprocess
 import sys
 import threading
 import time
-import tempfile
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
 
 import requests
-import yaml
-from core.log_utils import read_log_tail
 
 _ROOT = Path(__file__).resolve().parents[2]
 _EXT_ROOT = _ROOT / "_ext_targets"
@@ -40,18 +38,18 @@ _SERVICE_META = {
     "cliproxyapi": {
         "label": "CLIProxyAPI",
         "repo_name": "CLIProxyAPI",
-        "path": "",
-        "health_path": "/",
-        "management_path": "/management.html",
+        "url": "http://127.0.0.1:8317",
+        "health": "http://127.0.0.1:8317/",
+        "management_url": "http://127.0.0.1:8317/management.html",
         "port": 8317,
         "kind": "web",
     },
     "grok2api": {
         "label": "grok2api",
         "repo_name": "grok2api",
-        "path": "",
-        "health_path": "/health",
-        "management_path": "/admin",
+        "url": "http://127.0.0.1:8011",
+        "health": "http://127.0.0.1:8011/health",
+        "management_url": "http://127.0.0.1:8011/admin",
         "port": 8011,
         "kind": "web",
     },
@@ -67,15 +65,8 @@ _SERVICE_META = {
 _PROCS: dict[str, subprocess.Popen] = {}
 _LOG_FILES: dict[str, Any] = {}
 _LAST_ERROR: dict[str, str] = {}
-_STARTING: set[str] = set()
 _LOCK = threading.Lock()
-_MANAGED_SERVICE_NAMES = ("cliproxyapi", "grok2api")
-_MANAGED_SERVICE_DEFAULTS = {
-    "cliproxyapi": {"installed": False, "started": False},
-    "grok2api": {"installed": True, "started": True},
-}
-_BOOTSTRAP_THREAD: threading.Thread | None = None
-_BOOTSTRAP_THREAD_LOCK = threading.Lock()
+_SEMVER_TAG_PATTERN = re.compile(r"^v?\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$")
 
 
 def _get_setting(key: str, default: str = "") -> str:
@@ -88,164 +79,8 @@ def _get_setting(key: str, default: str = "") -> str:
         return default
 
 
-def _set_setting(key: str, value: str) -> None:
-    try:
-        from core.config_store import config_store
-
-        config_store.set(key, str(value))
-    except Exception:
-        pass
-
-
-def _bool_setting(value: Any, default: bool = False) -> bool:
-    text = str(value or "").strip().lower()
-    if not text:
-        return default
-    if text in {"1", "true", "yes", "y", "on"}:
-        return True
-    if text in {"0", "false", "no", "n", "off"}:
-        return False
-    return default
-
-
-def _service_state_key(name: str, field: str) -> str:
-    return f"external_apps_{name}_{field}"
-
-
-def _persist_service_state(name: str, installed: bool | None = None, started: bool | None = None) -> None:
-    if started is True and installed is False:
-        installed = True
-    if started is True and installed is None:
-        installed = True
-    if installed is not None:
-        _set_setting(_service_state_key(name, "installed"), "true" if installed else "false")
-    if started is not None:
-        _set_setting(_service_state_key(name, "started"), "true" if started else "false")
-
-
-def _migrate_managed_service_defaults(name: str, raw_installed: str, raw_started: str) -> tuple[str, str]:
-    if name != "cliproxyapi":
-        return raw_installed, raw_started
-
-    migrated_key = _service_state_key(name, "defaults_migrated_v2")
-    if _bool_setting(_get_setting(migrated_key, ""), default=False):
-        return raw_installed, raw_started
-
-    normalized_installed = str(raw_installed or "").strip().lower()
-    normalized_started = str(raw_started or "").strip().lower()
-    if normalized_installed == "true" and normalized_started == "true" and not _repo_path(name).exists():
-        _persist_service_state(name, installed=False, started=False)
-        raw_installed = "false"
-        raw_started = "false"
-
-    _set_setting(migrated_key, "true")
-    return raw_installed, raw_started
-
-
-def _load_service_state(name: str) -> dict[str, bool]:
-    if name not in _SERVICE_META:
-        raise KeyError(name)
-
-    installed_key = _service_state_key(name, "installed")
-    started_key = _service_state_key(name, "started")
-    raw_installed = str(_get_setting(installed_key, "") or "").strip()
-    raw_started = str(_get_setting(started_key, "") or "").strip()
-    raw_installed, raw_started = _migrate_managed_service_defaults(name, raw_installed, raw_started)
-    managed_defaults = _MANAGED_SERVICE_DEFAULTS.get(name)
-
-    if managed_defaults and not raw_installed and not raw_started:
-        _persist_service_state(
-            name,
-            installed=managed_defaults["installed"],
-            started=managed_defaults["started"],
-        )
-        return {
-            "installed": managed_defaults["installed"],
-            "started": managed_defaults["started"],
-            "managed": True,
-        }
-
-    repo_exists = _repo_path(name).exists()
-    installed = _bool_setting(raw_installed, default=repo_exists)
-    started = _bool_setting(raw_started, default=False)
-
-    updates: dict[str, bool] = {}
-    if managed_defaults:
-        if not raw_installed:
-            updates["installed"] = installed
-        if not raw_started:
-            updates["started"] = started
-
-    if started and not installed:
-        installed = True
-        updates["installed"] = True
-
-    if updates:
-        _persist_service_state(
-            name,
-            installed=updates.get("installed"),
-            started=updates.get("started"),
-        )
-
-    return {
-        "installed": installed,
-        "started": started,
-        "managed": bool(managed_defaults),
-    }
-
-
 def _creationflags() -> int:
     return getattr(subprocess, "CREATE_NO_WINDOW", 0)
-
-
-def _normalize_url_host(value: str, default: str) -> str:
-    text = str(value or "").strip()
-    if not text:
-        return default
-    candidate = text if "://" in text else f"http://{text}"
-    parsed = urlsplit(candidate)
-    host = parsed.hostname or parsed.netloc or parsed.path
-    host = str(host or "").strip().strip("/")
-    return host or default
-
-
-def _normalize_url_scheme(value: str, default: str = "http") -> str:
-    text = str(value or "").strip().lower()
-    if text in {"http", "https"}:
-        return text
-    return default
-
-
-def _external_apps_host() -> str:
-    return _normalize_url_host(
-        _get_setting("external_apps_host", "") or _get_setting("local_uri", ""),
-        "127.0.0.1",
-    )
-
-
-def _external_apps_scheme() -> str:
-    return _normalize_url_scheme(_get_setting("external_apps_scheme", "http"), "http")
-
-
-def _service_meta(name: str) -> dict[str, Any]:
-    meta = dict(_SERVICE_META[name])
-    if meta.get("kind") != "web":
-        return meta
-
-    port = int(meta.get("port") or 0)
-    external_host = _external_apps_host()
-    external_scheme = _external_apps_scheme()
-    internal_host = "127.0.0.1"
-    path = str(meta.get("path", "") or "")
-    health_path = str(meta.get("health_path", "") or "")
-    management_path = str(meta.get("management_path", "") or "")
-
-    meta["url"] = f"{external_scheme}://{external_host}:{port}{path}"
-    meta["health"] = f"http://{internal_host}:{port}{health_path}"
-    meta["management_url"] = (
-        f"{external_scheme}://{external_host}:{port}{management_path}" if management_path else ""
-    )
-    return meta
 
 
 def _repo_path(name: str) -> Path:
@@ -272,47 +107,285 @@ def _open_log(name: str):
     return f
 
 
-def _atomic_write_text(path: Path, content: str, encoding: str = "utf-8") -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
-    try:
-        with os.fdopen(fd, "w", encoding=encoding) as f:
-            f.write(content)
-        os.replace(tmp_name, path)
-    except Exception:
-        try:
-            os.unlink(tmp_name)
-        except Exception:
-            pass
-        raise
-
-
-def _clone_repo_if_missing(name: str):
-    repo = _repo_path(name)
-    if repo.exists():
+def _make_tree_writable(path: Path):
+    if not path.exists():
         return
-    repo.parent.mkdir(parents=True, exist_ok=True)
+    for root, dirs, files in os.walk(path):
+        for dirname in dirs:
+            p = Path(root) / dirname
+            try:
+                p.chmod(p.stat().st_mode | stat.S_IWRITE)
+            except Exception:
+                pass
+        for filename in files:
+            p = Path(root) / filename
+            try:
+                p.chmod(p.stat().st_mode | stat.S_IWRITE)
+            except Exception:
+                pass
+    try:
+        path.chmod(path.stat().st_mode | stat.S_IWRITE)
+    except Exception:
+        pass
+
+
+def _kill_processes_touching_path(path: Path):
+    if os.name != "nt":
+        return
+    try:
+        subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                "$p=$args[0]; "
+                "Get-CimInstance Win32_Process | "
+                "Where-Object { (($_.CommandLine -like ('*' + $p + '*')) -or ($_.ExecutablePath -like ('*' + $p + '*'))) } | "
+                "ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }",
+                str(path),
+            ],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=_creationflags(),
+        )
+    except Exception:
+        pass
+
+
+def _external_apps_update_mode() -> str:
+    mode = _get_setting("external_apps_update_mode", "tag").strip().lower()
+    return "branch" if mode == "branch" else "tag"
+
+
+def _git_has_remote_branch(repo: Path, branch: str) -> bool:
+    if not branch:
+        return False
+    check = subprocess.run(
+        ["git", "-C", str(repo), "show-ref", "--verify", "--quiet", f"refs/remotes/origin/{branch}"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        creationflags=_creationflags(),
+    )
+    return check.returncode == 0
+
+
+def _origin_default_branch(repo: Path) -> str:
+    try:
+        out = subprocess.check_output(
+            ["git", "-C", str(repo), "symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+            text=True,
+            creationflags=_creationflags(),
+        ).strip()
+        if out.startswith("origin/"):
+            branch = out.split("/", 1)[1].strip()
+            if branch:
+                return branch
+    except Exception:
+        pass
+
+    for candidate in ("main", "master"):
+        if _git_has_remote_branch(repo, candidate):
+            return candidate
+    return "main"
+
+
+def _current_local_branch(repo: Path) -> str:
+    try:
+        branch = subprocess.check_output(
+            ["git", "-C", str(repo), "rev-parse", "--abbrev-ref", "HEAD"],
+            text=True,
+            creationflags=_creationflags(),
+        ).strip()
+    except Exception:
+        return ""
+    return branch if branch and branch != "HEAD" else ""
+
+
+def _sync_repo_to_branch_head(repo: Path, preferred_branch: str = ""):
+    candidates = []
+    preferred = str(preferred_branch or "").strip()
+    if preferred:
+        candidates.append(preferred)
+    local_branch = _current_local_branch(repo)
+    if local_branch and local_branch not in candidates:
+        candidates.append(local_branch)
+    default_branch = _origin_default_branch(repo)
+    if default_branch and default_branch not in candidates:
+        candidates.append(default_branch)
+    for fallback in ("main", "master"):
+        if fallback not in candidates:
+            candidates.append(fallback)
+
+    for branch in candidates:
+        if not _git_has_remote_branch(repo, branch):
+            continue
+        subprocess.run(
+            ["git", "-C", str(repo), "checkout", "-B", branch, f"origin/{branch}"],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=_creationflags(),
+        )
+        subprocess.run(
+            ["git", "-C", str(repo), "reset", "--hard", f"origin/{branch}"],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=_creationflags(),
+        )
+        subprocess.run(
+            ["git", "-C", str(repo), "clean", "-fd"],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=_creationflags(),
+        )
+        return
+
+    raise RuntimeError(f"未找到可用远端分支（repo={repo}）")
+
+
+def _latest_semver_tag(repo: Path) -> str:
+    try:
+        out = subprocess.check_output(
+            [
+                "git",
+                "-C",
+                str(repo),
+                "for-each-ref",
+                "refs/tags",
+                "--sort=-version:refname",
+                "--format=%(refname:strip=2)",
+            ],
+            text=True,
+            creationflags=_creationflags(),
+        )
+    except Exception:
+        return ""
+
+    for line in out.splitlines():
+        tag = str(line or "").strip()
+        if not tag:
+            continue
+        if _SEMVER_TAG_PATTERN.fullmatch(tag):
+            return tag
+    return ""
+
+
+def _sync_repo_to_latest_semver_tag(repo: Path) -> bool:
+    tag = _latest_semver_tag(repo)
+    if not tag:
+        return False
     subprocess.run(
-        ["git", "clone", _REMOTE_URLS[name], str(repo)],
+        ["git", "-C", str(repo), "checkout", "--force", tag],
         check=True,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         creationflags=_creationflags(),
     )
+    subprocess.run(
+        ["git", "-C", str(repo), "reset", "--hard", tag],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        creationflags=_creationflags(),
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "clean", "-fd"],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        creationflags=_creationflags(),
+    )
+    return True
 
 
-def install(name: str, *, persist_state: bool = True) -> dict[str, Any]:
+def _sync_repo_to_latest(name: str):
+    repo = _repo_path(name)
+    repo.parent.mkdir(parents=True, exist_ok=True)
+    if not repo.exists():
+        subprocess.run(
+            ["git", "clone", _REMOTE_URLS[name], str(repo)],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=_creationflags(),
+        )
+
+    subprocess.run(
+        ["git", "-C", str(repo), "fetch", "--all", "--tags", "--prune"],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        creationflags=_creationflags(),
+    )
+    mode = _external_apps_update_mode()
+    if mode == "branch":
+        _sync_repo_to_branch_head(repo)
+        return
+
+    if not _sync_repo_to_latest_semver_tag(repo):
+        _sync_repo_to_branch_head(repo)
+
+
+def install(name: str) -> dict[str, Any]:
     with _LOCK:
         if name not in _SERVICE_META:
             raise KeyError(name)
-        _clone_repo_if_missing(name)
-    if persist_state:
-        _persist_service_state(name, installed=True)
+        _sync_repo_to_latest(name)
+    return _status_one(name)
+
+
+def uninstall(name: str) -> dict[str, Any]:
+    if name not in _SERVICE_META:
+        raise KeyError(name)
+
+    try:
+        stop(name)
+    except Exception:
+        pass
+
+    with _LOCK:
+        repo = _repo_path(name)
+        if repo.exists():
+            _kill_processes_touching_path(repo)
+            last_exc: Exception | None = None
+            for _ in range(12):
+                try:
+                    _make_tree_writable(repo)
+                    shutil.rmtree(repo)
+                    last_exc = None
+                    break
+                except Exception as exc:
+                    last_exc = exc
+                    _kill_processes_touching_path(repo)
+                    try:
+                        subprocess.run(
+                            ["attrib", "-R", str(repo / "*"), "/S", "/D"],
+                            check=False,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                            creationflags=_creationflags(),
+                        )
+                    except Exception:
+                        pass
+                    time.sleep(0.5)
+            if repo.exists():
+                _LAST_ERROR[name] = (
+                    f"卸载失败：目录仍存在 {repo}"
+                    + (f"，原因：{last_exc}" if last_exc else "")
+                )
+                raise RuntimeError(_LAST_ERROR[name])
+        _PROCS.pop(name, None)
+        _LAST_ERROR.pop(name, None)
+        _close_log(name)
+
     return _status_one(name)
 
 
 def _health_ok(name: str) -> bool:
-    url = _service_meta(name).get("health")
+    url = _SERVICE_META[name].get("health")
     if not url:
         return False
     try:
@@ -350,26 +423,6 @@ def _find_pid_by_port(port: int) -> int | None:
 def _proc_running(name: str) -> bool:
     proc = _PROCS.get(name)
     return bool(proc and proc.poll() is None)
-
-
-class _LastValueSafeLoader(yaml.SafeLoader):
-    pass
-
-
-def _construct_last_value_mapping(loader: yaml.SafeLoader, node: yaml.nodes.MappingNode, deep: bool = False):
-    loader.flatten_mapping(node)
-    mapping: dict[Any, Any] = {}
-    for key_node, value_node in node.value:
-        key = loader.construct_object(key_node, deep=deep)
-        value = loader.construct_object(value_node, deep=deep)
-        mapping[key] = value
-    return mapping
-
-
-_LastValueSafeLoader.add_constructor(
-    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
-    _construct_last_value_mapping,
-)
 
 
 def _kiro_known_exe_paths() -> list[str]:
@@ -446,14 +499,11 @@ def _find_desktop_pid(name: str) -> int | None:
 
 
 def _status_one(name: str) -> dict[str, Any]:
-    meta = _service_meta(name)
+    meta = _SERVICE_META[name]
     repo = _repo_path(name)
-    desired_state = _load_service_state(name)
     proc = _PROCS.get(name)
     desktop_pid = _find_desktop_pid(name) if meta["kind"] == "desktop" else None
     running = _health_ok(name) if meta["kind"] == "web" else bool(desktop_pid or _proc_running(name))
-    process_alive = _proc_running(name) if meta["kind"] == "web" else bool(desktop_pid or _proc_running(name))
-    starting = name in _STARTING or (meta["kind"] == "web" and process_alive and not running)
     pid = proc.pid if proc and proc.poll() is None else desktop_pid
     if meta["kind"] == "web" and running:
         pid = _find_pid_by_port(int(meta.get("port") or 0)) or pid
@@ -471,12 +521,7 @@ def _status_one(name: str) -> dict[str, Any]:
             if name == "grok2api"
             else ""
         ),
-        "desired_installed": desired_state["installed"],
-        "desired_running": desired_state["started"],
-        "managed": desired_state["managed"],
         "running": running,
-        "starting": starting,
-        "process_alive": process_alive,
         "pid": pid,
         "log_path": str(_log_path(name)),
         "last_error": _LAST_ERROR.get(name, ""),
@@ -486,19 +531,6 @@ def _status_one(name: str) -> dict[str, Any]:
 
 def list_status() -> list[dict[str, Any]]:
     return [_status_one(name) for name in _SERVICE_META]
-
-
-def read_log(name: str, max_lines: int = 400, max_bytes: int = 128 * 1024) -> dict[str, Any]:
-    if name not in _SERVICE_META:
-        raise KeyError(name)
-
-    return read_log_tail(
-        _log_path(name),
-        max_lines=max_lines,
-        max_bytes=max_bytes,
-        strip_control_chars=True,
-        extra={"name": name},
-    )
 
 
 def _find_go() -> str | None:
@@ -667,37 +699,22 @@ def _ensure_grok2api_uv_env(repo: Path) -> str:
 
 def _ensure_cliproxyapi_runtime_config(repo: Path):
     config_path = repo / "config.local.yaml"
-    example_path = repo / "config.example.yaml"
     if not config_path.exists():
-        shutil.copyfile(example_path, config_path)
+        shutil.copyfile(repo / "config.example.yaml", config_path)
     secret = _get_setting("cliproxyapi_management_key", "cliproxyapi")
-    raw = config_path.read_text(encoding="utf-8")
-    try:
-        data = yaml.load(raw, Loader=_LastValueSafeLoader)
-    except yaml.YAMLError:
-        fallback_raw = example_path.read_text(encoding="utf-8") if example_path.exists() else ""
-        data = yaml.load(fallback_raw, Loader=_LastValueSafeLoader) if fallback_raw.strip() else {}
-    if not isinstance(data, dict):
-        data = {}
-
-    remote_management = data.get("remote-management")
-    if not isinstance(remote_management, dict):
-        remote_management = {}
-    remote_management["allow-remote"] = True
-    remote_management["secret-key"] = secret
-    remote_management.setdefault("disable-control-panel", False)
-    data["remote-management"] = remote_management
-
-    # 兼容旧版本读取顶层 secret-key 的情况。
-    data["secret-key"] = secret
-
-    rendered = yaml.safe_dump(
-        data,
-        allow_unicode=True,
-        sort_keys=False,
-        default_flow_style=False,
-    )
-    _atomic_write_text(config_path, rendered if rendered.endswith("\n") else rendered + "\n")
+    lines = config_path.read_text(encoding="utf-8").splitlines()
+    updated_lines = []
+    replaced = False
+    for line in lines:
+        if line.lstrip().startswith("secret-key:"):
+            indent = line[: len(line) - len(line.lstrip())]
+            updated_lines.append(f'{indent}secret-key: "{secret}"')
+            replaced = True
+        else:
+            updated_lines.append(line)
+    if not replaced:
+        updated_lines.append(f'  secret-key: "{secret}"')
+    config_path.write_text("\n".join(updated_lines) + "\n", encoding="utf-8")
 
 
 def _ensure_grok2api_runtime_config(repo: Path):
@@ -746,7 +763,7 @@ def _ensure_grok2api_runtime_config(repo: Path):
     elif in_app and not app_key_written:
         updated_lines.append(f'app_key = "{app_key}"')
 
-    _atomic_write_text(config_file, "\n".join(updated_lines) + "\n")
+    config_file.write_text("\n".join(updated_lines) + "\n", encoding="utf-8")
 
 
 def _build_command(name: str) -> tuple[list[str], Path]:
@@ -776,7 +793,7 @@ def _build_command(name: str) -> tuple[list[str], Path]:
                 "--interface",
                 "asgi",
                 "--host",
-                "0.0.0.0",
+                "127.0.0.1",
                 "--port",
                 "8011",
                 "--workers",
@@ -792,7 +809,7 @@ def _build_command(name: str) -> tuple[list[str], Path]:
             "--interface",
             "asgi",
             "--host",
-            "0.0.0.0",
+            "127.0.0.1",
             "--port",
             "8011",
             "--workers",
@@ -812,19 +829,15 @@ def _build_command(name: str) -> tuple[list[str], Path]:
     raise KeyError(name)
 
 
-def start(name: str, *, persist_state: bool = True) -> dict[str, Any]:
+def start(name: str) -> dict[str, Any]:
     with _LOCK:
         if name not in _SERVICE_META:
             raise KeyError(name)
-        meta = _service_meta(name)
         repo = _repo_path(name)
         if not repo.exists():
-            raise RuntimeError(f"{meta['label']} 未安装，请先在插件页点击“安装”")
-        if persist_state:
-            _persist_service_state(name, installed=True, started=True)
-        if _status_one(name)["running"] or name in _STARTING or _proc_running(name):
+            raise RuntimeError(f"{_SERVICE_META[name]['label']} 未安装，请先在插件页点击“安装”")
+        if _status_one(name)["running"]:
             return _status_one(name)
-        _STARTING.add(name)
 
         log_file = _open_log(name)
         try:
@@ -841,41 +854,30 @@ def start(name: str, *, persist_state: bool = True) -> dict[str, Any]:
         except Exception as e:
             _LAST_ERROR[name] = str(e)
             _close_log(name)
-            _STARTING.discard(name)
             raise
 
-    try:
-        if meta["kind"] == "web":
-            for _ in range(90):
-                time.sleep(1)
-                if _health_ok(name):
-                    return _status_one(name)
-                proc = _PROCS.get(name)
-                if proc and proc.poll() is not None:
-                    _LAST_ERROR[name] = f"启动失败，退出码={proc.returncode}"
-                    return _status_one(name)
-            _LAST_ERROR[name] = "启动超时"
-        else:
-            time.sleep(2)
-        return _status_one(name)
-    finally:
-        with _LOCK:
-            _STARTING.discard(name)
+    if _SERVICE_META[name]["kind"] == "web":
+        for _ in range(90):
+            time.sleep(1)
+            if _health_ok(name):
+                return _status_one(name)
+            proc = _PROCS.get(name)
+            if proc and proc.poll() is not None:
+                _LAST_ERROR[name] = f"启动失败，退出码={proc.returncode}"
+                return _status_one(name)
+        _LAST_ERROR[name] = "启动超时"
+    else:
+        time.sleep(2)
+    return _status_one(name)
 
 
-def stop(name: str, *, persist_state: bool = True) -> dict[str, Any]:
+def stop(name: str) -> dict[str, Any]:
     with _LOCK:
-        if name not in _SERVICE_META:
-            raise KeyError(name)
-        meta = _service_meta(name)
-        if persist_state:
-            _persist_service_state(name, started=False)
-        _STARTING.discard(name)
         proc = _PROCS.get(name)
         port_pid = None
         desktop_pid = None
-        if meta["kind"] == "web":
-            port_pid = _find_pid_by_port(int(meta.get("port") or 0))
+        if _SERVICE_META[name]["kind"] == "web":
+            port_pid = _find_pid_by_port(int(_SERVICE_META[name].get("port") or 0))
         else:
             desktop_pid = _find_desktop_pid(name)
         if proc and proc.poll() is None:
@@ -908,7 +910,7 @@ def stop(name: str, *, persist_state: bool = True) -> dict[str, Any]:
             )
         _PROCS.pop(name, None)
         _close_log(name)
-    if meta["kind"] == "web":
+    if _SERVICE_META[name]["kind"] == "web":
         for _ in range(10):
             if not _health_ok(name):
                 break
@@ -933,52 +935,3 @@ def start_all() -> list[dict[str, Any]]:
 
 def stop_all() -> list[dict[str, Any]]:
     return [stop(name) for name in _SERVICE_META]
-
-
-def ensure_managed_services_ready(names: list[str] | tuple[str, ...] | None = None) -> list[dict[str, Any]]:
-    target_names = [name for name in (names or _MANAGED_SERVICE_NAMES) if name in _MANAGED_SERVICE_NAMES]
-    results: list[dict[str, Any]] = []
-
-    for name in target_names:
-        try:
-            desired_state = _load_service_state(name)
-            if desired_state["installed"] and not _repo_path(name).exists():
-                install(name, persist_state=False)
-
-            status = _status_one(name)
-            if desired_state["started"] and not status["running"]:
-                status = start(name, persist_state=False)
-            results.append(status)
-        except Exception as e:
-            _LAST_ERROR[name] = str(e)
-            results.append(_status_one(name))
-
-    return results
-
-
-def _bootstrap_managed_services_worker(names: tuple[str, ...]) -> None:
-    global _BOOTSTRAP_THREAD
-    try:
-        ensure_managed_services_ready(list(names))
-    finally:
-        with _BOOTSTRAP_THREAD_LOCK:
-            _BOOTSTRAP_THREAD = None
-
-
-def ensure_managed_services_async(names: list[str] | tuple[str, ...] | None = None) -> bool:
-    global _BOOTSTRAP_THREAD
-    target_names = tuple(name for name in (names or _MANAGED_SERVICE_NAMES) if name in _MANAGED_SERVICE_NAMES)
-    if not target_names:
-        return False
-
-    with _BOOTSTRAP_THREAD_LOCK:
-        if _BOOTSTRAP_THREAD and _BOOTSTRAP_THREAD.is_alive():
-            return False
-        _BOOTSTRAP_THREAD = threading.Thread(
-            target=_bootstrap_managed_services_worker,
-            args=(target_names,),
-            name="external-apps-bootstrap",
-            daemon=True,
-        )
-        _BOOTSTRAP_THREAD.start()
-    return True
