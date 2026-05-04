@@ -31,7 +31,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     LOCAL_SOLVER_URL=http://127.0.0.1:8889 \
     SOLVER_BROWSER_TYPE=camoufox \
     PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
-    PATH=/usr/local/go/bin:/root/.local/bin:$PATH
+    VIRTUAL_ENV=/app/.venv
+    PATH=/app/.venv/bin:/usr/local/go/bin:/root/.local/bin:$PATH
 
 WORKDIR /app
 
