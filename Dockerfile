@@ -31,7 +31,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     LOCAL_SOLVER_URL=http://127.0.0.1:8889 \
     SOLVER_BROWSER_TYPE=camoufox \
     PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
-    VIRTUAL_ENV=/app/.venv
+    VIRTUAL_ENV=/app/.venv \
     PATH=/app/.venv/bin:/usr/local/go/bin:/root/.local/bin:$PATH
 
 WORKDIR /app
@@ -44,7 +44,7 @@ RUN set -eux; \
       NO_PROXY="${NO_PROXY:-${no_proxy:-}}" \
       http_proxy="${http_proxy:-${HTTP_PROXY:-}}" \
       https_proxy="${https_proxy:-${HTTPS_PROXY:-}}" \
-      all_proxy="${all_proxy:-${ALL_PROXY:-}}" \
+      all_proxy="${all_alias:-${ALL_PROXY:-}}" \
       no_proxy="${no_proxy:-${NO_PROXY:-}}"; \
     sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list.d/debian.sources \
     && apt-get update \
@@ -67,11 +67,20 @@ RUN set -eux; \
     && tar -C /usr/local -xzf go1.24.0.linux-amd64.tar.gz \
     && rm go1.24.0.linux-amd64.tar.gz
 
-# --- uv (multi-stage copy, no download needed) ---
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+# --- uv ---
+RUN set -eux; \
+    export HTTP_PROXY="${HTTP_PROXY:-${http_proxy:-}}" \
+      HTTPS_PROXY="${HTTPS_PROXY:-${https_proxy:-}}" \
+      ALL_PROXY="${ALL_PROXY:-${all_proxy:-}}" \
+      NO_PROXY="${NO_PROXY:-${no_proxy:-}}" \
+      http_proxy="${http_proxy:-${HTTP_PROXY:-}}" \
+      https_proxy="${https_proxy:-${HTTPS_PROXY:-}}" \
+      all_proxy="${all_proxy:-${ALL_PROXY:-}}" \
+      no_proxy="${no_proxy:-${NO_PROXY:-}}"; \
+    curl -LsSf https://astral.sh/uv/install.sh | sh
 
 # --- Python deps (cached by pyproject.toml + uv.lock) ---
-COPY pyproject.toml uv.lock* ./
+COPY pyproject.toml uv.lock ./
 COPY scripts/install_camoufox.py /tmp/install_camoufox.py
 
 RUN set -eux; \
