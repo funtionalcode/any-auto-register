@@ -7,10 +7,6 @@ FROM python:3.12-slim AS runtime-base
 
 ARG CAMOUFOX_VERSION=135.0.1
 ARG CAMOUFOX_RELEASE=beta.24
-
-# Proxy ARGs declared early so ALL RUN layers can use them.
-# They are NOT baked into ENV (which would invalidate cache on change).
-# Each RUN exports them explicitly — cache only breaks when ARG value changes.
 ARG HTTP_PROXY
 ARG HTTPS_PROXY
 ARG ALL_PROXY
@@ -20,7 +16,6 @@ ARG https_proxy
 ARG all_proxy
 ARG no_proxy
 
-# Non-proxy env vars only — proxy values stay as ARG, not ENV
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     TZ=Asia/Shanghai \
@@ -37,18 +32,6 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     SOLVER_BROWSER_TYPE=camoufox \
     PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
     PATH=/usr/local/go/bin:/root/.local/bin:$PATH
-
-# Helper: resolve proxy vars (upper ↔ lower fallback)
-# Used in every RUN that needs network access
-#define PROXY_EXPORT \
-    export HTTP_PROXY="${HTTP_PROXY:-${http_proxy:-}}" \
-      HTTPS_PROXY="${HTTPS_PROXY:-${https_proxy:-}}" \
-      ALL_PROXY="${ALL_PROXY:-${all_proxy:-}}" \
-      NO_PROXY="${NO_PROXY:-${no_proxy:-}}" \
-      http_proxy="${http_proxy:-${HTTP_PROXY:-}}" \
-      https_proxy="${https_proxy:-${HTTPS_PROXY:-}}" \
-      all_proxy="${all_proxy:-${ALL_PROXY:-}}" \
-      no_proxy="${no_proxy:-${NO_PROXY:-}}"
 
 WORKDIR /app
 
