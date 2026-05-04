@@ -1,15 +1,26 @@
 # syntax=docker/dockerfile:1.7
 
 # ============================================================
-# Stage 1: Python runtime base (heavy, cached by requirements)
+# Stage 1: Python runtime base (heavy, cached by lockfile)
 # ============================================================
 FROM python:3.12-slim AS runtime-base
 
 ARG CAMOUFOX_VERSION=135.0.1
 ARG CAMOUFOX_RELEASE=beta.24
 
-# Only non-proxy env vars — proxy ARGs deliberately NOT set here
-# so that proxy changes don't invalidate apt/uv layers
+# Proxy ARGs declared early so ALL RUN layers can use them.
+# They are NOT baked into ENV (which would invalidate cache on change).
+# Each RUN exports them explicitly — cache only breaks when ARG value changes.
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG ALL_PROXY
+ARG NO_PROXY
+ARG http_proxy
+ARG https_proxy
+ARG all_proxy
+ARG no_proxy
+
+# Non-proxy env vars only — proxy values stay as ARG, not ENV
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     TZ=Asia/Shanghai \
@@ -27,10 +38,31 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
     PATH=/usr/local/go/bin:/root/.local/bin:$PATH
 
+# Helper: resolve proxy vars (upper ↔ lower fallback)
+# Used in every RUN that needs network access
+#define PROXY_EXPORT \
+    export HTTP_PROXY="${HTTP_PROXY:-${http_proxy:-}}" \
+      HTTPS_PROXY="${HTTPS_PROXY:-${https_proxy:-}}" \
+      ALL_PROXY="${ALL_PROXY:-${all_proxy:-}}" \
+      NO_PROXY="${NO_PROXY:-${no_proxy:-}}" \
+      http_proxy="${http_proxy:-${HTTP_PROXY:-}}" \
+      https_proxy="${https_proxy:-${HTTPS_PROXY:-}}" \
+      all_proxy="${all_proxy:-${ALL_PROXY:-}}" \
+      no_proxy="${no_proxy:-${NO_PROXY:-}}"
+
 WORKDIR /app
 
-# --- System deps (first thing, never invalidated by proxy/code changes) ---
-RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list.d/debian.sources \
+# --- System deps ---
+RUN set -eux; \
+    export HTTP_PROXY="${HTTP_PROXY:-${http_proxy:-}}" \
+      HTTPS_PROXY="${HTTPS_PROXY:-${https_proxy:-}}" \
+      ALL_PROXY="${ALL_PROXY:-${all_proxy:-}}" \
+      NO_PROXY="${NO_PROXY:-${no_proxy:-}}" \
+      http_proxy="${http_proxy:-${HTTP_PROXY:-}}" \
+      https_proxy="${https_proxy:-${HTTPS_PROXY:-}}" \
+      all_proxy="${all_proxy:-${ALL_PROXY:-}}" \
+      no_proxy="${no_proxy:-${NO_PROXY:-}}"; \
+    sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list.d/debian.sources \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
        curl git net-tools vim telnet \
@@ -38,23 +70,23 @@ RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.l
     && rm -rf /var/lib/apt/lists/*
 
 # --- Go ---
-RUN curl -LO https://go.dev/dl/go1.24.0.linux-amd64.tar.gz \
+RUN set -eux; \
+    export HTTP_PROXY="${HTTP_PROXY:-${http_proxy:-}}" \
+      HTTPS_PROXY="${HTTPS_PROXY:-${https_proxy:-}}" \
+      ALL_PROXY="${ALL_PROXY:-${all_proxy:-}}" \
+      NO_PROXY="${NO_PROXY:-${no_proxy:-}}" \
+      http_proxy="${http_proxy:-${HTTP_PROXY:-}}" \
+      https_proxy="${https_proxy:-${HTTPS_PROXY:-}}" \
+      all_proxy="${all_proxy:-${ALL_PROXY:-}}" \
+      no_proxy="${no_proxy:-${NO_PROXY:-}}"; \
+    curl -LO https://go.dev/dl/go1.24.0.linux-amd64.tar.gz \
     && tar -C /usr/local -xzf go1.24.0.linux-amd64.tar.gz \
     && rm go1.24.0.linux-amd64.tar.gz
 
-# --- uv (install once, cache-friendly) ---
+# --- uv (multi-stage copy, no download needed) ---
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
-# --- Python deps (cached by lockfile hash; proxy only used in this RUN) ---
-ARG HTTP_PROXY
-ARG HTTPS_PROXY
-ARG ALL_PROXY
-ARG NO_PROXY
-ARG http_proxy
-ARG https_proxy
-ARG all_proxy
-ARG no_proxy
-
+# --- Python deps (cached by pyproject.toml + uv.lock) ---
 COPY pyproject.toml uv.lock* ./
 COPY scripts/install_camoufox.py /tmp/install_camoufox.py
 
@@ -82,7 +114,7 @@ RUN set -eux; \
     && [ "$installed" -eq 1 ] \
     && CAMOUFOX_VERSION="$CAMOUFOX_VERSION" CAMOUFOX_RELEASE="$CAMOUFOX_RELEASE" python /tmp/install_camoufox.py
 
-# Set runtime proxy env (after heavy installs are done)
+# Runtime proxy env (set AFTER heavy installs so cache is safe)
 ENV HTTP_PROXY=${HTTP_PROXY} \
     HTTPS_PROXY=${HTTPS_PROXY} \
     ALL_PROXY=${ALL_PROXY} \
