@@ -152,6 +152,23 @@ class SKApiKeyUsageLog(SQLModel, table=True):
     created_at: datetime = Field(default_factory=_utcnow)
 
 
+class TempMailboxModel(SQLModel, table=True):
+    __tablename__ = "temp_mailboxes"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    email: str = Field(index=True)
+    provider: str = ""
+    account_id: str = ""
+    extra_json: str = "{}"
+    created_at: datetime = Field(default_factory=_utcnow)
+
+    def get_extra(self) -> dict:
+        return json.loads(self.extra_json or "{}")
+
+    def set_extra(self, d: dict):
+        self.extra_json = json.dumps(d, ensure_ascii=False)
+
+
 class ApiAccessLog(SQLModel, table=True):
     __tablename__ = "api_access_logs"
 

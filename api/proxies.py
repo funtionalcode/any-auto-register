@@ -13,6 +13,11 @@ class ProxyCreate(BaseModel):
     region: str = ""
 
 
+class ProxyUpdate(BaseModel):
+    url: str | None = None
+    region: str | None = None
+
+
 class ProxyBulkCreate(BaseModel):
     proxies: list[str]
     region: str = ""
@@ -95,6 +100,24 @@ def toggle_proxy(proxy_id: int, session: Session = Depends(get_session)):
     session.add(p)
     session.commit()
     return {"is_active": p.is_active}
+
+
+@router.put("/{proxy_id}")
+def update_proxy(proxy_id: int, body: ProxyUpdate, session: Session = Depends(get_session)):
+    p = session.get(ProxyModel, proxy_id)
+    if not p:
+        raise HTTPException(404, "代理不存在")
+    if body.url is not None:
+        existing = session.exec(select(ProxyModel).where(ProxyModel.url == body.url, ProxyModel.id != proxy_id)).first()
+        if existing:
+            raise HTTPException(400, "代理地址已存在")
+        p.url = body.url
+    if body.region is not None:
+        p.region = body.region
+    session.add(p)
+    session.commit()
+    session.refresh(p)
+    return p
 
 
 @router.post("/check")

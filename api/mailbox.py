@@ -3,6 +3,7 @@ from __future__ import annotations
 import threading
 import time
 from datetime import datetime, timezone
+import json
 from typing import Any
 from urllib.parse import urlparse
 
@@ -24,6 +25,8 @@ from core.base_mailbox import (
     create_mailbox,
 )
 from core.config_store import config_store
+from sqlmodel import Session, select as sql_select
+from core.db import TempMailboxModel, engine as db_engine
 
 router = APIRouter(prefix="/mailbox", tags=["mailbox"])
 
@@ -553,16 +556,39 @@ def _list_messages(provider: str, mailbox, account: MailboxAccount, limit: int) 
     raise RuntimeError(f"{provider} 暂未实现收件箱读取")
 
 
+def _save_temp_mailbox(email: str, provider: str, account_id: str, extra: dict) -> None:
+    """自动保存临时邮箱记录到数据库"""
+    try:
+        with Session(db_engine) as session:
+            existing = session.exec(
+                sql_select(TempMailboxModel).where(TempMailboxModel.email == email)
+            ).first()
+            if not existing:
+                import json as _json
+                m = TempMailboxModel(
+                    email=email,
+                    provider=provider,
+                    account_id=account_id,
+                    extra_json=_json.dumps(extra, ensure_ascii=False),
+                )
+                session.add(m)
+                session.commit()
+    except Exception:
+        pass
+
+
 def _create_test_inbox_payload(body: InboxCreateRequest) -> dict[str, Any]:
     merged_config = _merge_mailbox_config(body.config)
     provider = _resolve_provider(body.provider, merged_config)
     mailbox = _build_mailbox(provider, merged_config, body.proxy)
     account = mailbox.get_email()
+    extra = _extract_create_extra(provider, mailbox, account)
+    _save_temp_mailbox(account.email, provider, account.account_id, extra)
     return {
         "provider": provider,
         "email": account.email,
         "account_id": account.account_id,
-        "extra": _extract_create_extra(provider, mailbox, account),
+        "extra": extra,
     }
 
 
@@ -645,6 +671,93 @@ def list_inbox_messages_async(body: InboxMessagesRequest):
     )
     thread.start()
     return task
+
+
+@router.get("/inboxes")
+def list_temp_mailboxes():
+    """列出所有已创建的临时邮箱"""
+    with Session(db_engine) as session:
+        items = session.exec(sql_select(TempMailboxModel).order_by(TempMailboxModel.id.desc())).all()
+        return items
+
+
+@router.get("/stats")
+def mailbox_stats():
+    """返回临时邮箱统计信息"""
+    with Session(db_engine) as session:
+        total = len(session.exec(sql_select(TempMailboxModel)).all())
+        # 按提供商分组统计
+        rows = session.exec(sql_select(TempMailboxModel)).all()
+        by_provider: dict[str, int] = {}
+        for row in rows:
+            provider = row.provider or "unknown"
+            by_provider[provider] = by_provider.get(provider, 0) + 1
+    return {"total": total, "by_provider": by_provider}
+
+
+class SaveInboxRequest(BaseModel):
+    email: str
+    provider: str = ""
+    account_id: str = ""
+    extra: dict[str, Any] = Field(default_factory=dict)
+
+
+@router.post("/inboxes")
+def save_temp_mailbox(body: SaveInboxRequest):
+    """保存已创建的临时邮箱记录"""
+    with Session(db_engine) as session:
+        existing = session.exec(
+            sql_select(TempMailboxModel).where(TempMailboxModel.email == body.email)
+        ).first()
+        if existing:
+            return existing
+        m = TempMailboxModel(
+            email=body.email,
+            provider=body.provider,
+            account_id=body.account_id,
+            extra_json=str(__import__("json").dumps(body.extra, ensure_ascii=False)),
+        )
+        session.add(m)
+        session.commit()
+        session.refresh(m)
+        return m
+
+
+class DeleteInboxRequest(BaseModel):
+    ids: list[int]
+
+
+@router.post("/inboxes/batch-delete")
+def batch_delete_temp_mailboxes(body: DeleteInboxRequest):
+    """批量删除临时邮箱记录"""
+    if not body.ids:
+        raise HTTPException(400, "ID 列表不能为空")
+    with Session(db_engine) as session:
+        items = session.exec(
+            sql_select(TempMailboxModel).where(TempMailboxModel.id.in_(body.ids))
+        ).all()
+        for item in items:
+            session.delete(item)
+        session.commit()
+    return {"deleted": len(items)}
+
+
+@router.post("/inboxes/{mailbox_id}/messages")
+def get_temp_mailbox_messages(mailbox_id: int, body: InboxMessagesRequest | None = None):
+    """查看指定临时邮箱的邮件"""
+    with Session(db_engine) as session:
+        m = session.get(TempMailboxModel, mailbox_id)
+        if not m:
+            raise HTTPException(404, "临时邮箱记录不存在")
+    req = body or InboxMessagesRequest()
+    req.email = m.email
+    req.account_id = m.account_id
+    if not req.provider and m.provider:
+        req.provider = m.provider
+    extra = m.get_extra()
+    if not req.config and extra:
+        req.config = extra
+    return _list_inbox_messages_payload(req)
 
 
 @router.get("/inbox/tasks/{task_id}")

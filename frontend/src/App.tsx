@@ -11,12 +11,14 @@ import {
   MoonOutlined,
   LogoutOutlined,
   PlayCircleOutlined,
+  MailOutlined,
 } from '@ant-design/icons'
 import zhCN from 'antd/locale/zh_CN'
 import Dashboard from '@/pages/Dashboard'
 import Accounts from '@/pages/Accounts'
 import RegisterTaskPage from '@/pages/RegisterTaskPage'
 import Proxies from '@/pages/Proxies'
+import Mailbox from '@/pages/Mailbox'
 import Settings from '@/pages/Settings'
 import TaskHistory from '@/pages/TaskHistory'
 import RunningTasks from '@/pages/RunningTasks'
@@ -94,6 +96,7 @@ function AppContent() {
     if (path === '/') return ['/']
     if (path.startsWith('/accounts')) return [path]
     if (path === '/history') return ['/history']
+    if (path === '/mailbox') return ['/mailbox']
     if (path === '/proxies') return ['/proxies']
     if (path === '/settings') return ['/settings']
     if (path === '/running-tasks') return ['/running-tasks']
@@ -131,6 +134,11 @@ function AppContent() {
       key: '/proxies',
       icon: <GlobalOutlined />,
       label: '代理管理',
+    },
+    {
+      key: '/mailbox',
+      icon: <MailOutlined />,
+      label: '邮箱服务',
     },
     {
       key: '/settings',
@@ -243,6 +251,7 @@ function AppContent() {
             <Route path="/running-tasks" element={<RunningTasks />} />
             <Route path="/history" element={<TaskHistory />} />
             <Route path="/proxies" element={<Proxies />} />
+            <Route path="/mailbox" element={<Mailbox />} />
             <Route path="/settings" element={<Settings />} />
           </Routes>
         </Content>
