@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 
 # ============================================================
-# Stage 1: Python runtime base (heavy, cached by requirements.txt)
+# Stage 1: Python runtime base (heavy, cached by requirements)
 # ============================================================
 FROM python:3.12-slim AS runtime-base
 
@@ -9,10 +9,9 @@ ARG CAMOUFOX_VERSION=135.0.1
 ARG CAMOUFOX_RELEASE=beta.24
 
 # Only non-proxy env vars — proxy ARGs deliberately NOT set here
-# so that proxy changes don't invalidate apt/pip layers
+# so that proxy changes don't invalidate apt/uv layers
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1 \
     TZ=Asia/Shanghai \
     APP_TIMEZONE=Asia/Shanghai \
     HOST=0.0.0.0 \
@@ -26,7 +25,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     LOCAL_SOLVER_URL=http://127.0.0.1:8889 \
     SOLVER_BROWSER_TYPE=camoufox \
     PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
-    PATH=/usr/local/go/bin:$PATH:/root/.local/bin
+    PATH=/usr/local/go/bin:/root/.local/bin:$PATH
 
 WORKDIR /app
 
@@ -38,14 +37,15 @@ RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.l
        dos2unix iproute2 procps xvfb xauth \
     && rm -rf /var/lib/apt/lists/*
 
-# --- Go + uv (also never invalidated by proxy/code changes) ---
+# --- Go ---
 RUN curl -LO https://go.dev/dl/go1.24.0.linux-amd64.tar.gz \
     && tar -C /usr/local -xzf go1.24.0.linux-amd64.tar.gz \
-    && rm go1.24.0.linux-amd64.tar.gz \
-    && curl -LsSf https://astral.sh/uv/install.sh | sh
+    && rm go1.24.0.linux-amd64.tar.gz
 
-# --- Python deps (cached by requirements.txt; proxy only used in this RUN) ---
-# Declare proxy ARGs as late as possible — before this RUN only
+# --- uv (install once, cache-friendly) ---
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
+# --- Python deps (cached by lockfile hash; proxy only used in this RUN) ---
 ARG HTTP_PROXY
 ARG HTTPS_PROXY
 ARG ALL_PROXY
@@ -55,7 +55,7 @@ ARG https_proxy
 ARG all_proxy
 ARG no_proxy
 
-COPY requirements.txt ./
+COPY pyproject.toml uv.lock* ./
 COPY scripts/install_camoufox.py /tmp/install_camoufox.py
 
 RUN set -eux; \
@@ -67,8 +67,7 @@ RUN set -eux; \
       https_proxy="${https_proxy:-${HTTPS_PROXY:-}}" \
       all_proxy="${all_proxy:-${ALL_PROXY:-}}" \
       no_proxy="${no_proxy:-${NO_PROXY:-}}"; \
-    pip install --upgrade pip \
-    && pip install -r requirements.txt \
+    uv sync --frozen --no-dev --no-install-project \
     && python -m playwright install-deps firefox chromium \
     && installed=0 \
     && for attempt in 1 2 3; do \

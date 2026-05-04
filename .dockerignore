@@ -22,6 +22,7 @@ smstome_used/
 smstome_all_numbers.txt
 smstome_uk_deep_numbers.txt
 .env
+.env.*
 docs/
 tests/
 mail/
@@ -30,3 +31,4 @@ mail/
 electron/
 external_logs/
 .codex-review
+requirements.txt
