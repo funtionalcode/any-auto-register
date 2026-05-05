@@ -67,8 +67,8 @@ export default function Mailbox() {
         apiFetch('/mailbox/inboxes'),
         apiFetch('/mailbox/stats'),
       ])
-      setMailboxes(mailboxData || [])
-      setStats(statsData || null)
+      setMailboxes(Array.isArray(mailboxData) ? mailboxData : [])
+      setStats(statsData && typeof statsData === 'object' && !Array.isArray(statsData) ? statsData : null)
     } catch (e: any) {
       message.error(`加载失败: ${e.message}`)
     } finally {
@@ -105,7 +105,7 @@ export default function Mailbox() {
         method: 'POST',
         body: JSON.stringify({}),
       })
-      setMessages(data.items || [])
+      setMessages(Array.isArray(data?.items) ? data.items : [])
     } catch (e: any) {
       message.error(`获取邮件失败: ${e.message}`)
     } finally {

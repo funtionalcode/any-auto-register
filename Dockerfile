@@ -46,7 +46,7 @@ RUN set -eux; \
       https_proxy="${https_proxy:-${HTTPS_PROXY:-}}" \
       all_proxy="${all_alias:-${ALL_PROXY:-}}" \
       no_proxy="${no_proxy:-${NO_PROXY:-}}"; \
-    sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list.d/debian.sources \
+    printf 'Types: deb\nURIs: http://mirrors.aliyun.com/debian\nSuites: trixie trixie-updates\nComponents: main\nSigned-By: /usr/share/keyrings/debian-archive-keyring.pgp\n\nTypes: deb\nURIs: http://mirrors.aliyun.com/debian-security\nSuites: trixie-security\nComponents: main\nSigned-By: /usr/share/keyrings/debian-archive-keyring.pgp\n' > /etc/apt/sources.list.d/debian.sources \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
        curl git net-tools vim telnet \
@@ -92,8 +92,8 @@ RUN set -eux; \
       https_proxy="${https_proxy:-${HTTPS_PROXY:-}}" \
       all_proxy="${all_proxy:-${ALL_PROXY:-}}" \
       no_proxy="${no_proxy:-${NO_PROXY:-}}"; \
-    uv sync --frozen --no-dev --no-install-project \
-    && python -m playwright install-deps firefox chromium \
+    UV_DEFAULT_INDEX=https://mirrors.aliyun.com/pypi/simple/ uv sync --frozen --no-dev --no-install-project \
+    && apt-get update && python -m playwright install-deps firefox chromium \
     && installed=0 \
     && for attempt in 1 2 3; do \
          if python -m playwright install --with-deps chromium; then \
@@ -174,6 +174,7 @@ FROM runtime-base
 COPY check_config.py smstome_tool.py ./
 COPY scripts/ ./scripts/
 COPY docker/ ./docker/
+COPY README.md ./
 
 # 2) Core library (changes less often than api/)
 COPY core/ ./core/

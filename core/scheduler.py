@@ -1,4 +1,8 @@
 """定时任务调度 - 账号有效性检测、trial 到期提醒"""
+
+import logging
+_logger = logging.getLogger(__name__)
+
 from datetime import datetime, timezone
 from sqlmodel import Session, select
 from .db import engine, AccountModel
@@ -29,7 +33,7 @@ class Scheduler:
 
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
-        print("[Scheduler] 已启动")
+        _logger.info("Scheduler started")
 
     def stop(self):
         self._running = False
@@ -42,7 +46,7 @@ class Scheduler:
                     self.check_trial_expiry()
                     self._last_trial_check_at = now
                 except Exception as e:
-                    print(f"[Scheduler] Trial 检查错误: {e}")
+                    _logger.error("Trial check error: %s", e)
 
             cpa_interval = self._get_cpa_maintenance_interval_seconds()
             if cpa_interval and now - self._last_cpa_maintenance_at >= cpa_interval:
@@ -50,7 +54,7 @@ class Scheduler:
                     self.check_cpa_credentials()
                     self._last_cpa_maintenance_at = now
                 except Exception as e:
-                    print(f"[Scheduler] CPA 维护错误: {e}")
+                    _logger.error("CPA maintenance error: %s", e)
 
             time.sleep(self._loop_interval_seconds)
 
@@ -75,7 +79,7 @@ class Scheduler:
                     updated += 1
             s.commit()
             if updated:
-                print(f"[Scheduler] {updated} 个 trial 账号已到期")
+                _logger.info("%d trial accounts expired", updated)
 
     def check_accounts_valid(self, platform: str = None, limit: int = 50):
         """批量检测账号有效性"""

@@ -11,20 +11,19 @@ import {
   MoonOutlined,
   LogoutOutlined,
   PlayCircleOutlined,
-  MailOutlined,
 } from '@ant-design/icons'
 import zhCN from 'antd/locale/zh_CN'
 import Dashboard from '@/pages/Dashboard'
 import Accounts from '@/pages/Accounts'
 import RegisterTaskPage from '@/pages/RegisterTaskPage'
 import Proxies from '@/pages/Proxies'
-import Mailbox from '@/pages/Mailbox'
 import Settings from '@/pages/Settings'
 import TaskHistory from '@/pages/TaskHistory'
 import RunningTasks from '@/pages/RunningTasks'
 import Login from '@/pages/Login'
 import { darkTheme, lightTheme } from './theme'
 import { apiFetch, clearToken, getToken } from '@/lib/utils'
+import { RegisterTaskCenterProvider } from '@/components/RegisterTaskCenter'
 
 const { Sider, Content } = Layout
 
@@ -96,7 +95,6 @@ function AppContent() {
     if (path === '/') return ['/']
     if (path.startsWith('/accounts')) return [path]
     if (path === '/history') return ['/history']
-    if (path === '/mailbox') return ['/mailbox']
     if (path === '/proxies') return ['/proxies']
     if (path === '/settings') return ['/settings']
     if (path === '/running-tasks') return ['/running-tasks']
@@ -136,11 +134,6 @@ function AppContent() {
       label: '代理管理',
     },
     {
-      key: '/mailbox',
-      icon: <MailOutlined />,
-      label: '邮箱服务',
-    },
-    {
       key: '/settings',
       icon: <SettingOutlined />,
       label: '全局配置',
@@ -148,9 +141,10 @@ function AppContent() {
   ]
 
   return (
-    <ConfigProvider theme={currentTheme} locale={zhCN}>
-      <AntdApp>
-      <Layout style={{ minHeight: '100vh' }}>
+    <RegisterTaskCenterProvider>
+      <ConfigProvider theme={currentTheme} locale={zhCN}>
+        <AntdApp>
+        <Layout style={{ minHeight: '100vh' }}>
         <Sider
           collapsible
           collapsed={collapsed}
@@ -251,13 +245,13 @@ function AppContent() {
             <Route path="/running-tasks" element={<RunningTasks />} />
             <Route path="/history" element={<TaskHistory />} />
             <Route path="/proxies" element={<Proxies />} />
-            <Route path="/mailbox" element={<Mailbox />} />
-            <Route path="/settings" element={<Settings />} />
+                  <Route path="/settings" element={<Settings />} />
           </Routes>
         </Content>
       </Layout>
-      </AntdApp>
-    </ConfigProvider>
+        </AntdApp>
+      </ConfigProvider>
+    </RegisterTaskCenterProvider>
   )
 }
 

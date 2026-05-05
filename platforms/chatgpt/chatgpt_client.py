@@ -12,7 +12,7 @@ from core.proxy_utils import build_requests_proxy_config
 try:
     from curl_cffi import requests as curl_requests
 except ImportError:
-    print("[FAIL] 需要安装 curl_cffi: pip install curl_cffi")
+    _logger.error("curl_cffi required: pip install curl_cffi")
     import sys
 
     sys.exit(1)
@@ -162,7 +162,7 @@ class ChatGPTClient:
     def _log(self, msg):
         """输出日志"""
         if self.verbose:
-            print(f"  {msg}")
+            _logger.info(msg)
 
     def _enter_stage(self, stage: str, detail: str = ""):
         self.last_stage = str(stage or "").strip()
@@ -747,6 +747,19 @@ class ChatGPTClient:
             self._browser_pause()
             r = self.session.post(url, json=payload, headers=headers, timeout=30)
 
+            # 429 限流退避重试
+            _429_max_retries = 3
+            _429_attempt = 0
+            while r.status_code == 429 and _429_attempt < _429_max_retries:
+                _429_attempt += 1
+                _429_wait = min(5 * (2 ** _429_attempt), 30)
+                self._log(f"register_user 429 限流，{_429_wait}s 后重试 ({_429_attempt}/{_429_max_retries})...")
+                time.sleep(_429_wait)
+                headers.update(generate_datadog_trace())
+                self._browser_pause()
+                r = self.session.post(url, json=payload, headers=headers, timeout=30)
+                self._log(f"register_user(429重试{_429_attempt}) -> {r.status_code}")
+
             if r.status_code == 200:
                 data = r.json()
                 self._log("注册成功")
@@ -785,6 +798,29 @@ class ChatGPTClient:
                 timeout=30,
             )
             self._log(f"验证码发送状态: {r.status_code}")
+
+            # 429 限流退避重试
+            _429_otp_max = 3
+            _429_otp_attempt = 0
+            while r.status_code == 429 and _429_otp_attempt < _429_otp_max:
+                _429_otp_attempt += 1
+                _429_otp_wait = min(5 * (2 ** _429_otp_attempt), 30)
+                self._log(f"send_email_otp 429 限流，{_429_otp_wait}s 后重试 ({_429_otp_attempt}/{_429_otp_max})...")
+                time.sleep(_429_otp_wait)
+                self._browser_pause()
+                r = self.session.get(
+                    url,
+                    headers=self._headers(
+                        url,
+                        accept="application/json, text/plain, */*",
+                        referer=referer or f"{self.AUTH}/create-account/password",
+                        fetch_site="same-origin",
+                    ),
+                    allow_redirects=True,
+                    timeout=30,
+                )
+                self._log(f"验证码发送状态(429重试{_429_otp_attempt}): {r.status_code}")
+
             if r.status_code != 200:
                 self._log(f"验证码发送失败响应: {r.text[:180]}")
                 return False
@@ -834,6 +870,19 @@ class ChatGPTClient:
         try:
             self._browser_pause()
             r = self.session.post(url, json=payload, headers=headers, timeout=30)
+
+            # 429 限流退避重试
+            _429_otp_max = 3
+            _429_otp_attempt = 0
+            while r.status_code == 429 and _429_otp_attempt < _429_otp_max:
+                _429_otp_attempt += 1
+                _429_otp_wait = min(5 * (2 ** _429_otp_attempt), 30)
+                self._log(f"verify_email_otp 429 限流，{_429_otp_wait}s 后重试 ({_429_otp_attempt}/{_429_otp_max})...")
+                time.sleep(_429_otp_wait)
+                headers.update(generate_datadog_trace())
+                self._browser_pause()
+                r = self.session.post(url, json=payload, headers=headers, timeout=30)
+                self._log(f"verify_email_otp(429重试{_429_otp_attempt}) -> {r.status_code}")
 
             if r.status_code == 200:
                 try:
@@ -904,6 +953,19 @@ class ChatGPTClient:
         try:
             self._browser_pause()
             r = self.session.post(url, json=payload, headers=headers, timeout=30)
+
+            # 429 限流退避重试
+            _429_acct_max = 3
+            _429_acct_attempt = 0
+            while r.status_code == 429 and _429_acct_attempt < _429_acct_max:
+                _429_acct_attempt += 1
+                _429_acct_wait = min(5 * (2 ** _429_acct_attempt), 30)
+                self._log(f"create_account 429 限流，{_429_acct_wait}s 后重试 ({_429_acct_attempt}/{_429_acct_max})...")
+                time.sleep(_429_acct_wait)
+                headers.update(generate_datadog_trace())
+                self._browser_pause()
+                r = self.session.post(url, json=payload, headers=headers, timeout=30)
+                self._log(f"create_account(429重试{_429_acct_attempt}) -> {r.status_code}")
 
             if r.status_code == 200:
                 try:

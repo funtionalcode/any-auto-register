@@ -17,16 +17,22 @@ mkdir -p \
   "${GO_BUILD_CACHE_DIR}" \
   "${GO_MODULE_CACHE_DIR}"
 touch \
-  "${RUNTIME_DIR}/account_manager.db" \
   "${RUNTIME_DIR}/smstome_all_numbers.txt" \
   "${RUNTIME_DIR}/smstome_uk_deep_numbers.txt" \
   "${RUNTIME_DIR}/logs/solver.log"
 
-ln -sfn "${RUNTIME_DIR}/account_manager.db" "${APP_DIR}/account_manager.db"
+# SQLite backward compat: only create/symlink db when using sqlite
+case "${DATABASE_URL:-}" in
+  sqlite:*|"")
+    touch "${RUNTIME_DIR}/account_manager.db"
+    ln -sfn "${RUNTIME_DIR}/account_manager.db" "${APP_DIR}/account_manager.db"
+    ;;
+esac
+
 ln -sfn "${RUNTIME_DIR}/smstome_used" "${APP_DIR}/smstome_used"
 ln -sfn "${RUNTIME_DIR}/smstome_all_numbers.txt" "${APP_DIR}/smstome_all_numbers.txt"
 ln -sfn "${RUNTIME_DIR}/smstome_uk_deep_numbers.txt" "${APP_DIR}/smstome_uk_deep_numbers.txt"
 ln -sfn "${RUNTIME_DIR}/logs/solver.log" "${APP_DIR}/services/turnstile_solver/solver.log"
 
 echo "[entrypoint] Starting backend under Xvfb so Docker can handle both headed and headless browser tasks"
-exec xvfb-run -a --server-args="-screen 0 1920x1080x24" uv run main.py
+exec xvfb-run -a --server-args="-screen 0 1920x1080x24" uv run --no-sync main.py

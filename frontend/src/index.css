@@ -137,8 +137,10 @@ body {
   gap: 12px;
   width: min(360px, calc(100vw - 24px));
   max-height: calc(100vh - 112px);
-  overflow: auto;
+  overflow-y: auto;
+  overflow-x: hidden;
   padding-right: 4px;
+  scroll-behavior: smooth;
 }
 
 .auth-portal {
@@ -211,8 +213,17 @@ body {
   box-shadow: 0 18px 40px rgba(15, 23, 42, 0.22);
 }
 
+html.light .register-task-fab {
+  border-color: rgba(0, 0, 0, 0.12);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.1);
+}
+
 .register-task-fab.is-open {
   box-shadow: 0 22px 48px rgba(15, 23, 42, 0.28);
+}
+
+html.light .register-task-fab.is-open {
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.14);
 }
 
 .register-task-fab.is-running {
@@ -225,6 +236,11 @@ body {
   overflow: hidden;
   backdrop-filter: blur(14px);
   box-shadow: 0 18px 50px rgba(15, 23, 42, 0.18);
+}
+
+html.light .register-task-dock-toolbar,
+html.light .register-task-dock-card {
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
 }
 
 .register-task-dock-toolbar {
@@ -260,14 +276,28 @@ body {
   transition: background 0.2s ease-out, border-color 0.2s ease-out, transform 0.2s ease-out;
 }
 
+html.light .register-task-group-toggle {
+  background: rgba(241, 245, 249, 0.9);
+  border-color: rgba(0, 0, 0, 0.08);
+}
+
 .register-task-group-toggle:hover {
   background: rgba(99, 102, 241, 0.14);
   border-color: rgba(99, 102, 241, 0.32);
 }
 
+html.light .register-task-group-toggle:hover {
+  background: rgba(99, 102, 241, 0.08);
+  border-color: rgba(79, 70, 229, 0.24);
+}
+
 .register-task-group-toggle:focus-visible {
   outline: 2px solid rgba(99, 102, 241, 0.72);
   outline-offset: 2px;
+}
+
+html.light .register-task-group-toggle:focus-visible {
+  outline-color: rgba(79, 70, 229, 0.6);
 }
 
 .register-task-dock-card .ant-card-head {
@@ -298,6 +328,23 @@ body {
   50% {
     transform: translateZ(0) scale(1.03);
     box-shadow: 0 22px 44px rgba(37, 99, 235, 0.28);
+  }
+}
+
+html.light .register-task-fab.is-running {
+  animation-name: registerTaskPulseLight;
+}
+
+@keyframes registerTaskPulseLight {
+  0%,
+  100% {
+    transform: translateZ(0) scale(1);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.1);
+  }
+
+  50% {
+    transform: translateZ(0) scale(1.03);
+    box-shadow: 0 12px 32px rgba(79, 70, 229, 0.2);
   }
 }
 

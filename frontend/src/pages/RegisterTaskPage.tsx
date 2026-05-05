@@ -7,24 +7,21 @@ import {
   Select,
   Button,
   Checkbox,
-  Tag,
+  message,
   Space,
   Typography,
-  Descriptions,
 } from 'antd'
 import {
   PlayCircleOutlined,
-  CheckCircleOutlined,
-  CloseCircleOutlined,
   LoadingOutlined,
 } from '@ant-design/icons'
 import { ChatGPTRegistrationModeSwitch } from '@/components/ChatGPTRegistrationModeSwitch'
-import { TaskLogPanel } from '@/components/TaskLogPanel'
 import { usePersistentChatGPTRegistrationMode } from '@/hooks/usePersistentChatGPTRegistrationMode'
 import { parseBooleanConfigValue } from '@/lib/configValueParsers'
 import { buildChatGPTRegistrationRequestAdapter } from '@/lib/chatgptRegistrationRequestAdapter'
 import { getExecutorOptions, normalizeExecutorForPlatform } from '@/lib/platformExecutorOptions'
 import { apiFetch } from '@/lib/utils'
+import { useRegisterTaskCenter } from '@/components/RegisterTaskCenter'
 
 const { Text } = Typography
 
@@ -35,8 +32,8 @@ function resolveEffectiveMailProvider(mailProvider: string, mailImportSource: st
 
 export default function RegisterTaskPage() {
   const [form] = Form.useForm()
-  const [task, setTask] = useState<any>(null)
-  const [polling, setPolling] = useState(false)
+  const [submitting, setSubmitting] = useState(false)
+  const { launchTask } = useRegisterTaskCenter()
   const { mode: chatgptRegistrationMode, setMode: setChatgptRegistrationMode } =
     usePersistentChatGPTRegistrationMode()
 
@@ -182,9 +179,9 @@ export default function RegisterTaskPage() {
       ? chatgptRegistrationRequestAdapter.extendExtra(registerExtra)
       : registerExtra
 
-    const res = await apiFetch('/tasks/register', {
-      method: 'POST',
-      body: JSON.stringify({
+    setSubmitting(true)
+    try {
+      await launchTask({
         platform: values.platform,
         email: values.email || null,
         password: values.password || null,
@@ -195,25 +192,13 @@ export default function RegisterTaskPage() {
         executor_type: values.executor_type,
         captcha_solver: values.captcha_solver,
         extra: adaptedRegisterExtra,
-      }),
-    })
-    setTask(res)
-    setPolling(true)
-    pollTask(res.task_id)
-  }
-
-  const pollTask = async (id: string) => {
-    const interval = setInterval(async () => {
-      const t = await apiFetch(`/tasks/${id}`)
-      setTask(t)
-      if (t.status === 'done' || t.status === 'failed' || t.status === 'stopped') {
-        clearInterval(interval)
-        setPolling(false)
-        if (t.cashier_urls && t.cashier_urls.length > 0) {
-          t.cashier_urls.forEach((url: string) => window.open(url, '_blank'))
-        }
-      }
-    }, 2000)
+      })
+      message.success('注册任务已启动，可在后台运行中心查看')
+    } catch (e: any) {
+      message.error(e?.message || '启动注册任务失败')
+    } finally {
+      setSubmitting(false)
+    }
   }
 
   const mailProviderRaw = Form.useWatch('mail_provider', form)
@@ -609,57 +594,12 @@ export default function RegisterTaskPage() {
           </Card>
         )}
 
-        <Button type="primary" htmlType="submit" block disabled={polling} icon={polling ? <LoadingOutlined /> : <PlayCircleOutlined />}>
-          {polling ? '注册中...' : '开始注册'}
+        <Button type="primary" htmlType="submit" block disabled={submitting} icon={submitting ? <LoadingOutlined /> : <PlayCircleOutlined />}>
+          {submitting ? '启动中...' : '开始注册'}
         </Button>
       </Form>
 
-      {task && (
-        <Card title={
-          <Space>
-            <span>任务状态</span>
-            <Tag color={
-              task.status === 'done' ? 'success' :
-              task.status === 'stopped' ? 'warning' :
-              task.status === 'failed' ? 'error' : 'processing'
-            }>
-              {task.status}
-            </Tag>
-          </Space>
-        } style={{ marginTop: 16 }}>
-          <Descriptions column={1} size="small">
-            <Descriptions.Item label="任务 ID">
-              <Text copyable style={{ fontFamily: 'monospace' }}>{task.id}</Text>
-            </Descriptions.Item>
-            <Descriptions.Item label="进度">{task.progress}</Descriptions.Item>
-            <Descriptions.Item label="跳过">{task.skipped ?? 0}</Descriptions.Item>
-          </Descriptions>
-          {task.success != null && (
-            <div style={{ marginTop: 8, color: '#10b981' }}>
-              <CheckCircleOutlined /> 成功 {task.success} 个
-            </div>
-          )}
-          {task.errors?.length > 0 && (
-            <div style={{ marginTop: 8 }}>
-              {task.errors.map((e: string, i: number) => (
-                <div key={i} style={{ color: '#ef4444', marginBottom: 4 }}>
-                  <CloseCircleOutlined /> {e}
-                </div>
-              ))}
-            </div>
-          )}
-          {task.error && (
-            <div style={{ marginTop: 8, color: '#ef4444' }}>
-              <CloseCircleOutlined /> {task.error}
-            </div>
-          )}
-          {task.id ? (
-            <div style={{ marginTop: 16 }}>
-              <TaskLogPanel taskId={task.id} />
-            </div>
-          ) : null}
-        </Card>
-      )}
+
     </div>
   )
 }

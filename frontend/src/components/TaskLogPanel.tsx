@@ -1,12 +1,15 @@
 import { useEffect, useRef, useState } from 'react'
-import { Button, message, Space, Tag } from 'antd'
-import { CopyOutlined, FastForwardOutlined, StopOutlined } from '@ant-design/icons'
+import { Button, Input, message, Space, Tag, theme, Typography } from 'antd'
+import { CopyOutlined, FastForwardOutlined, SendOutlined, StopOutlined } from '@ant-design/icons'
+
+const { Text } = Typography
 
 import { API_BASE, apiFetch, getToken } from '@/lib/utils'
 
 interface TaskLogPanelProps {
   taskId: string
   onDone?: () => void
+  onManualOtp?: (taskId: string, code: string) => Promise<void>
 }
 
 type TaskTerminalStatus = 'idle' | 'done' | 'failed' | 'stopped'
@@ -38,7 +41,8 @@ function mergeSummary(previous: RegisterSummary, incoming: Partial<RegisterSumma
   })
 }
 
-export function TaskLogPanel({ taskId, onDone }: TaskLogPanelProps) {
+export function TaskLogPanel({ taskId, onDone, onManualOtp }: TaskLogPanelProps) {
+  const { token: themeToken } = theme.useToken()
   const [lines, setLines] = useState<string[]>([])
   const [summary, setSummary] = useState<RegisterSummary>({ success: 0, registered: 0, total: 0 })
   const [error, setError] = useState('')
@@ -46,6 +50,12 @@ export function TaskLogPanel({ taskId, onDone }: TaskLogPanelProps) {
   const [skipLoading, setSkipLoading] = useState(false)
   const [stopLoading, setStopLoading] = useState(false)
   const [stopRequested, setStopRequested] = useState(false)
+  const [otpInput, setOtpInput] = useState('')
+  const [otpSubmitting, setOtpSubmitting] = useState(false)
+  const [showOtpInput, setShowOtpInput] = useState(false)
+  const [mailboxInfo, setMailboxInfo] = useState<{email: string; provider: string | null; account_id: string | null} | null>(null)
+  const [mailboxMessages, setMailboxMessages] = useState<any[]>([])
+  const [mailboxLoading, setMailboxLoading] = useState(false)
   const panelRef = useRef<HTMLDivElement>(null)
   const onDoneRef = useRef(onDone)
   const nextSinceRef = useRef(0)
@@ -54,7 +64,19 @@ export function TaskLogPanel({ taskId, onDone }: TaskLogPanelProps) {
 
   const handleCopyAll = async () => {
     try {
-      await navigator.clipboard.writeText(lines.join('\n'))
+      const text = lines.join('\n')
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(text)
+      } else {
+        const textarea = document.createElement('textarea')
+        textarea.value = text
+        textarea.style.position = 'fixed'
+        textarea.style.opacity = '0'
+        document.body.appendChild(textarea)
+        textarea.select()
+        document.execCommand('copy')
+        document.body.removeChild(textarea)
+      }
       message.success('日志已复制')
     } catch {
       message.error('复制失败')
@@ -257,6 +279,96 @@ export function TaskLogPanel({ taskId, onDone }: TaskLogPanelProps) {
     }
   }, [taskId])
 
+  // Detect OTP waiting pattern in logs
+  useEffect(() => {
+    if (lines.length === 0) return
+    const lastLines = lines.slice(-5)
+    const otpWaiting = lastLines.some(line =>
+      line.includes('等待邮箱验证码') ||
+      line.includes('等待验证码') ||
+      line.includes('正在等待') ||
+      line.includes('OTP') ||
+      line.includes('验证码超时')
+    )
+    setShowOtpInput(otpWaiting && !isFinished)
+  }, [lines, isFinished])
+
+  // Extract mailbox email from logs - prefer the email used in actual registration
+  useEffect(() => {
+    if (lines.length === 0 || mailboxInfo) return
+    // Priority 1: "邮箱: xxx" from registration platform (actual email used)
+    // Priority 2: "临时邮箱: xxx" from our pre-log
+    for (const line of lines) {
+      // Match "邮箱: odessa7975ca@y8.cloudvxz.com" from the platform's log
+      const platformMatch = line.match(/邮箱:\s*(\S+?@\S+?)(?:[,，\s]|$)/)
+      if (platformMatch) {
+        setMailboxInfo({ email: platformMatch[1].replace(/[,，]+$/, ''), provider: null, account_id: null })
+        return
+      }
+    }
+    for (const line of lines) {
+      const match = line.match(/临时邮箱:\s*(\S+?@\S+?)(?:[,，\s]|$)/)
+      if (match) {
+        setMailboxInfo({ email: match[1].replace(/[,，]+$/, ''), provider: null, account_id: null })
+        return
+      }
+    }
+  }, [lines, mailboxInfo])
+
+  // Fetch mailbox info from API once we have a taskId
+  useEffect(() => {
+    if (!taskId || mailboxInfo) return
+    let cancelled = false
+    apiFetch(`/tasks/${taskId}/mailbox`)
+      .then((data: any) => {
+        if (!cancelled && data.email) {
+          setMailboxInfo({ email: data.email, provider: data.provider, account_id: data.account_id })
+        }
+      })
+      .catch(() => {})
+    return () => { cancelled = true }
+  }, [taskId, mailboxInfo])
+
+  const handleFetchMessages = async () => {
+    if (!taskId) return
+    setMailboxLoading(true)
+    setMailboxMessages([])
+    try {
+      const data = await apiFetch(`/tasks/${taskId}/mailbox/messages`, {
+        method: 'POST',
+        body: JSON.stringify({ limit: 10 }),
+      }) as any
+      setMailboxMessages(data.messages || [])
+    } catch (e: any) {
+      message.error(e?.message || '获取邮件失败')
+    } finally {
+      setMailboxLoading(false)
+    }
+  }
+
+  const handleSubmitOtp = async () => {
+    const code = otpInput.trim()
+    if (!code) return
+    setOtpSubmitting(true)
+    try {
+      if (onManualOtp) {
+        await onManualOtp(taskId, code)
+      } else {
+        await apiFetch(`/tasks/${taskId}/otp`, {
+          method: 'POST',
+          body: JSON.stringify({ code }),
+        })
+      }
+      message.success('验证码已提交')
+      setOtpInput('')
+      setShowOtpInput(false)
+    } catch (e: any) {
+      message.error(e?.message || '提交验证码失败')
+    } finally {
+      setOtpSubmitting(false)
+    }
+  }
+
   useEffect(() => {
     if (!panelRef.current) return
     panelRef.current.scrollTop = panelRef.current.scrollHeight
@@ -313,8 +425,8 @@ export function TaskLogPanel({ taskId, onDone }: TaskLogPanelProps) {
           flex: 1,
           overflowY: 'auto',
           overflowX: 'hidden',
-          background: '#ffffff',
-          border: '1px solid #e5e7eb',
+          background: themeToken.colorBgContainer,
+          border: `1px solid ${themeToken.colorBorder}`,
           borderRadius: 8,
           padding: 12,
           fontFamily: 'monospace',
@@ -342,7 +454,7 @@ export function TaskLogPanel({ taskId, onDone }: TaskLogPanelProps) {
                     ? '#dc2626'
                     : line.includes('停止') || line.includes('跳过')
                       ? '#d97706'
-                      : '#1f2937',
+                      : themeToken.colorText,
             }}
           >
             {line}
@@ -355,6 +467,68 @@ export function TaskLogPanel({ taskId, onDone }: TaskLogPanelProps) {
           {footerText.text}
         </div>
       ) : null}
+
+      {mailboxInfo && (
+        <div style={{ marginTop: 8, padding: '8px 12px', background: themeToken.colorBgContainer, border: `1px solid ${themeToken.colorBorderSecondary}`, borderRadius: 8 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <Space>
+              <Text strong style={{ fontSize: 13 }}>临时邮箱</Text>
+              <Text code style={{ fontSize: 12, userSelect: 'text' }}>{mailboxInfo.email}</Text>
+              {mailboxInfo.provider && <Tag color="blue" style={{ fontSize: 11 }}>{mailboxInfo.provider}</Tag>}
+            </Space>
+            <Button size="small" loading={mailboxLoading} onClick={handleFetchMessages}>
+              收取邮件
+            </Button>
+          </div>
+          {mailboxMessages.length > 0 && (
+            <div style={{ marginTop: 8, maxHeight: 200, overflowY: 'auto' }}>
+              {mailboxMessages.map((msg: any, idx: number) => (
+                <div key={idx} style={{
+                  padding: '6px 8px',
+                  borderBottom: idx < mailboxMessages.length - 1 ? `1px solid ${themeToken.colorBorderSecondary}` : 'none',
+                  fontSize: 12,
+                }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                    <Text strong style={{ fontSize: 11 }}>{msg.subject || '(无主题)'}</Text>
+                    <Text type="secondary" style={{ fontSize: 11 }}>{msg.sender || ''}</Text>
+                  </div>
+                  {msg.verification_code && (
+                    <Tag color="green" style={{ fontSize: 12, fontWeight: 600, marginTop: 4 }}>
+                      验证码: {msg.verification_code}
+                    </Tag>
+                  )}
+                  {(msg.preview || msg.content) && !msg.verification_code && (
+                    <Text type="secondary" style={{ fontSize: 11, display: 'block', marginTop: 2 }} ellipsis>
+                      {msg.preview || msg.content}
+                    </Text>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {showOtpInput && (
+        <div style={{ marginTop: 8, display: 'flex', gap: 8, alignItems: 'center' }}>
+          <Input
+            placeholder='输入验证码'
+            value={otpInput}
+            onChange={(e) => setOtpInput(e.target.value)}
+            onPressEnter={handleSubmitOtp}
+            style={{ flex: 1 }}
+            maxLength={10}
+          />
+          <Button
+            type='primary'
+            icon={<SendOutlined />}
+            loading={otpSubmitting}
+            onClick={handleSubmitOtp}
+          >
+            提交验证码
+          </Button>
+        </div>
+      )}
     </div>
   )
 }

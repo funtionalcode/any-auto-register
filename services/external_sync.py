@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import logging
+_logger = logging.getLogger(__name__)
+
 from typing import Any
 
 from services.chatgpt_sync import (
@@ -87,8 +90,8 @@ def sync_account(account) -> list[dict[str, Any]]:
                     # 如果 token_json 中没有 refresh_token，从 extra 获取
                     if not token_json.get("refresh_token"):
                         refresh_token = _pick_text(extra, "refresh_token", "refreshToken")
-                        print(f"[DEBUG] extra keys: {list(extra.keys())}")
-                        print(f"[DEBUG] refresh_token from extra: {refresh_token[:20] if refresh_token else 'EMPTY'}")
+                        _logger.debug("extra keys: %s", list(extra.keys()))
+                        _logger.debug("refresh_token from extra: %s", refresh_token[:20] if refresh_token else "EMPTY")
                         if refresh_token:
                             token_json["refresh_token"] = refresh_token
                     if not token_json.get("access_token"):
@@ -108,8 +111,8 @@ def sync_account(account) -> list[dict[str, Any]]:
                     access_token = str(token_json.get("access_token") or "").strip()
 
                     # 验证必须有 refresh_token
-                    print(f"[DEBUG] Final token_json keys: {list(token_json.keys())}")
-                    print(f"[DEBUG] Final refresh_token: {refresh_token[:20] if refresh_token else 'EMPTY'}")
+                    _logger.debug("Final token_json keys: %s", list(token_json.keys()))
+                    _logger.debug("Final refresh_token: %s", refresh_token[:20] if refresh_token else "EMPTY")
                     if not refresh_token:
                         msg = "账号缺少 refresh_token"
                         persist_cpa_sync_result(account, False, msg)

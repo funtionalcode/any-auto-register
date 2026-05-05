@@ -68,6 +68,31 @@ class GrokRegister:
     def _has_auth_cookies(cookies: list) -> bool:
         return any(cookie.get("name") in {"sso", "sso-rw"} for cookie in cookies)
 
+
+    def _dismiss_cookie_banner(self, page) -> None:
+        """关闭可能遮挡按钮的 Cookie/GDPR 同意横幅"""
+        try:
+            for selector in [
+                'button:has-text("Accept")',
+                'button:has-text("Accept All")',
+                'button:has-text("同意")',
+                'button:has-text("接受")',
+                'button:has-text("Accept cookies")',
+                'button:has-text("I agree")',
+                '[id*="accept" i] button',
+                '[class*="cookie"] button',
+                '[class*="consent"] button',
+            ]:
+                btn = page.locator(selector).first
+                if btn.is_visible(timeout=1000):
+                    btn.click()
+                    self.log("  已关闭 Cookie 横幅")
+                    page.wait_for_timeout(500)
+                    return
+        except Exception:
+            pass
+
+
     def _launch_browser(self):
         from patchright.sync_api import sync_playwright
 
@@ -114,25 +139,124 @@ class GrokRegister:
             page.wait_for_timeout(2000)
         page.locator("input[type=email]").wait_for(state="visible", timeout=10000)
 
+    def _check_email_page_agreement(self, page) -> None:
+        """勾选邮箱注册页上的 '同意条款' checkbox（如有）"""
+        try:
+            checkboxes = page.locator('input[type="checkbox"]')
+            for i in range(checkboxes.count()):
+                cb = checkboxes.nth(i)
+                if cb.is_visible() and not cb.is_checked():
+                    cb.check(timeout=2000)
+                    self.log("  已勾选协议同意 checkbox")
+                    page.wait_for_timeout(300)
+                    return
+            for label_text in ["agree", "Terms of Service", "Privacy Policy", "服务条款", "隐私政策"]:
+                cb = page.get_by_role("checkbox", name=label_text)
+                if cb.count() > 0 and not cb.is_checked():
+                    cb.check(timeout=2000)
+                    self.log(f"  已勾选协议同意 checkbox(role: {label_text})")
+                    page.wait_for_timeout(300)
+                    return
+            page.evaluate(
+                """() => {
+                    const labels = [...document.querySelectorAll('label')];
+                    const target = labels.find(l =>
+                        /Terms of Service|Privacy Policy|服务条款|隐私政策|agree/i.test(l.innerText)
+                    );
+                    if (target) {
+                        const cb = target.querySelector('input[type="checkbox"]')
+                            || document.getElementById(target.getAttribute('for'));
+                        if (cb && !cb.checked) { cb.click(); return true; }
+                        target.click();
+                        return true;
+                    }
+                    const boxes = [...document.querySelectorAll('input[type="checkbox"]')];
+                    for (const b of boxes) {
+                        if (b.offsetParent !== null && !b.checked) { b.click(); return true; }
+                    }
+                    return false;
+                }"""
+            )
+        except Exception:
+            pass
+
     def _submit_email(self, page, email: str) -> None:
         self.log(f"Step2: 提交邮箱 {email} ...")
         page.locator("input[type=email]").fill(email)
-        page.locator("button[type=submit]").click()
+
+        # 勾选邮箱页上的协议同意 checkbox（如有）
+        self._check_email_page_agreement(page)
 
         def _email_verify_ready() -> bool:
             return page.locator("input[name=code]").count() > 0
+
+        def _click_submit():
+            btn = page.locator("button[type=submit]")
+            if btn.count() > 0 and btn.is_visible():
+                btn.click()
+            else:
+                for text in ["Sign up", "注册", "继续", "Submit"]:
+                    alt = page.locator('button:has-text("' + text + '")').first
+                    if alt.count() > 0 and alt.is_visible():
+                        alt.click()
+                        return
+                btn.click()
+
+        _click_submit()
+
+        # 短暂等待，若已直接跳转则返回
+        try:
+            self._wait_until(_email_verify_ready, timeout=5, desc="")
+            return
+        except Exception:
+            pass
+
+        # 检查是否域名被拒绝
+        body = page.locator("body").inner_text()
+        if any(
+            x in body
+            for x in ["域名", "已被拒绝", "其他邮箱地址", "disposable", "rejected"]
+        ):
+            raise RuntimeError(f"邮箱域名被拒绝: {body[:200]}")
+
+        # 检查邮箱提交页是否出现 Turnstile，若有则先解决
+        frame, box = self._find_turnstile_widget(page)
+        if box:
+            self.log("  邮箱提交页出现 Turnstile，尝试解决...")
+            try:
+                self._solve_turnstile_on_page(page)
+            except Exception as e:
+                self.log(f"  邮箱页 Turnstile 解决失败: {e}")
+            _click_submit()
 
         try:
             self._wait_until(
                 _email_verify_ready, timeout=15, desc="等待邮箱验证码页超时"
             )
+            return
+        except Exception:
+            pass
+
+        # Cookie 横幅可能遮挡了按钮，重试一次
+        self._dismiss_cookie_banner(page)
+        _click_submit()
+
+        # 再次检查 Turnstile
+        frame, box = self._find_turnstile_widget(page)
+        if box:
+            self.log("  邮箱提交页重试时出现 Turnstile，尝试解决...")
+            try:
+                self._solve_turnstile_on_page(page)
+            except Exception:
+                pass
+            _click_submit()
+
+        try:
+            self._wait_until(
+                _email_verify_ready, timeout=10, desc="等待邮箱验证码页超时(重试)"
+            )
         except Exception:
             body = page.locator("body").inner_text()
-            if any(
-                x in body
-                for x in ["域名", "已被拒绝", "其他邮箱地址", "disposable", "rejected"]
-            ):
-                raise RuntimeError(f"邮箱域名被拒绝: {body[:200]}")
             raise RuntimeError(f"邮箱提交失败: {body[:200]}")
 
     def _submit_otp(self, page, code: str) -> None:

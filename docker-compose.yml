@@ -31,9 +31,12 @@ services:
     container_name: any-auto-register
     init: true
     restart: unless-stopped
+    env_file:
+      - .env
     environment:
       TZ: Asia/Shanghai
       APP_TIMEZONE: Asia/Shanghai
+      DATABASE_URL: ${DATABASE_URL:-sqlite:///account_manager.db}
       HOST: 0.0.0.0
       PORT: "8000"
       APP_RELOAD: "0"

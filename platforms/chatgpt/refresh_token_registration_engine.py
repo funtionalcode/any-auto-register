@@ -174,12 +174,12 @@ class RefreshTokenRegistrationEngine:
         self.logs: list[str] = []
 
     def _log(self, message: str, level: str = "info"):
-        timestamp = datetime.now().strftime("%H:%M:%S")
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         log_message = f"[{timestamp}] {message}"
         self.logs.append(log_message)
 
         if self.callback_logger:
-            self.callback_logger(log_message)
+            self.callback_logger(message)
 
         if level == "error":
             logger.error(log_message)

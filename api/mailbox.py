@@ -11,7 +11,6 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from core.base_mailbox import (
-    ApiMailMailbox,
     CFWorkerMailbox,
     DuckMailMailbox,
     FreemailMailbox,
@@ -518,40 +517,6 @@ def _list_messages(provider: str, mailbox, account: MailboxAccount, limit: int) 
             )
             for message in messages[:limit]
         ]
-
-    if isinstance(mailbox, ApiMailMailbox):
-        response = mailbox._request("GET", "/messages", token=account.account_id)
-        if response.get("status_code") != 200:
-            raise RuntimeError("Mail.tm 收件箱读取失败")
-        messages = mailbox._mail_tm_items(response.get("data", {}))
-        items: list[dict[str, Any]] = []
-        for message in messages[:limit]:
-            message_id = str(message.get("id") or "").strip()
-            detail_data = {}
-            if message_id:
-                detail_response = mailbox._request(
-                    "GET",
-                    f"/messages/{message_id}",
-                    token=account.account_id,
-                )
-                detail_data = mailbox._mail_tm_object(detail_response.get("data", {}))
-            sender = ""
-            if isinstance(message.get("from"), dict):
-                sender = str(message.get("from", {}).get("address") or "").strip()
-            items.append(
-                _normalize_message(
-                    mailbox,
-                    message_id=message_id,
-                    subject=detail_data.get("subject") or message.get("subject"),
-                    sender=sender,
-                    recipient=account.email,
-                    created_at=detail_data.get("createdAt") or message.get("createdAt"),
-                    preview=message.get("intro"),
-                    content=detail_data.get("text"),
-                    html_content=detail_data.get("html"),
-                )
-            )
-        return items
 
     raise RuntimeError(f"{provider} 暂未实现收件箱读取")
 

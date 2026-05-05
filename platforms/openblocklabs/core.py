@@ -15,6 +15,8 @@ OpenBlockLabs 自动注册 (WorkOS AuthKit)
 pip install curl_cffi requests
 """
 
+import logging
+_logger = logging.getLogger(__name__)
 import re, json, time, base64, random, string, os
 from urllib.parse import urlencode, urlparse, parse_qs
 from curl_cffi import requests as curl_requests
@@ -114,7 +116,7 @@ class OpenBlockLabsRegister:
         self._action_id = None
 
     def log(self, msg):
-        print(f"[REG] {msg}")
+        _logger.info(msg)
 
     def _get_headers(self, referer: str = None, accept: str = None) -> dict:
         h = {
@@ -129,8 +131,24 @@ class OpenBlockLabsRegister:
         return h
 
     def _extract_action_id(self, text: str) -> str:
+        # 1) direct match in raw text (handles unsplit RSC data)
         m = re.search(r'\\?"id\\?":\\?"([a-f0-9]{40})\\?"', text)
-        return m.group(1) if m else None
+        if m:
+            return m.group(1)
+        # 2) concatenate RSC push data chunks and search (handles split IDs)
+        chunks = re.findall(r'self\.__next_f\.push\(\[\d+,\s*"((?:[^"\\]|\\.)*)"', text)
+        combined = ''.join(chunks)
+        combined = combined.replace('\\\\"', '"').replace('\\"', '"').replace('\\n', '\n')
+        m2 = re.search(r'"id":"([a-f0-9]{40})"', combined)
+        if m2:
+            return m2.group(1)
+        # 3) match hex split across script boundaries
+        m3 = re.search(r'([a-f0-9]+)\\?"\]</script><script>self\.__next_f\.push\(\[\d+,\\?"([a-f0-9]+)', text)
+        if m3:
+            full_id = m3.group(1) + m3.group(2)
+            if len(full_id) == 40:
+                return full_id
+        return None
 
     def _post_action(self, url: str, fields: list, router_state: str):
         all_fields = fields + [("0", '["$K1"]')]
