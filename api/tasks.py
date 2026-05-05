@@ -1,11 +1,12 @@
 from fastapi import APIRouter, BackgroundTasks, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-from sqlmodel import Session, select
+from sqlmodel import Session, select, func
 from typing import Optional
 from copy import deepcopy
 from datetime import datetime, timezone
-from core.db import TaskLog, TaskRunModel, engine
+from core.db import TaskLog, TaskLogLine, TaskRunModel, engine
+from core.base_mailbox import MailboxAccount
 from core.task_runtime import (
     AttemptOutcome,
     AttemptResult,
@@ -24,6 +25,10 @@ _task_store = RegisterTaskStore(
     max_finished_tasks=MAX_FINISHED_TASKS,
     cleanup_threshold=CLEANUP_THRESHOLD,
 )
+
+_persist_debounce_interval = 2.0
+_persist_last_times: dict[str, float] = {}
+_persist_lock = threading.Lock()
 
 
 class RegisterTaskRequest(BaseModel):
@@ -128,7 +133,7 @@ def _task_run_to_snapshot(row: TaskRunModel) -> dict:
     )
 
 
-def _upsert_task_run(snapshot: dict) -> None:
+def _upsert_task_run(snapshot: dict, *, skip_logs: bool = False) -> None:
     normalized = _normalize_snapshot(snapshot)
     if not normalized["id"]:
         return
@@ -147,7 +152,7 @@ def _upsert_task_run(snapshot: dict) -> None:
                 skipped=normalized["skipped"],
                 error=normalized["error"],
                 meta_json=_json_dumps(normalized["meta"], {}),
-                logs_json=_json_dumps(normalized["logs"], []),
+                logs_json="" if skip_logs else _json_dumps(normalized["logs"], []),
                 errors_json=_json_dumps(normalized["errors"], []),
                 cashier_urls_json=_json_dumps(normalized["cashier_urls"], []),
                 control_json=_json_dumps(normalized["control"], {}),
@@ -166,7 +171,8 @@ def _upsert_task_run(snapshot: dict) -> None:
             row.skipped = normalized["skipped"]
             row.error = normalized["error"]
             row.meta_json = _json_dumps(normalized["meta"], {})
-            row.logs_json = _json_dumps(normalized["logs"], [])
+            if not skip_logs:
+                row.logs_json = _json_dumps(normalized["logs"], [])
             row.errors_json = _json_dumps(normalized["errors"], [])
             row.cashier_urls_json = _json_dumps(normalized["cashier_urls"], [])
             row.control_json = _json_dumps(normalized["control"], {})
@@ -177,46 +183,107 @@ def _upsert_task_run(snapshot: dict) -> None:
         s.commit()
 
 
-def _persist_task_snapshot(task_id: str) -> None:
+def _persist_task_snapshot(task_id: str, *, force: bool = False) -> None:
+    """将内存中的任务快照持久化到 DB。force=True 跳过防抖，用于任务结束时。"""
     if not _task_store.exists(task_id):
         return
+    if not force:
+        with _persist_lock:
+            last = _persist_last_times.get(task_id, 0.0)
+            if time.time() - last < _persist_debounce_interval:
+                return
+            _persist_last_times[task_id] = time.time()
+    else:
+        with _persist_lock:
+            _persist_last_times.pop(task_id, None)
     try:
         snapshot = _task_store.snapshot(task_id)
     except Exception:
         return
-    _upsert_task_run(snapshot)
+    _upsert_task_run(snapshot, skip_logs=not force)
 
 
-def _get_persisted_task(task_id: str) -> Optional[dict]:
+def _get_persisted_task(task_id: str, *, with_logs: bool = True) -> Optional[dict]:
     with Session(engine) as s:
         row = s.get(TaskRunModel, task_id)
         if row is None:
             return None
-        return _task_run_to_snapshot(row)
+        snapshot = _task_run_to_snapshot(row)
+        if with_logs:
+            # 从 task_log_lines 表加载日志（更高效）
+            log_lines = s.exec(
+                select(TaskLogLine)
+                .where(TaskLogLine.task_id == task_id)
+                .order_by(TaskLogLine.line_no)
+            ).all()
+            if log_lines:
+                snapshot["logs"] = [line.content for line in log_lines]
+            # 如果 TaskLogLine 没有数据但 logs_json 有，则回退
+            elif not snapshot.get("logs"):
+                pass  # 保持原样
+        else:
+            snapshot["logs"] = []
+        return snapshot
 
 
-def _list_persisted_tasks() -> list[dict]:
+def _list_persisted_tasks(
+    page: int = 1, page_size: int = 20
+) -> dict:
+    """分页查询任务列表，不加载 logs_json 大字段。"""
     with Session(engine) as s:
-        rows = s.exec(select(TaskRunModel)).all()
-    snapshots = [_task_run_to_snapshot(row) for row in rows]
-    snapshots.sort(
-        key=lambda item: (
-            {"running": 0, "pending": 1, "done": 2, "failed": 3, "stopped": 4}.get(
-                str(item.get("status") or ""),
-                9,
-            ),
-            -_to_epoch_seconds(item.get("created_at")),
-        )
-    )
-    return snapshots
+        # 查总数
+        total = s.exec(select(func.count()).select_from(TaskRunModel)).one()
+        # 排序：running/pending 优先，然后按创建时间倒序
+        status_order = {"running": 0, "pending": 1, "done": 2, "failed": 3, "stopped": 4}
+        rows = s.exec(
+            select(TaskRunModel).order_by(TaskRunModel.created_at.desc())
+        ).all()
+        rows.sort(key=lambda r: (
+            status_order.get(r.status, 9),
+        ))
+        # 分页
+        start = (page - 1) * page_size
+        end = start + page_size
+        page_rows = rows[start:end]
+    items = []
+    for row in page_rows:
+        items.append({
+            "id": row.id,
+            "status": row.status,
+            "platform": row.platform,
+            "source": row.source,
+            "total": row.total,
+            "progress": row.progress,
+            "success": row.success,
+            "registered": row.registered,
+            "skipped": row.skipped,
+            "error": row.error,
+            "created_at": _to_epoch_seconds(row.created_at),
+            "updated_at": _to_epoch_seconds(row.updated_at),
+        })
+    return {"total": total, "page": page, "page_size": page_size, "items": items}
+
+
+_finalize_cache_interval = 5.0
+_finalize_cache_lock = threading.Lock()
+_finalize_cache_last_time: float = 0.0
+_finalize_cache_done: bool = False
 
 
 def _finalize_orphan_tasks() -> None:
+    global _finalize_cache_done, _finalize_cache_last_time
+    with _finalize_cache_lock:
+        now = time.time()
+        if now - _finalize_cache_last_time < _finalize_cache_interval:
+            if _finalize_cache_done:
+                return
+        _finalize_cache_last_time = now
     with Session(engine) as s:
         rows = s.exec(
             select(TaskRunModel).where(TaskRunModel.status.in_(["pending", "running"]))
         ).all()
         if not rows:
+            _finalize_cache_done = True
             return
         changed = False
         for row in rows:
@@ -249,7 +316,7 @@ def _ensure_task_mutable(task_id: str) -> None:
     if _task_store.exists(task_id):
         snapshot = _task_store.snapshot(task_id)
     else:
-        snapshot = _get_persisted_task(task_id) or {}
+        snapshot = _get_persisted_task(task_id, with_logs=False) or {}
     if snapshot.get("status") in {"done", "failed", "stopped"}:
         raise HTTPException(409, "任务已结束，无法再执行控制操作")
 
@@ -258,7 +325,7 @@ def _get_task_snapshot(task_id: str) -> dict:
     _ensure_task_exists(task_id)
     if _task_store.exists(task_id):
         _persist_task_snapshot(task_id)
-    snapshot = _get_persisted_task(task_id)
+    snapshot = _get_persisted_task(task_id, with_logs=True)
     if snapshot is None and _task_store.exists(task_id):
         snapshot = _normalize_snapshot(_task_store.snapshot(task_id))
     if snapshot is None:
@@ -300,6 +367,8 @@ def _prepare_register_request(req: RegisterTaskRequest) -> RegisterTaskRequest:
 def _create_task_record(
     task_id: str, req: RegisterTaskRequest, source: str, meta: dict | None = None
 ):
+    global _finalize_cache_done
+    _finalize_cache_done = False
     _task_store.create(
         task_id,
         platform=req.platform,
@@ -318,7 +387,7 @@ def enqueue_register_task(
     meta: dict | None = None,
 ) -> str:
     prepared = _prepare_register_request(req)
-    task_id = f"task_{int(time.time() * 1000)}"
+    task_id = f"task_{time.strftime('%Y%m%d%H%M%S')}"  
     _create_task_record(task_id, prepared, source, meta)
     if background_tasks is None:
         thread = threading.Thread(
@@ -337,12 +406,37 @@ def has_active_register_task(
 
 
 def _log(task_id: str, msg: str):
-    """向任务追加一条日志"""
-    ts = time.strftime("%H:%M:%S")
-    entry = f"[{ts}] {msg}"
+    """向任务追加一条日志 - 同时写入内存和 task_log_lines 表"""
+    ts = time.strftime("%Y-%m-%d %H:%M:%S")
+    clean_msg = msg
+    import re
+    if clean_msg.startswith("[") and "] " in clean_msg:
+        m = re.match(r'^\[\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\]\s*', clean_msg)
+        if not m:
+            m = re.match(r'^\[\d{2}:\d{2}:\d{2}\]\s*', clean_msg)
+        if m:
+            clean_msg = clean_msg[m.end():]
+    entry = f"[{ts}] {clean_msg}"
     _task_store.append_log(task_id, entry)
+    # 写入 task_log_lines 表（异步，不阻塞注册线程）
+    def _write_log_line():
+        try:
+            with Session(engine) as s:
+                logs_count = s.exec(
+                    select(func.count()).where(TaskLogLine.task_id == task_id)
+                ).one()
+                line = TaskLogLine(
+                    task_id=task_id,
+                    line_no=logs_count,
+                    content=entry,
+                )
+                s.add(line)
+                s.commit()
+        except Exception:
+            pass
+    threading.Thread(target=_write_log_line, daemon=True).start()
     _persist_task_snapshot(task_id)
-    print(entry)
+    logger.info(clean_msg)
 
 
 def _save_task_log(
@@ -495,11 +589,39 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
                 _log(task_id, f"开始注册第 {i + 1}/{req.count} 个账号")
                 if _proxy:
                     _log(task_id, f"使用代理: {_proxy}")
+                # Wrap mailbox.get_email() BEFORE register() to cache the result.
+                # Some providers (tempmail_lol) generate a new email on each call,
+                # so we must ensure it's only called once and the result is cached.
+                _original_get_email = None
+                _mail_email_cache = None
+                if getattr(_platform, 'mailbox', None) is not None:
+                    _original_get_email = _platform.mailbox.get_email
+                    _mail_email_cache = {'acct': None}
+                    def _make_cached_get_email(orig_fn, cache):
+                        def _cached(*args, **kwargs):
+                            if cache['acct'] is None:
+                                cache['acct'] = orig_fn(*args, **kwargs)
+                            return cache['acct']
+                        return _cached
+                    _platform.mailbox.get_email = _make_cached_get_email(_original_get_email, _mail_email_cache)
+
                 account = _platform.register(
                     email=req.email or None,
                     password=req.password,
                 )
                 current_email = account.email or current_email
+
+                # Save cached mailbox info to task meta for the /mailbox API
+                if _mail_email_cache and _mail_email_cache.get('acct'):
+                    _mail_acct = _mail_email_cache['acct']
+                    record = _task_store._records.get(task_id)
+                    if record:
+                        record.meta['mailbox_email'] = _mail_acct.email
+                        record.meta['mailbox_account_id'] = _mail_acct.account_id or ''
+                        record.meta['mail_provider'] = merged_extra.get('mail_provider', '')
+                if _original_get_email:
+                    _platform.mailbox.get_email = _original_get_email
+
                 if str(merged_extra.get("mail_provider", "")).strip() == "cfworker":
                     from core.email_domain_policy import validate_email_domain_policy
 
@@ -644,7 +766,7 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
         skipped=skipped,
         errors=errors,
     )
-    _persist_task_snapshot(task_id)
+    _persist_task_snapshot(task_id, force=True)
     _task_store.cleanup()
 
 
@@ -677,6 +799,165 @@ def stop_task(task_id: str):
     control = _task_store.request_stop(task_id)
     _log(task_id, "收到手动停止任务请求")
     return {"ok": True, "task_id": task_id, "control": control}
+
+
+class ManualOtpRequest(BaseModel):
+    code: str
+
+
+@router.post("/{task_id}/otp")
+def submit_manual_otp(task_id: str, body: ManualOtpRequest):
+    """手动提交验证码，供用户在邮箱等待超时时输入。"""
+    _finalize_orphan_tasks()
+    if not _task_store.exists(task_id):
+        raise HTTPException(409, "任务已结束或服务已重启，无法提交验证码")
+    code = (body.code or "").strip()
+    if not code:
+        raise HTTPException(400, "验证码不能为空")
+    control = _task_store.control_for(task_id)
+    control.submit_manual_otp(code)
+    _log(task_id, f"收到手动验证码: {code}")
+    return {"ok": True, "task_id": task_id, "code": code}
+
+
+@router.get("/{task_id}/mailbox")
+def get_task_mailbox_info(task_id: str):
+    """获取注册任务关联的临时邮箱信息。"""
+    _finalize_orphan_tasks()
+    if not _task_store.exists(task_id):
+        raise HTTPException(404, "任务不存在")
+    snapshot = _task_store.snapshot(task_id)
+    logs = snapshot.get("logs", [])
+    mailbox_email = ""
+
+    # Extract email from logs - prefer "邮箱:" (actual registration email) over "临时邮箱:"
+    for line in logs:
+        if "邮箱:" in line and "@" in line:
+            parts = line.split("邮箱:")
+            if len(parts) >= 2:
+                candidate = parts[-1].strip().split()[0] if parts[-1].strip() else ""
+                if "@" in candidate:
+                    mailbox_email = candidate.rstrip(",，")
+    if not mailbox_email:
+        for line in logs:
+            if "临时邮箱:" in line:
+                parts = line.split("临时邮箱:")
+                if len(parts) >= 2:
+                    candidate = parts[-1].strip().split()[0] if parts[-1].strip() else ""
+                    if "@" in candidate:
+                        mailbox_email = candidate.rstrip(",，")
+
+    # Try to get mailbox info from the in-memory task record
+    record = _task_store._records.get(task_id)
+    meta = record.meta if record else {}
+
+    # Prefer meta fields saved during registration
+    mail_provider = meta.get("mail_provider", "")
+    account_id = meta.get("mailbox_account_id", "")
+    meta_email = meta.get("mailbox_email", "")
+
+    # If we have a meta_email, use it as the authoritative email (avoids log parsing issues)
+    if meta_email:
+        mailbox_email = meta_email
+
+    # Fallback: get provider from task's extra config or global config
+    if not mail_provider:
+        extra = meta.get("extra", {})
+        if isinstance(extra, dict):
+            mail_provider = extra.get("mail_provider", "")
+    if not mail_provider:
+        from core.config_store import config_store as _cs
+        mail_provider = _cs.get("mail_provider", "")
+
+    if not mailbox_email:
+        return {"task_id": task_id, "email": None, "provider": None, "account_id": None}
+
+    # Try to find provider and account_id from temp_mailboxes table
+    with Session(engine) as s:
+        from core.db import TempMailboxModel
+        from sqlmodel import select as _sel
+        existing = s.exec(
+            _sel(TempMailboxModel).where(TempMailboxModel.email == mailbox_email)
+        ).first()
+        if existing:
+            provider = existing.provider or mail_provider or None
+            return {
+                "task_id": task_id,
+                "email": existing.email,
+                "provider": provider,
+                "account_id": existing.account_id or account_id or None,
+            }
+
+    return {
+        "task_id": task_id,
+        "email": mailbox_email,
+        "provider": mail_provider or None,
+        "account_id": account_id or None,
+    }
+
+
+class TaskMailboxMessagesRequest(BaseModel):
+    limit: int = 10
+
+
+@router.post("/{task_id}/mailbox/messages")
+def get_task_mailbox_messages(task_id: str, body: TaskMailboxMessagesRequest | None = None):
+    """读取注册任务关联的临时邮箱收件箱。"""
+    _finalize_orphan_tasks()
+    if not _task_store.exists(task_id):
+        raise HTTPException(404, "任务不存在")
+
+    info = get_task_mailbox_info(task_id)
+    email = info.get("email")
+    provider = info.get("provider")
+    account_id = info.get("account_id")
+    if not email:
+        raise HTTPException(400, "未找到关联的临时邮箱信息")
+
+    # Build mailbox using the task's original configuration
+    record = _task_store._records.get(task_id)
+    meta = record.meta if record else {}
+
+    # Reconstruct the extra config from the task's meta (saved during registration)
+    # Falls back to global config if meta doesn't have it
+    from core.config_store import config_store as _cs
+    global_config = _cs.get_all()
+
+    # Merge task meta into config - task meta takes priority
+    extra = dict(global_config)
+    task_extra = meta.get("extra", {})
+    if isinstance(task_extra, dict):
+        extra.update(task_extra)
+    # Override provider from the detected info
+    if provider:
+        extra["mail_provider"] = provider
+
+    from core.base_mailbox import create_mailbox
+    mailbox = create_mailbox(provider=provider or extra.get("mail_provider", "luckmail"), extra=extra)
+    account = MailboxAccount(email=email, account_id=account_id or "")
+    limit = body.limit if body else 10
+
+    try:
+        from api.mailbox import _list_messages
+        provider_key = provider or extra.get("mail_provider", "luckmail")
+        messages = _list_messages(provider_key, mailbox, account, limit)
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).exception(f"Failed to list messages for task {task_id}, provider={provider}, account_id={account_id}")
+        return {
+            "task_id": task_id,
+            "email": email,
+            "messages": [],
+            "error": f"{type(e).__name__}: {str(e)}",
+            "debug": {
+                "provider": provider,
+                "account_id": account_id,
+                "mail_provider_config": extra.get("mail_provider"),
+                "provider_key_used": provider or extra.get("mail_provider", "luckmail"),
+            },
+        }
+
+    return {"task_id": task_id, "email": email, "messages": messages}
 
 
 @router.get("/logs")
@@ -737,9 +1018,8 @@ async def stream_logs(task_id: str, since: int = 0):
             if use_memory:
                 logs, status = _task_store.log_state(task_id)
                 snapshot = _task_store.snapshot(task_id)
-                _persist_task_snapshot(task_id)
             else:
-                snapshot = _get_persisted_task(task_id) or {}
+                snapshot = _get_persisted_task(task_id, with_logs=True) or {}
                 logs = snapshot.get("logs") or []
                 status = snapshot.get("status") or "failed"
             counters = {
@@ -776,10 +1056,10 @@ def get_task(task_id: str):
 
 
 @router.get("")
-def list_tasks():
+def list_tasks(page: int = 1, page_size: int = 20):
     _finalize_orphan_tasks()
     # 以 DB 为主返回，避免进程重启导致列表丢失
-    return _list_persisted_tasks()
+    return _list_persisted_tasks(page=page, page_size=page_size)
 
 
 @router.delete("/{task_id}")

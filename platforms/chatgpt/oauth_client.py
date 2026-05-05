@@ -2,6 +2,8 @@
 OAuth 客户端模块 - 处理 Codex OAuth 登录流程
 """
 
+import logging
+_logger = logging.getLogger(__name__)
 import time
 import secrets
 import uuid
@@ -116,7 +118,7 @@ class OAuthClient:
     def _log(self, msg):
         """输出日志"""
         if self.verbose:
-            print(f"  [OAuth] {msg}")
+            _logger.info("[OAuth] %s", msg)
 
     def _enter_stage(self, stage: str, detail: str = ""):
         self.last_stage = str(stage or "").strip()
@@ -850,6 +852,24 @@ class OAuthClient:
                 f"current_url={str(r.url)[:120]}"
             )
 
+
+            # 429 限流退避重试
+            _429_max_retries = 3
+            _429_attempt = 0
+            while r.status_code == 429 and _429_attempt < _429_max_retries:
+                _429_attempt += 1
+                _429_wait = min(5 * (2 ** _429_attempt), 30)
+                self._log(
+                    f"authorize_continue 429 限流，{_429_wait}s 后重试 "
+                    f"({_429_attempt}/{_429_max_retries})..."
+                )
+                time.sleep(_429_wait)
+                headers.update(generate_datadog_trace())
+                kwargs["headers"] = headers
+                self._browser_pause()
+                r = self.session.post(request_url, **kwargs)
+                self._log(f"/authorize/continue(429重试{_429_attempt}) -> {r.status_code}")
+
             if (
                 r.status_code == 400
                 and "invalid_auth_step" in (r.text or "")
@@ -968,6 +988,24 @@ class OAuthClient:
             self._browser_pause()
             r = self.session.post(request_url, **kwargs)
             self._log(f"/password/verify -> {r.status_code}")
+
+            # 429 限流退避重试
+            _429_pwd_max = 3
+            _429_pwd_attempt = 0
+            while r.status_code == 429 and _429_pwd_attempt < _429_pwd_max:
+                _429_pwd_attempt += 1
+                _429_pwd_wait = min(5 * (2 ** _429_pwd_attempt), 30)
+                self._log(
+                    f"password_verify 429 限流，{_429_pwd_wait}s 后重试 "
+                    f"({_429_pwd_attempt}/{_429_pwd_max})..."
+                )
+                time.sleep(_429_pwd_wait)
+                headers.update(generate_datadog_trace())
+                kwargs["headers"] = headers
+                self._browser_pause()
+                r = self.session.post(request_url, **kwargs)
+                self._log(f"/password/verify(429重试{_429_pwd_attempt}) -> {r.status_code}")
+
 
             if r.status_code != 200:
                 self._set_error(f"密码验证失败: {r.status_code} - {r.text[:180]}")
@@ -1170,6 +1208,24 @@ class OAuthClient:
             self._browser_pause()
             r = self.session.get(request_url, **kwargs)
             self._log(f"/email-otp/send -> {r.status_code}")
+
+            # 429 限流退避重试
+            _429_otp_max = 3
+            _429_otp_attempt = 0
+            while r.status_code == 429 and _429_otp_attempt < _429_otp_max:
+                _429_otp_attempt += 1
+                _429_otp_wait = min(5 * (2 ** _429_otp_attempt), 30)
+                self._log(
+                    f"email_otp_send 429 限流，{_429_otp_wait}s 后重试 "
+                    f"({_429_otp_attempt}/{_429_otp_max})..."
+                )
+                time.sleep(_429_otp_wait)
+                headers.update(generate_datadog_trace())
+                kwargs["headers"] = headers
+                self._browser_pause()
+                r = self.session.get(request_url, **kwargs)
+                self._log(f"/email-otp/send(429重试{_429_otp_attempt}) -> {r.status_code}")
+
             if r.status_code != 200:
                 self._set_error(f"发送注册 OTP 失败: {r.status_code} - {r.text[:180]}")
                 return None

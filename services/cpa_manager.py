@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import logging
+_logger = logging.getLogger(__name__)
+
 from dataclasses import dataclass
 from typing import Any
 
@@ -230,7 +233,7 @@ def _trigger_register(missing_count: int, *, config: CpaMaintenanceConfig, remai
     from api.tasks import RegisterTaskRequest, enqueue_register_task, has_active_register_task
 
     if has_active_register_task(platform="chatgpt", source=AUTO_REGISTER_SOURCE):
-        print("[CPA] 已存在进行中的自动补注册任务，跳过本轮补注册")
+        _logger.info("CPA auto-replenish task already running, skipping this round")
         return {"triggered": False, "reason": "task_running"}
 
     config_store = _get_config_store()
@@ -252,10 +255,7 @@ def _trigger_register(missing_count: int, *, config: CpaMaintenanceConfig, remai
             "missing": missing_count,
         },
     )
-    print(
-        f"[CPA] 剩余凭证 {remaining_count} 低于阈值 {config.threshold}，"
-        f"已创建自动注册任务 {task_id}，补充 {missing_count} 个"
-    )
+    _logger.info("CPA remaining %d below threshold %d, created task %s for %d accounts", remaining_count, config.threshold, task_id, missing_count)
     return {"triggered": True, "task_id": task_id}
 
 
@@ -286,15 +286,12 @@ def maintain_cpa_credentials() -> dict[str, Any]:
         ]
         deleted_count = len(deleted_names)
         if deleted_count:
-            print(f"[CPA] 已删除 {deleted_count} 个 status=error 的凭证")
+            _logger.info("CPA deleted %d error credentials", deleted_count)
             sync_result = _delete_local_chatgpt_accounts_by_auth_names(deleted_names)
             synced_deleted_accounts = int(sync_result.get("deleted", 0) or 0)
             synced_deleted_emails = list(sync_result.get("emails", []) or [])
             if synced_deleted_accounts:
-                print(
-                    f"[CPA] Account Manager 同步删除 {synced_deleted_accounts} 个本地账号: "
-                    f"{', '.join(synced_deleted_emails)}"
-                )
+                _logger.info("CPA sync deleted %d local accounts: %s", synced_deleted_accounts, ", ".join(synced_deleted_emails))
 
     remaining_count = _count_remaining(files)
     result: dict[str, Any] = {
@@ -307,7 +304,7 @@ def maintain_cpa_credentials() -> dict[str, Any]:
     }
 
     if remaining_count >= config.threshold:
-        print(f"[CPA] 剩余凭证 {remaining_count}，阈值 {config.threshold}，无需补注册")
+        _logger.info("CPA remaining %d credentials, threshold %d, no replenish needed", remaining_count, config.threshold)
         result["register"] = {"triggered": False, "reason": "enough_credentials"}
         return result
 

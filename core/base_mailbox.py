@@ -11,6 +11,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Optional, Any, Callable
 from .proxy_utils import build_requests_proxy_config
+import logging
+_logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -56,6 +58,14 @@ class BaseMailbox(ABC):
 
         while time.monotonic() < deadline:
             self._checkpoint()
+            # Check for manual OTP input first
+            task_control = getattr(self, "_task_control", None)
+            if task_control is not None:
+                manual_code = task_control.wait_for_manual_otp(timeout=0)
+                if manual_code:
+                    self._log(f"[手动验证码] 用户输入: {manual_code}")
+                    return manual_code
+
             code = poll_once()
             if code:
                 return code
@@ -63,7 +73,24 @@ class BaseMailbox(ABC):
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break
-            self._sleep_with_checkpoint(min(float(poll_interval), remaining))
+            # Check manual OTP during sleep as well
+            sleep_chunk = min(float(poll_interval), remaining)
+            task_control = getattr(self, "_task_control", None)
+            if task_control is not None:
+                manual_code = task_control.wait_for_manual_otp(timeout=sleep_chunk)
+                if manual_code:
+                    self._log(f"[手动验证码] 用户输入: {manual_code}")
+                    return manual_code
+            else:
+                self._sleep_with_checkpoint(sleep_chunk)
+
+        # Final check for manual OTP before giving up
+        task_control = getattr(self, "_task_control", None)
+        if task_control is not None:
+            manual_code = task_control.consume_manual_otp()
+            if manual_code:
+                self._log(f"[手动验证码] 用户输入: {manual_code}")
+                return manual_code
 
         self._checkpoint()
         raise TimeoutError(timeout_message or f"等待验证码超时 ({timeout_seconds}s)")
@@ -860,7 +887,7 @@ class TempMailLolMailbox(BaseMailbox):
             raise RuntimeError(f"tempmail.lol API 返回空邮箱: {data}")
         self._email = email
         self._token = data.get("token", "")
-        print(f"[TempMailLol] 生成邮箱: {self._email}")
+        self._log(f"[TempMailLol] 生成邮箱: {self._email}")
         return MailboxAccount(email=self._email, account_id=self._token)
 
     def get_current_ids(self, account: MailboxAccount) -> set:
@@ -1485,7 +1512,7 @@ class DuckMailMailbox(BaseMailbox):
             "https://", ""
         )
         address = f"{username}@{domain}"
-        print(f"[DuckMail] 创建账号: {address} direct={self._direct}")
+        self._log(f"[DuckMail] 创建账号: {address} direct={self._direct}")
         # 创建账号
         r = self._request(
             "POST", "/accounts", json={"address": address, "password": password}
@@ -2513,9 +2540,7 @@ class CFWorkerMailbox(BaseMailbox):
                 f"CFWorker API /admin/new_address 返回缺少 email/jwt: {data}"
             )
         self._token = token
-        print(
-            f"[CFWorker] 生成邮箱: {email} token={token[:40] if token else 'NONE'}..."
-        )
+        self._log(f"[CFWorker] 生成邮箱: {email} token={token[:40] if token else 'NONE'}...")
         return MailboxAccount(
             email=email,
             account_id=token,
@@ -2649,13 +2674,13 @@ class MoeMailMailbox(BaseMailbox):
         # 注册
         username = "".join(random.choices(string.ascii_lowercase + string.digits, k=12))
         password = "Test" + "".join(random.choices(string.digits, k=8)) + "!"
-        print(f"[MoeMail] 注册账号: {username} / {password}")
+        self._log(f"[MoeMail] 注册账号: {username} / {password}")
         r_reg = s.post(
             f"{self.api}/api/auth/register",
             json={"username": username, "password": password, "turnstileToken": ""},
             timeout=15,
         )
-        print(f"[MoeMail] 注册结果: {r_reg.status_code} {r_reg.text[:80]}")
+        self._log(f"[MoeMail] 注册结果: {r_reg.status_code} {r_reg.text[:80]}")
         # 获取 CSRF
         csrf_r = s.get(f"{self.api}/api/auth/csrf", timeout=10)
         csrf = csrf_r.json().get("csrfToken", "")
@@ -2671,9 +2696,9 @@ class MoeMailMailbox(BaseMailbox):
         for cookie in s.cookies:
             if "session-token" in cookie.name:
                 self._session_token = cookie.value
-                print(f"[MoeMail] 登录成功")
+                self._log("[MoeMail] 登录成功")
                 return cookie.value
-        print(f"[MoeMail] 登录失败，cookies: {[c.name for c in s.cookies]}")
+        self._log(f"[MoeMail] 登录失败，cookies: {[c.name for c in s.cookies]}")
         return ""
 
     def get_email(self) -> MailboxAccount:
@@ -2707,11 +2732,9 @@ class MoeMailMailbox(BaseMailbox):
         data = r.json()
         self._email = data.get("email", data.get("address", ""))
         email_id = data.get("id", "")
-        print(
-            f"[MoeMail] 生成邮箱: {self._email} id={email_id} domain={domain} status={r.status_code}"
-        )
+        self._log(f"[MoeMail] 生成邮箱: {self._email} id={email_id} domain={domain} status={r.status_code}")
         if not email_id:
-            print(f"[MoeMail] 生成失败: {data}")
+            _logger.warning("[MoeMail] 生成失败: %s", data)
         if email_id:
             self._email_count = getattr(self, "_email_count", 0) + 1
         return MailboxAccount(email=self._email, account_id=str(email_id))
@@ -4299,7 +4322,7 @@ class FreemailMailbox(BaseMailbox):
                 )
 
         self._email = email
-        print(f"[Freemail] 生成邮箱: {email}")
+        self._log(f"[Freemail] 生成邮箱: {email}")
         return MailboxAccount(email=email, account_id=email)
 
     def _ensure_domains(self) -> list:

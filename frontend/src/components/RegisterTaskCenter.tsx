@@ -96,14 +96,6 @@ interface RegisterTaskCenterContextValue {
   refreshTask: (taskId: string) => Promise<void>
 }
 
-interface RegisterTaskActionsContextValue {
-  launchTask: (payload: RegisterTaskRequestPayload) => Promise<string>
-  openTask: (taskId: string) => void
-  minimizeTask: (taskId: string) => void
-  dismissTask: (taskId: string) => void
-  refreshTask: (taskId: string) => Promise<void>
-}
-
 const RegisterTaskCenterContext = createContext<RegisterTaskCenterContextValue | null>(null)
 
 function readStoredDockFilter(): 'all' | 'running' | 'finished' {
@@ -309,7 +301,19 @@ const TaskStatusBlock = memo(function TaskStatusBlockInner({
 
   const copyLogs = async () => {
     try {
-      await navigator.clipboard.writeText((task.logs || []).join('\n'))
+      const text = (task.logs || []).join('\n')
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(text)
+      } else {
+        const textarea = document.createElement('textarea')
+        textarea.value = text
+        textarea.style.position = 'fixed'
+        textarea.style.opacity = '0'
+        document.body.appendChild(textarea)
+        textarea.select()
+        document.execCommand('copy')
+        document.body.removeChild(textarea)
+      }
       message.success('任务日志已复制')
     } catch {
       message.error('复制任务日志失败')
@@ -403,50 +407,14 @@ const TaskStatusBlock = memo(function TaskStatusBlockInner({
         </Space>
       </div>
 
-      <div
-        className="log-panel"
-        style={{
-          overflow: 'auto',
-          background: token.colorBgContainer,
-          border: `1px solid ${token.colorBorder}`,
-          borderRadius: 12,
-          padding: 12,
-          fontFamily: 'monospace',
-          fontSize: 12,
-          minHeight: 220,
-          maxHeight: 420,
-          userSelect: 'text',
-          WebkitUserSelect: 'text',
-          cursor: 'text',
-          whiteSpace: 'pre-wrap',
-        }}
-      >
-        {(task.logs || []).length === 0 ? (
-          <div style={{ color: token.colorTextTertiary }}>等待任务日志...</div>
-        ) : (
-          (task.logs || []).map((line, index) => {
-            const positive = line.includes('✓') || line.includes('成功')
-            const negative = line.includes('✗') || line.includes('失败') || line.includes('错误')
-            return (
-              <div
-                key={`${task.id}-log-${index}`}
-                style={{
-                  lineHeight: 1.5,
-                  color: positive ? token.colorSuccess : negative ? token.colorError : token.colorText,
-                }}
-              >
-                {line}
-              </div>
-            )
-          })
-        )}
-      </div>
+      <LogPanel logs={task.logs || []} taskId={task.id} />
     </div>
   )
 })
 
 export function RegisterTaskCenterProvider({ children }: { children: ReactNode }) {
   const [tasks, setTasks] = useState<ManagedRegisterTask[]>([])
+  const { token } = theme.useToken()
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null)
   const [completionVersion, setCompletionVersion] = useState(0)
   const [dockOpen, setDockOpen] = useState(false)
@@ -578,7 +546,8 @@ export function RegisterTaskCenterProvider({ children }: { children: ReactNode }
 
     const loadActiveTasks = async () => {
       try {
-        const data = (await apiFetch('/tasks')) as ServerRegisterTask[]
+        const resp = await apiFetch('/tasks') as { total: number; page: number; page_size: number; items: ServerRegisterTask[] }
+        const data = Array.isArray(resp) ? resp : (resp.items || [])
         if (cancelled || !Array.isArray(data)) return
         const restored = data
           .filter((item) => item?.id && !isTerminal(item.status))
@@ -823,6 +792,7 @@ export function RegisterTaskCenterProvider({ children }: { children: ReactNode }
         width={820}
         maskClosable
         destroyOnHidden={false}
+        styles={{ body: { maxHeight: '70vh', overflowY: 'auto' } }}
       >
         {activeTask ? (
           <TaskStatusBlock task={activeTask} onRefresh={() => refreshTask(activeTask.id)} />
@@ -975,7 +945,7 @@ export function RegisterTaskCenterProvider({ children }: { children: ReactNode }
                             </Paragraph>
                             <Space size={8} wrap>
                               {(task.success || 0) > 0 ? (
-                                <Text style={{ color: '#10b981' }}>
+                                <Text style={{ color: token.colorSuccess }}>
                                   <CheckCircleOutlined /> 成功 {task.success}
                                 </Text>
                               ) : null}

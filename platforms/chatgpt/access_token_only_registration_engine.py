@@ -85,7 +85,7 @@ class AccessTokenOnlyRegistrationEngine:
         log_message = f"[{timestamp}] {message}"
         self.logs.append(log_message)
         if self.callback_logger:
-            self.callback_logger(log_message)
+            self.callback_logger(message)
         if level == "error":
             logger.error(log_message)
         else:
@@ -100,6 +100,8 @@ class AccessTokenOnlyRegistrationEngine:
             "预授权被拦截",
             "authorize",
             "registration_disallowed",
+            "429",
+            "rate limit",
             "http 400",
             "创建账号失败",
             "未获取到 authorization code",
@@ -131,7 +133,7 @@ class AccessTokenOnlyRegistrationEngine:
                         self._log("=" * 60)
                     else:
                         self._log(f"整流程重试 {attempt + 1}/{self.max_retries} ...")
-                        time.sleep(1)
+                        time.sleep(3 + 2 * attempt)
 
                     # 1. 创建邮箱
                     email_data = self.email_service.create_email()
@@ -149,7 +151,8 @@ class AccessTokenOnlyRegistrationEngine:
                     first_name, last_name = generate_random_name()
                     birthdate = generate_random_birthday()
 
-                    self._log(f"邮箱: {email_addr}, 密码: {pwd}")
+                    self._log(f"邮箱: {email_addr}")
+                    self._log(f"密码: {pwd}")
                     self._log(f"注册信息: {first_name} {last_name}, 生日: {birthdate}")
 
                     # 使用包装器为底层客户端提供接码服务

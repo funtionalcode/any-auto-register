@@ -2,6 +2,9 @@
 import os
 import sys
 from contextlib import asynccontextmanager
+import logging
+_logger = logging.getLogger(__name__)
+
 from fastapi import FastAPI, Request
 from fastapi import HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -20,6 +23,7 @@ from api.auth import router as auth_router
 from api.mail_imports import router as mail_imports_router
 from api.outlook import router as outlook_router
 from api.contribution import router as contribution_router
+from api.mailbox import router as mailbox_router
 
 EXPECTED_CONDA_ENV = os.getenv("APP_CONDA_ENV", "any-auto-register")
 
@@ -39,19 +43,19 @@ def _detect_conda_env() -> str:
 
 def _print_runtime_info() -> None:
     current_env = _detect_conda_env()
-    print(f"[Runtime] Python: {sys.executable}")
-    print(f"[Runtime] Conda Env: {current_env or '未检测到'}")
+    _logger.info("Python: %s", sys.executable)
+    _logger.info("Conda Env: %s", current_env or "not detected")
     if EXPECTED_CONDA_ENV == "docker":
         return
     if current_env and current_env != EXPECTED_CONDA_ENV:
-        print(
-            f"[WARN] 当前环境为 '{current_env}'，推荐使用 '{EXPECTED_CONDA_ENV}' 启动，"
-            "否则 Turnstile Solver 可能因依赖缺失而无法启动。"
+        _logger.warning(
+            "Current env '%s', recommended '%s' for Turnstile Solver dependencies.",
+            current_env, EXPECTED_CONDA_ENV,
         )
     elif not current_env:
-        print(
-            f"[WARN] 未检测到 conda 环境，推荐使用 '{EXPECTED_CONDA_ENV}' 启动，"
-            "否则 Turnstile Solver 可能因依赖缺失而无法启动。"
+        _logger.warning(
+            "No conda env detected, recommended '%s' for Turnstile Solver dependencies.",
+            EXPECTED_CONDA_ENV,
         )
 
 
@@ -60,9 +64,9 @@ async def lifespan(app: FastAPI):
     _print_runtime_info()
     init_db()
     load_all()
-    print("[OK] 数据库初始化完成")
+    _logger.info("Database initialized")
     from core.registry import list_platforms
-    print(f"[OK] 已加载平台: {[p['name'] for p in list_platforms()]}")
+    _logger.info("Loaded platforms: %s", [p["name"] for p in list_platforms()])
     from core.scheduler import scheduler
     scheduler.start()
     from services.solver_manager import start_async
@@ -114,6 +118,7 @@ app.include_router(auth_router, prefix="/api")
 app.include_router(mail_imports_router, prefix="/api")
 app.include_router(outlook_router, prefix="/api")
 app.include_router(contribution_router, prefix="/api")
+app.include_router(mailbox_router, prefix="/api")
 
 
 @app.get("/api/solver/status")

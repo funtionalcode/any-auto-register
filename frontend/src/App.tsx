@@ -23,6 +23,7 @@ import RunningTasks from '@/pages/RunningTasks'
 import Login from '@/pages/Login'
 import { darkTheme, lightTheme } from './theme'
 import { apiFetch, clearToken, getToken } from '@/lib/utils'
+import { RegisterTaskCenterProvider } from '@/components/RegisterTaskCenter'
 
 const { Sider, Content } = Layout
 
@@ -140,9 +141,10 @@ function AppContent() {
   ]
 
   return (
-    <ConfigProvider theme={currentTheme} locale={zhCN}>
-      <AntdApp>
-      <Layout style={{ minHeight: '100vh' }}>
+    <RegisterTaskCenterProvider>
+      <ConfigProvider theme={currentTheme} locale={zhCN}>
+        <AntdApp>
+        <Layout style={{ minHeight: '100vh' }}>
         <Sider
           collapsible
           collapsed={collapsed}
@@ -243,12 +245,13 @@ function AppContent() {
             <Route path="/running-tasks" element={<RunningTasks />} />
             <Route path="/history" element={<TaskHistory />} />
             <Route path="/proxies" element={<Proxies />} />
-            <Route path="/settings" element={<Settings />} />
+                  <Route path="/settings" element={<Settings />} />
           </Routes>
         </Content>
       </Layout>
-      </AntdApp>
-    </ConfigProvider>
+        </AntdApp>
+      </ConfigProvider>
+    </RegisterTaskCenterProvider>
   )
 }
 

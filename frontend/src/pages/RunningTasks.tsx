@@ -103,9 +103,10 @@ export default function RunningTasks() {
   const load = useCallback(async () => {
     setLoading(true)
     try {
-      const data = (await apiFetch('/tasks')) as TaskSnapshot[]
+      const resp = await apiFetch('/tasks') as { total: number; page: number; page_size: number; items: TaskSnapshot[] }
+      const data: TaskSnapshot[] = Array.isArray(resp) ? resp : (resp.items || [])
       // sort: running first, then pending, then finished (newest first)
-      const order = { running: 0, pending: 1, done: 2, failed: 3, stopped: 4 }
+      const order: Record<string, number> = { running: 0, pending: 1, done: 2, failed: 3, stopped: 4 }
       const sorted = [...(data || [])].sort((a, b) => {
         const oa = order[a.status] ?? 9
         const ob = order[b.status] ?? 9

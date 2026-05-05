@@ -57,7 +57,7 @@ class AttemptResult:
 
 
 class RegisterTaskControl:
-    """协作式任务控制器：支持停止整个任务、跳过一个当前账号。"""
+    """协作式任务控制器：支持停止整个任务、跳过一个当前账号、手动输入验证码。"""
 
     def __init__(self):
         self._lock = threading.Lock()
@@ -66,6 +66,8 @@ class RegisterTaskControl:
         self._next_attempt_id = 1
         self._active_attempt_ids: set[int] = set()
         self._skip_active_attempt_ids: set[int] = set()
+        self._manual_otp: str | None = None
+        self._manual_otp_event = threading.Event()
 
     def request_stop(self) -> None:
         with self._lock:
@@ -116,6 +118,26 @@ class RegisterTaskControl:
         with self._lock:
             return self._stop_requested
 
+    def submit_manual_otp(self, code: str) -> None:
+        """提交手动验证码，唤醒正在等待验证码的线程。"""
+        with self._lock:
+            self._manual_otp = code.strip()
+            self._manual_otp_event.set()
+
+    def consume_manual_otp(self) -> str | None:
+        """消费手动验证码，如果没有则返回 None。"""
+        with self._lock:
+            code = self._manual_otp
+            self._manual_otp = None
+            self._manual_otp_event.clear()
+            return code
+
+    def wait_for_manual_otp(self, timeout: float = 0.5) -> str | None:
+        """等待手动验证码，timeout 秒内没有则返回 None。非阻塞轮询使用。"""
+        if self._manual_otp_event.wait(timeout=timeout):
+            return self.consume_manual_otp()
+        return None
+
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
             return {
@@ -123,6 +145,7 @@ class RegisterTaskControl:
                 "pending_skip_requests": self._pending_skip_requests,
                 "active_attempts": len(self._active_attempt_ids),
                 "targeted_skip_attempts": len(self._skip_active_attempt_ids),
+                "manual_otp_pending": self._manual_otp is not None,
             }
 
 

@@ -71,6 +71,12 @@ const SELECT_FIELDS: Record<string, { label: string; value: string }[]> = {
     { label: 'AT（Access Token，推荐）', value: 'at' },
     { label: 'RT（Refresh Token）', value: 'rt' },
   ],
+  chatgpt_upload_methods: [
+    { label: 'CPA', value: 'cpa' },
+    { label: 'Sub2API', value: 'sub2api' },
+    { label: 'Team Manager', value: 'team_manager' },
+    { label: 'CodexProxy', value: 'codex_proxy' },
+  ],
   external_apps_update_mode: [
     { label: 'latest semver tag（推荐）', value: 'tag' },
     { label: '分支 HEAD', value: 'branch' },
@@ -261,53 +267,6 @@ const TAB_ITEMS = [
     icon: <ApiOutlined />,
     sections: [
       {
-        title: 'CPA 面板',
-        desc: '注册完成后自动上传到 CPA 管理平台',
-        fields: [
-          { key: 'cpa_enabled', label: '启用自动上传', type: 'boolean' },
-          { key: 'cpa_api_url', label: 'API URL', placeholder: 'https://your-cpa.example.com' },
-          { key: 'cpa_api_key', label: 'API Key', secret: true },
-        ],
-      },
-      {
-        title: 'Sub2API 面板',
-        desc: '注册完成后自动上传到 Sub2API 管理后台',
-        fields: [
-          { key: 'sub2api_enabled', label: '启用自动上传', type: 'boolean' },
-          { key: 'sub2api_api_url', label: 'API URL', placeholder: 'https://your-sub2api.example.com' },
-          { key: 'sub2api_api_key', label: 'API Key', secret: true },
-          { key: 'sub2api_group_ids', label: '分组 ID', placeholder: '多个分组用英文逗号分隔，例如 2,4,8' },
-        ],
-      },
-      {
-        title: 'CPA 自动维护',
-        desc: '定时删除 status=error 的凭证，剩余数量低于阈值时自动按现有配置补注册 ChatGPT',
-        fields: [
-          { key: 'cpa_cleanup_enabled', label: '自动维护', type: 'select' },
-          { key: 'cpa_cleanup_interval_minutes', label: '检查间隔（分钟）', placeholder: '60' },
-          { key: 'cpa_cleanup_threshold', label: '最低凭证阈值', placeholder: '5' },
-          { key: 'cpa_cleanup_concurrency', label: '补注册并发数', placeholder: '1' },
-          { key: 'cpa_cleanup_register_delay_seconds', label: '每个注册延迟（秒）', placeholder: '0' },
-        ],
-      },
-      {
-        title: 'Team Manager',
-        desc: '上传到自建 Team Manager 系统',
-        fields: [
-          { key: 'team_manager_url', label: 'API URL', placeholder: 'https://your-tm.example.com' },
-          { key: 'team_manager_key', label: 'API Key', secret: true },
-        ],
-      },
-      {
-        title: 'CodexProxy',
-        desc: '注册完成后自动上传到 CodexProxy 管理平台',
-        fields: [
-          { key: 'codex_proxy_url', label: 'API URL', placeholder: 'https://your-codex-proxy.example.com' },
-          { key: 'codex_proxy_key', label: 'Admin Key', secret: true },
-          { key: 'codex_proxy_upload_type', label: '上传类型' },
-        ],
-      },
-      {
         title: 'SMSToMe 手机验证',
         desc: 'ChatGPT add_phone 阶段自动取号并轮询短信验证码',
         fields: [
@@ -396,6 +355,60 @@ const TAB_ITEMS = [
   },
 ]
 
+
+
+const CHATGPT_UPLOAD_SECTIONS: Record<string, { title: string; desc?: string; fields: FieldConfig[] }> = {
+  cpa: {
+    title: 'CPA 面板',
+    desc: '注册完成后自动上传到 CPA 管理平台',
+    fields: [
+      { key: 'cpa_enabled', label: '启用自动上传', type: 'boolean' },
+      { key: 'cpa_api_url', label: 'API URL', placeholder: 'https://your-cpa.example.com' },
+      { key: 'cpa_api_key', label: 'API Key', secret: true },
+    ],
+  },
+  sub2api: {
+    title: 'Sub2API 面板',
+    desc: '注册完成后自动上传到 Sub2API 管理后台',
+    fields: [
+      { key: 'sub2api_enabled', label: '启用自动上传', type: 'boolean' },
+      { key: 'sub2api_api_url', label: 'API URL', placeholder: 'https://your-sub2api.example.com' },
+      { key: 'sub2api_api_key', label: 'API Key', secret: true },
+      { key: 'sub2api_group_ids', label: '分组 ID', placeholder: '多个分组用英文逗号分隔，例如 2,4,8' },
+    ],
+  },
+  cpa_cleanup: {
+    title: 'CPA 自动维护',
+    desc: '定时删除 status=error 的凭证，剩余数量低于阈值时自动按现有配置补注册 ChatGPT',
+    fields: [
+      { key: 'cpa_cleanup_enabled', label: '自动维护', type: 'select' },
+      { key: 'cpa_cleanup_interval_minutes', label: '检查间隔（分钟）', placeholder: '60' },
+      { key: 'cpa_cleanup_threshold', label: '最低凭证阈值', placeholder: '5' },
+      { key: 'cpa_cleanup_concurrency', label: '补注册并发数', placeholder: '1' },
+      { key: 'cpa_cleanup_register_delay_seconds', label: '每个注册延迟（秒）', placeholder: '0' },
+    ],
+  },
+  team_manager: {
+    title: 'Team Manager',
+    desc: '上传到自建 Team Manager 系统',
+    fields: [
+      { key: 'team_manager_url', label: 'API URL', placeholder: 'https://your-tm.example.com' },
+      { key: 'team_manager_key', label: 'API Key', secret: true },
+    ],
+  },
+  codex_proxy: {
+    title: 'CodexProxy',
+    desc: '注册完成后自动上传到 CodexProxy 管理平台',
+    fields: [
+      { key: 'codex_proxy_url', label: 'API URL', placeholder: 'https://your-codex-proxy.example.com' },
+      { key: 'codex_proxy_key', label: 'Admin Key', secret: true },
+      { key: 'codex_proxy_upload_type', label: '上传类型' },
+    ],
+  },
+}
+
+const CHATGPT_UPLOAD_ORDER = ['cpa', 'sub2api', 'cpa_cleanup', 'team_manager', 'codex_proxy']
+
 interface FieldConfig {
   key: string
   label: string
@@ -471,6 +484,22 @@ function formatResultText(data: unknown) {
   } catch {
     return String(data)
   }
+}
+
+function parseUploadMethods(value: unknown): string[] {
+  if (Array.isArray(value)) return value.filter((v): v is string => typeof v === 'string' && v.trim() !== '')
+  if (typeof value !== 'string') return []
+  const text = value.trim()
+  if (!text) return []
+  try {
+    const parsed = JSON.parse(text)
+    if (Array.isArray(parsed)) return parsed.filter((v): v is string => typeof v === 'string' && v.trim() !== '')
+  } catch {}
+  return text.split(',').map((s) => s.trim()).filter(Boolean)
+}
+
+function serializeUploadMethods(methods: string[]): string {
+  return JSON.stringify(methods)
 }
 
 function normalizeDomainList(input: unknown): string[] {
@@ -1761,6 +1790,7 @@ export default function Settings() {
   const [saved, setSaved] = useState(false)
   const [activeTab, setActiveTab] = useState('register')
   const currentMailProviderRaw = String(Form.useWatch('mail_provider', form) || '')
+  const chatgptUploadMethods = Form.useWatch('chatgpt_upload_methods', form) || []
   const currentMailImportSource = String(Form.useWatch('mail_import_source', form) || 'microsoft')
   const currentMailProvider = resolveEffectiveMailProvider(currentMailProviderRaw, currentMailImportSource)
   const showFloatingSaveButton = activeTab === 'mailbox' || activeTab === 'chatgpt'
@@ -1820,6 +1850,7 @@ export default function Settings() {
       )
       data.cfworker_domains = parseStoredDomainList(data.cfworker_domains)
       data.cfworker_enabled_domains = parseStoredDomainList(data.cfworker_enabled_domains)
+      data.chatgpt_upload_methods = parseUploadMethods(data.chatgpt_upload_methods)
       data.cfworker_random_subdomain = parseBooleanConfigValue(data.cfworker_random_subdomain)
       data.cfworker_random_name_subdomain = parseBooleanConfigValue(data.cfworker_random_name_subdomain)
       data.contribution_enabled = parseBooleanConfigValue(data.contribution_enabled)
@@ -1883,6 +1914,7 @@ export default function Settings() {
 
       values.cfworker_domains = JSON.stringify(domains)
       values.cfworker_enabled_domains = JSON.stringify(enabledDomains)
+      values.chatgpt_upload_methods = serializeUploadMethods(values.chatgpt_upload_methods || [])
       if (domains.length > 0) {
         values.cfworker_domain = ''
       }
@@ -1911,6 +1943,7 @@ export default function Settings() {
         mail_import_source: values.mail_provider === 'applemail' ? 'applemail' : 'microsoft',
         cpa_enabled: values.cpa_enabled,
         sub2api_enabled: values.sub2api_enabled,
+        chatgpt_upload_methods: values.chatgpt_upload_methods,
         cfworker_domains: domains,
         cfworker_enabled_domains: enabledDomains,
         cfworker_domain: domains.length > 0 ? '' : values.cfworker_domain,
@@ -2016,12 +2049,23 @@ export default function Settings() {
                       {mailboxSections.selectedSection ? (
                         <ConfigSection key={`${mailboxSections.selectedSection.title}-selected`} section={mailboxSections.selectedSection} />
                       ) : null}
-                      <MailImportPanel form={form} />
-                      {currentMailProviderRaw === 'cfworker' ? <CFWorkerDomainPoolSection form={form} /> : null}
-                      {mailboxSections.remainingSections.map((section) => (
+                      {currentMailProviderRaw === 'mail_import' ? <MailImportPanel form={form} /> : null}
+                      {currentMailProvider === 'cfworker' ? <CFWorkerDomainPoolSection form={form} /> : null}
+                    </>
+                  ) : activeTab === 'chatgpt' ? (
+                    <>
+                      <Card title="上传方式" extra={<span style={{ fontSize: 12, color: '#7a8ba3' }}>选择注册成功后自动上传的目标平台</span>} style={{ marginBottom: 16 }}>
+                        <Form.Item name="chatgpt_upload_methods" label="启用上传方式" extra="仅勾选的方式会显示对应配置，注册成功后也会自动上传到已启用的方式">
+                          <Select mode="multiple" options={SELECT_FIELDS.chatgpt_upload_methods} style={{ width: '100%' }} placeholder="选择要启用的上传方式" />
+                        </Form.Item>
+                      </Card>
+                      {CHATGPT_UPLOAD_ORDER.filter((method) => chatgptUploadMethods.includes(method)).map((method) => {
+                        const section = CHATGPT_UPLOAD_SECTIONS[method]
+                        return section ? <ConfigSection key={section.title} section={section} /> : null
+                      })}
+                      {currentTab.sections.map((section) => (
                         <ConfigSection key={section.title} section={section} />
                       ))}
-                      {currentMailProviderRaw !== 'cfworker' ? <CFWorkerDomainPoolSection form={form} /> : null}
                     </>
                   ) : (
                     currentTab.sections.map((section) => (

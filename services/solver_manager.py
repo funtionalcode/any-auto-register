@@ -1,4 +1,8 @@
 """Turnstile Solver 进程管理 - 后端启动时自动拉起"""
+
+import logging
+_logger = logging.getLogger(__name__)
+
 import os
 import signal
 import subprocess
@@ -123,10 +127,10 @@ def start():
     global _proc, _log_file, _last_error
     with _lock:
         if not _solver_enabled():
-            print("[Solver] 已禁用，跳过自动启动")
+            _logger.info("Solver disabled, skipping auto-start")
             return
         if is_running():
-            print("[Solver] 已在运行")
+            _logger.info("Solver already running")
             return
         if _proc and _proc.poll() is not None:
             _proc = None
@@ -162,16 +166,16 @@ def start():
         for _ in range(30):
             time.sleep(1)
             if is_running():
-                print(f"[Solver] 已启动 PID={_proc.pid}")
+                _logger.info("Solver started PID=%s", _proc.pid)
                 return
             if _proc.poll() is not None:
                 _last_error = f"启动失败，退出码={_proc.returncode}"
-                print(f"[Solver] {_last_error}，日志: {log_path}")
+                _logger.error("Solver %s, log: %s", _last_error, log_path)
                 _proc = None
                 _close_log_file()
                 return
         _last_error = "启动超时"
-        print(f"[Solver] {_last_error}，日志: {log_path}")
+        _logger.error("Solver %s, log: %s", _last_error, log_path)
 
 
 def stop():
@@ -192,7 +196,7 @@ def stop():
                     proc.kill()
                     proc.wait(timeout=5)
                     signal_name = signal_name or "kill"
-            print(f"[Solver] 已停止 ({signal_name or 'unknown'})")
+            _logger.info("Solver stopped (%s)", signal_name or "unknown")
         _proc = None
         _close_log_file()
         _last_error = ""

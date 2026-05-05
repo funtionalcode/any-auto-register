@@ -1,4 +1,4 @@
-"""数据库模型 - SQLite via SQLModel"""
+"""数据库模型 - SQLite / PostgreSQL via SQLModel"""
 from datetime import datetime, timezone
 import os
 from typing import Optional
@@ -10,7 +10,21 @@ def _utcnow():
     return datetime.now(timezone.utc)
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///account_manager.db")
-engine = create_engine(DATABASE_URL)
+
+_connect_args = {}
+_pool_kwargs = {}
+if DATABASE_URL.startswith("postgresql"):
+    _pool_kwargs = {
+        "pool_size": 10,
+        "max_overflow": 20,
+        "pool_timeout": 30,
+        "pool_recycle": 1800,
+        "pool_pre_ping": True,
+    }
+else:
+    _connect_args = {"check_same_thread": False}
+
+engine = create_engine(DATABASE_URL, connect_args=_connect_args, **_pool_kwargs)
 
 
 class AccountModel(SQLModel, table=True):
@@ -69,6 +83,17 @@ class TaskRunModel(SQLModel, table=True):
     control_json: str = "{}"
     created_at: datetime = Field(default_factory=_utcnow, index=True)
     updated_at: datetime = Field(default_factory=_utcnow, index=True)
+
+
+class TaskLogLine(SQLModel, table=True):
+    """逐条任务日志 - 替代 task_runs.logs_json 的大字段存储"""
+    __tablename__ = "task_log_lines"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    task_id: str = Field(index=True)
+    line_no: int = 0
+    content: str = ""
+    created_at: datetime = Field(default_factory=_utcnow, index=True)
 
 
 class OutlookAccountModel(SQLModel, table=True):
@@ -150,6 +175,23 @@ class SKApiKeyUsageLog(SQLModel, table=True):
     success: bool = True
     error: str = ""
     created_at: datetime = Field(default_factory=_utcnow)
+
+
+class TempMailboxModel(SQLModel, table=True):
+    __tablename__ = "temp_mailboxes"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    email: str = Field(index=True)
+    provider: str = ""
+    account_id: str = ""
+    extra_json: str = "{}"
+    created_at: datetime = Field(default_factory=_utcnow)
+
+    def get_extra(self) -> dict:
+        return json.loads(self.extra_json or "{}")
+
+    def set_extra(self, d: dict):
+        self.extra_json = json.dumps(d, ensure_ascii=False)
 
 
 class ApiAccessLog(SQLModel, table=True):

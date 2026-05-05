@@ -8,6 +8,7 @@ import {
   CloseCircleOutlined,
   SwapRightOutlined,
   SwapLeftOutlined,
+  EditOutlined,
 } from '@ant-design/icons'
 import { apiFetch } from '@/lib/utils'
 
@@ -18,6 +19,9 @@ export default function Proxies() {
   const [checking, setChecking] = useState(false)
   const [loading, setLoading] = useState(false)
   const [selectedRowKeys, setSelectedRowKeys] = useState<Key[]>([])
+  const [editingId, setEditingId] = useState<number | null>(null)
+  const [editingUrl, setEditingUrl] = useState('')
+  const [editingRegion, setEditingRegion] = useState('')
 
   const load = async () => {
     setLoading(true)
@@ -106,6 +110,36 @@ export default function Proxies() {
     load()
   }
 
+  const startEdit = (record: any) => {
+    setEditingId(record.id)
+    setEditingUrl(record.url)
+    setEditingRegion(record.region || '')
+  }
+
+  const cancelEdit = () => {
+    setEditingId(null)
+    setEditingUrl('')
+    setEditingRegion('')
+  }
+
+  const saveEdit = async (id: number) => {
+    if (!editingUrl.trim()) {
+      message.error('代理地址不能为空')
+      return
+    }
+    try {
+      await apiFetch(`/proxies/${id}`, {
+        method: 'PUT',
+        body: JSON.stringify({ url: editingUrl.trim(), region: editingRegion.trim() }),
+      })
+      message.success('编辑成功')
+      cancelEdit()
+      load()
+    } catch (e: any) {
+      message.error(`编辑失败: ${e.message}`)
+    }
+  }
+
   const check = async () => {
     setChecking(true)
     await apiFetch('/proxies/check', { method: 'POST' })
@@ -120,13 +154,33 @@ export default function Proxies() {
       title: '代理地址',
       dataIndex: 'url',
       key: 'url',
-      render: (text: string) => <span style={{ fontFamily: 'monospace', fontSize: 12 }}>{text}</span>,
+      render: (text: string, record: any) =>
+        editingId === record.id ? (
+          <Input
+            value={editingUrl}
+            onChange={(e) => setEditingUrl(e.target.value)}
+            style={{ fontFamily: 'monospace', fontSize: 12 }}
+            onPressEnter={() => saveEdit(record.id)}
+          />
+        ) : (
+          <span style={{ fontFamily: 'monospace', fontSize: 12 }}>{text}</span>
+        ),
     },
     {
       title: '地区',
       dataIndex: 'region',
       key: 'region',
-      render: (text: string) => text || '-',
+      render: (text: string, record: any) =>
+        editingId === record.id ? (
+          <Input
+            value={editingRegion}
+            onChange={(e) => setEditingRegion(e.target.value)}
+            style={{ width: 120 }}
+            onPressEnter={() => saveEdit(record.id)}
+          />
+        ) : (
+          text || '-'
+        ),
     },
     {
       title: '成功/失败',
@@ -152,25 +206,37 @@ export default function Proxies() {
     {
       title: '操作',
       key: 'action',
-      render: (_: any, record: any) => (
-        <Space>
-          <Button
-            type="text"
-            size="small"
-            icon={record.is_active ? <SwapLeftOutlined /> : <SwapRightOutlined />}
-            onClick={() => toggle(record.id)}
-          />
-          <Popconfirm
-            title="确认删除该代理吗？"
-            onConfirm={() => del(record.id)}
-            okText="删除"
-            cancelText="取消"
-            okButtonProps={{ danger: true }}
-          >
-            <Button type="text" size="small" danger icon={<DeleteOutlined />} />
-          </Popconfirm>
-        </Space>
-      ),
+      render: (_: any, record: any) =>
+        editingId === record.id ? (
+          <Space>
+            <Button type="link" size="small" onClick={() => saveEdit(record.id)}>保存</Button>
+            <Button type="link" size="small" onClick={cancelEdit}>取消</Button>
+          </Space>
+        ) : (
+          <Space>
+            <Button
+              type="text"
+              size="small"
+              icon={<EditOutlined />}
+              onClick={() => startEdit(record)}
+            />
+            <Button
+              type="text"
+              size="small"
+              icon={record.is_active ? <SwapLeftOutlined /> : <SwapRightOutlined />}
+              onClick={() => toggle(record.id)}
+            />
+            <Popconfirm
+              title="确认删除该代理吗？"
+              onConfirm={() => del(record.id)}
+              okText="删除"
+              cancelText="取消"
+              okButtonProps={{ danger: true }}
+            >
+              <Button type="text" size="small" danger icon={<DeleteOutlined />} />
+            </Popconfirm>
+          </Space>
+        ),
     },
   ]
 
